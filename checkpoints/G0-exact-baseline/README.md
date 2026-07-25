@@ -3,10 +3,11 @@
 ## 当前状态
 
 `baseline_build = PASS`，`persistent_assets = PASS`，
-`fresh_recovery_rehearsal = PENDING`。
+`fresh_recovery_rehearsal = PASS`。
 
-本检查点只证明基线可构建、可启动，并冻结全部输入；它不开始 Haskell
-authority 开发，也不继承 `020-closure-map` 的施工范围。
+G0 已关闭。本检查点证明精确基线可构建、可启动，并可只依靠 GitHub 与
+Library 从新目录恢复。它不开始 Haskell authority 开发，也不继承
+`020-closure-map` 的施工范围。
 
 ## 冻结身份
 
@@ -102,6 +103,35 @@ tree 均通过。
   - turn diff；
   全部 PASS。
 
+## 新目录恢复演练
+
+恢复演练从 GitHub commit
+`597f9a375a431aa6d58e875b076350dcf6b1362c` 和下列七个锁定资产开始，
+没有读取原源码树、原 Cargo cache 或原工具链安装目录。
+
+结果：
+
+- 七个远端资产 SHA-256 与源码 ZIP comment：PASS；
+- Rust 1.95.0、GHC 9.14.1、Cabal 3.16.1.0、HLS 2.14.0.0 恢复与
+  smoke compilation：PASS；
+- 原 reference binary 字节恢复：
+  `88b3f7c8868db75a7bda36fb080ea500949a10fa59dce325ee71d7371ca1129b`；
+- 原 reference 的 version/help/exec/app-server smoke：PASS；
+- 冻结 Haskell reference 38/38 模块离线构建：PASS；
+- Haskell differential：PASS；
+- 精确 Rust 源码 `--frozen --offline` release 重编：PASS，`17m 31s`；
+- 恢复重编 binary SHA-256：
+  `4edda46b1bbedeb47c3782b7db1b446ec18b96c66727a437bb514b13b162ae7f`；
+- 恢复重编 binary 的四项 smoke：PASS。
+
+恢复重编 binary 与原 reference 不逐字节相同。两者都包含 `.debug_info` 和
+`.debug_line`；字符串表分别记录原构建目录和新恢复目录。因此 G0 分开证明：
+
+1. exact reference 字节可恢复且哈希完全相同；
+2. 精确源码可在不同绝对目录离线重建并正常启动。
+
+详细证据见 `recovery-report.md`。
+
 ## 持久资产
 
 源码、小锁文件、feature tree 和恢复脚本保存在本分支。大型输入和结果保存在
@@ -114,5 +144,8 @@ Library：
 - `/lojita-rust-1.95.0-linux-x86_64.tar`
 - `/Lojita_test/codex-g0-offline-deps-98d28a.tar.gz`
 - `/Lojita_test/codex-98d28a-x86_64-unknown-linux-gnu-release.gz`
+- `/Lojita_test/G0-exact-baseline-recovery-report.zh-CN.md`
+- `/Lojita_test/G0-exact-baseline-recovery-evidence.tar.gz`
 
-只有从这些远端持久输入在全新目录完成恢复、重编和 smoke 后，G0 才能关闭。
+这些远端输入已在全新目录完成恢复、重编和 smoke。G0 关闭，下一步只允许
+进入 G1 decision ledger；本提交不授权直接开始 Haskell authority 实现。

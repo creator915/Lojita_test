@@ -4,7 +4,7 @@
   "status": {
     "baseline_build": "passed",
     "persistent_assets": "passed",
-    "fresh_recovery_rehearsal": "pending"
+    "fresh_recovery_rehearsal": "passed"
   },
   "upstream": {
     "repository": "https://github.com/openai/codex",
@@ -50,6 +50,31 @@
     "v8_archive_sha256": "8628658f598279bfd2ed04b00844976087a6ba28e9d74e98762b6c3bb1a938e8",
     "v8_binding_sha256": "5db3ec0783531d12862a3f38dd5a679273550e67962260b81f07e612a68a0c24"
   },
+  "recovery": {
+    "performed_at_utc": "2026-07-25T20:51:54Z",
+    "github_checkpoint_commit": "597f9a375a431aa6d58e875b076350dcf6b1362c",
+    "locked_library_assets": 7,
+    "source_and_asset_verification": "passed",
+    "toolchain_restore": "passed",
+    "reference_binary_bytes_restored": true,
+    "reference_binary_smoke": "passed",
+    "haskell_offline_build": "passed",
+    "haskell_differential": "passed",
+    "rust_frozen_offline_release_build": "passed",
+    "rust_build_duration": "17m 31s",
+    "rebuilt_binary_size": 1289143040,
+    "rebuilt_binary_sha256": "4edda46b1bbedeb47c3782b7db1b446ec18b96c66727a437bb514b13b162ae7f",
+    "rebuilt_elf_build_id": "a0852615d7dcb1e8e8409633d78f726ae83b5c58",
+    "rebuilt_binary_smoke": "passed",
+    "binary_byte_difference_expected": "Both binaries contain DWARF line tables with different absolute build roots."
+  },
+  "evidence": {
+    "report_sha256": "cd6fc84ea1b048fd23dfb42c03c3e0501cf1ea805935284699d8d84338592639",
+    "archive_sha256": "f46c9e80c4392d38f90527ecedc7b039e1bc1ba8de48d45bbf112981cd3137e5",
+    "rust_build_log_sha256": "dcccb5e0daa484c5701fd9079c461539f0d68d4483dba58c23b9dfe14e5c8976",
+    "haskell_log_sha256": "352fd34feb50ae99c99ceb7b8ff56e43a70a7b6862a90aace56b76b0c55e2776",
+    "toolchain_restore_log_sha256": "fa895483639c7c135579cb55ce9fa973e0b188e60597baa06c3aaf428d38ef76"
+  },
   "library": {
     "source_zip": {
       "library_file_id": "libfile_69a1d2fe52e48191a0581bdc298cbf0c",
@@ -78,6 +103,14 @@
     "reference_binary": {
       "library_file_id": "libfile_d0cd64fb5bec8191937a914ac89b52d1",
       "path": "/Lojita_test/codex-98d28a-x86_64-unknown-linux-gnu-release.gz"
+    },
+    "recovery_report": {
+      "library_file_id": "libfile_e7326be7f5f881919f00a5aa1cfebab8",
+      "path": "/Lojita_test/G0-exact-baseline-recovery-report.zh-CN.md"
+    },
+    "recovery_evidence": {
+      "library_file_id": "libfile_2c547db34ff88191871efbf2d588093f",
+      "path": "/Lojita_test/G0-exact-baseline-recovery-evidence.tar.gz"
     }
   }
 }

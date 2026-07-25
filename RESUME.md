@@ -1,25 +1,24 @@
-# Resume from G0
+# Resume after G0
 
-Do not edit the Haskell authority or Rust orchestration code yet.
+G0 is closed. The exact Rust baseline and its recovery path are usable.
 
 Current authoritative state:
 
 - branch: `agent/haskell-orchestration-kernel`
 - upstream: `98d28aab54ed86714901b6619400598598876dd0`
 - baseline release build: PASS
-- persistent vendor/V8 and exact binary: PASS
-- fresh recovery rehearsal: pending
+- persistent vendor/V8 and exact reference binary: PASS
+- fresh recovery rehearsal: PASS
+- Haskell reference offline build and differential: PASS
 
-Resume only by:
+The next allowed activity is G1:
 
-1. cloning this branch into a new directory;
-2. materializing the seven Library assets named in
-   `checkpoints/G0-exact-baseline/README.md`;
-3. running `verify-library-assets.sh`;
-4. restoring the toolchains under a new prefix;
-5. verifying and smoking the restored exact binary;
-6. rebuilding the exact source with `build-reference.sh`;
-7. rebuilding/testing the frozen Haskell reference;
-8. recording all hashes and closing G0.
+1. build the branch-level decision ledger from the frozen source;
+2. classify each candidate branch as Authority, Effect, Invariant, or
+   Presentation;
+3. review the resulting minimum Turn decision boundary;
+4. only then decide whether G2 Rust reference-machine implementation begins.
 
-If any step fails, leave `development_allowed=false` and stop at G0.
+Do not revive the former 36-file translation as an implementation baseline.
+Do not substitute an npm binary or a different Codex version for the frozen
+Rust oracle.
