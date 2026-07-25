@@ -1,0 +1,38 @@
+codex-main/
+  codex-rs/
+    app-server/
+    apply-patch/
+    cli/
+    core/
+    exec/
+    models-manager/
+    prompts/
+    protocol/
+    tools/
+  codex-cli/
+  docs/
+  patches/
+  tools/
+
+Tracked baseline statistics:
+  archive entries: 6083
+  regular files:   5316
+  directories:     766
+
+High-value control-flow anchors:
+  codex-rs/cli/src/main.rs
+  codex-rs/exec/src/lib.rs
+  codex-rs/app-server/src/request_processors/thread_processor.rs
+  codex-rs/core/src/thread_manager.rs
+  codex-rs/core/src/session/session.rs
+  codex-rs/core/src/session/handlers.rs
+  codex-rs/core/src/session/turn.rs
+  codex-rs/core/src/tasks/mod.rs
+  codex-rs/core/src/tasks/regular.rs
+  codex-rs/core/src/client.rs
+  codex-rs/core/src/stream_events_utils.rs
+  codex-rs/core/src/tools/router.rs
+  codex-rs/core/src/tools/registry.rs
+  codex-rs/core/src/tools/parallel.rs
+  codex-rs/core/src/tools/spec_plan.rs
+
