@@ -1,0 +1,17 @@
+platform=Ubuntu 24.04.3 LTS
+arch=x86_64
+glibc=2.39-0ubuntu8.6
+gcc_binary=13.3.0
+gcc_package=4:13.2.0-7ubuntu1
+binutils=2.42-4ubuntu2.5
+make=4.3-4.1build2
+openssl=3.0.13-0ubuntu3.6
+libssl=3.0.13-0ubuntu3.6
+pkg_config=absent
+openssl_include_dir=/usr/include
+openssl_lib_dir=/usr/lib/x86_64-linux-gnu
+rustc=1.95.0 (59807616e1fa2540724bfbac14d7976d7e4a3860)
+cargo=1.95.0 (f2d3ce0bd7f24a49f8f72d9000448f8838c4e850)
+ghc=9.14.1
+cabal=3.16.1.0
+target=x86_64-unknown-linux-gnu

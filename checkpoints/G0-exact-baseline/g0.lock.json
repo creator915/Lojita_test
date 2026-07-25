@@ -1,0 +1,83 @@
+{
+  "schema": 1,
+  "gate": "G0",
+  "status": {
+    "baseline_build": "passed",
+    "persistent_assets": "passed",
+    "fresh_recovery_rehearsal": "pending"
+  },
+  "upstream": {
+    "repository": "https://github.com/openai/codex",
+    "commit": "98d28aab54ed86714901b6619400598598876dd0",
+    "commit_time_utc": "2026-07-04T00:18:26Z",
+    "source_zip_sha256": "aa55787e86544740aaa3f068859479f4cca5655355975d81f02ff020c61ba21d",
+    "cargo_lock_sha256": "d0751922957c36865b9b963926884e40ff7deb61ed2aa177979e8574bd353a88"
+  },
+  "toolchains": {
+    "rustc": "1.95.0 (59807616e1fa2540724bfbac14d7976d7e4a3860)",
+    "cargo": "1.95.0 (f2d3ce0bd7f24a49f8f72d9000448f8838c4e850)",
+    "ghc": "9.14.1",
+    "cabal": "3.16.1.0",
+    "hls": "2.14.0.0",
+    "target": "x86_64-unknown-linux-gnu",
+    "rust_archive_sha256": "9a397a72d9262be71f0f263f77e198b806b5a5e1ad5509e898d8bb69eba2cbfc",
+    "haskell_core_archive_sha256": "10c4983871cc80ce4819c96e0cb273bff0e9a0807f43994b3fac64bdcc9605f4",
+    "hls_archive_sha256": "f9939d0a235550f5d05d705b256c8cbf362893bac3628e62de0824f9a91c1cec"
+  },
+  "rust_build": {
+    "profile": "release",
+    "features": "default",
+    "cargo_frozen": true,
+    "cargo_offline": true,
+    "code_bwrap_sha256": null,
+    "reference_binary_size": 1288986208,
+    "reference_binary_sha256": "88b3f7c8868db75a7bda36fb080ea500949a10fa59dce325ee71d7371ca1129b",
+    "reference_binary_gzip_sha256": "da45948f6a2e4585e92867444c094756447ffae54aecd64f0c783012b9b449fd",
+    "elf_build_id": "c237d3bde8b173c560614a9cdeda560a82d296cd",
+    "feature_tree_sha256": "f7c64cd2d4055884b92ed5ae8903dfa2c2bd35a2872471995096850663839d94"
+  },
+  "haskell_reference": {
+    "archive_sha256": "ff131f6b1f0d5d2d829e684c4d0e546620ac63c7410d23a4f89164bce78edc21",
+    "cabal_freeze_sha256": "8728368e93c0b8fedf854d2520a62d94de0d1df662cbd96ff75404533192ae69",
+    "modules_built": 38,
+    "differential": "passed"
+  },
+  "offline_dependencies": {
+    "archive_sha256": "65a71ebcdb849ed409645bd9c3a924b64dbd1bdb86b485a3a3d450e1cbd8dc68",
+    "vendor_tree_sha256": "9ce2d75981e7c4b16e3c50ee0f7991ebdb37b4bcb81885f4e46ac3ecae96ffc0",
+    "vendor_package_directories": 1205,
+    "vendor_files": 73500,
+    "v8_archive_sha256": "8628658f598279bfd2ed04b00844976087a6ba28e9d74e98762b6c3bb1a938e8",
+    "v8_binding_sha256": "5db3ec0783531d12862a3f38dd5a679273550e67962260b81f07e612a68a0c24"
+  },
+  "library": {
+    "source_zip": {
+      "library_file_id": "libfile_69a1d2fe52e48191a0581bdc298cbf0c",
+      "path": "/codex-main.zip"
+    },
+    "haskell_reference": {
+      "library_file_id": "libfile_0c64cf1d22908191b85f834708b1190c",
+      "path": "/codex-kernel-hs-0.1.0.0.tar.gz"
+    },
+    "haskell_toolchain": {
+      "library_file_id": "libfile_4fdcd21fab648191bb74d1d0d3ad8c47",
+      "path": "/lojita-haskell-core-ghc-9.14.1-cabal-3.16.1.0-ubuntu24.04-x86_64.tar"
+    },
+    "hls_toolchain": {
+      "library_file_id": "libfile_5446f1f33c7c819188c14ca541e32bae",
+      "path": "/lojita-haskell-hls-2.14.0.0-ubuntu24.04-x86_64.tar"
+    },
+    "rust_toolchain": {
+      "library_file_id": "libfile_21c8af360c9881918a7418d38ee6d181",
+      "path": "/lojita-rust-1.95.0-linux-x86_64.tar"
+    },
+    "offline_dependencies": {
+      "library_file_id": "libfile_a0423bc4874c8191a9f92b872faeaf1d",
+      "path": "/Lojita_test/codex-g0-offline-deps-98d28a.tar.gz"
+    },
+    "reference_binary": {
+      "library_file_id": "libfile_d0cd64fb5bec8191937a914ac89b52d1",
+      "path": "/Lojita_test/codex-98d28a-x86_64-unknown-linux-gnu-release.gz"
+    }
+  }
+}

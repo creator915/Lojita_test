@@ -1,0 +1,10 @@
+{
+  "project": "codex-haskell-orchestration-kernel",
+  "gate": "G0",
+  "status": "recovery_pending",
+  "branch": "agent/haskell-orchestration-kernel",
+  "upstream_commit": "98d28aab54ed86714901b6619400598598876dd0",
+  "reference_binary_sha256": "88b3f7c8868db75a7bda36fb080ea500949a10fa59dce325ee71d7371ca1129b",
+  "next_action": "Clone this branch into a fresh directory, materialize only the locked Library assets, then run the recovery build and smoke tests.",
+  "development_allowed": false
+}
