@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "project": "codex-haskell-authority",
+  "created_at": "2026-07-25",
+  "upstream": {
+    "repository": "https://github.com/openai/codex",
+    "commit": "98d28aab54ed86714901b6619400598598876dd0",
+    "archive_name": "codex-main.zip",
+    "archive_size_bytes": 11964353,
+    "archive_sha256": "aa55787e86544740aaa3f068859479f4cca5655355975d81f02ff020c61ba21d",
+    "archive_entries": 6083,
+    "regular_files": 5316,
+    "directories": 766,
+    "content_tree_sha256": "5331dc5096238681b54657e4e394b041a4d558ee9fb09f75fee30088a9e51ffe",
+    "content_tree_hash_command": "find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum"
+  },
+  "reference_kernel": {
+    "archive_name": "codex-kernel-hs-0.1.0.0.tar.gz",
+    "archive_size_bytes": 37428,
+    "archive_sha256": "ff131f6b1f0d5d2d829e684c4d0e546620ac63c7410d23a4f89164bce78edc21",
+    "role": "reference replay kernel and fixtures only",
+    "drop_in_cli": false
+  },
+  "toolchains": {
+    "ghc": "9.14.1",
+    "cabal": "3.16.1.0",
+    "haskell_language_server": "2.14.0.0",
+    "rust": "1.95.0",
+    "cargo": "1.95.0"
+  }
+}
+
