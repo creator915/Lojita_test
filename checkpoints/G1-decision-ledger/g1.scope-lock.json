@@ -1,0 +1,38 @@
+{
+  "project": "codex-haskell-orchestration-kernel",
+  "gate": "G1",
+  "status": "stopped_for_scope_review",
+  "upstream_commit": "98d28aab54ed86714901b6619400598598876dd0",
+  "source_zip_sha256": "aa55787e86544740aaa3f068859479f4cca5655355975d81f02ff020c61ba21d",
+  "g0_commit": "f8151ae272b611e320acd9e74e384cb5a84bf4e9",
+  "entry_file_count": 13,
+  "old_control_state_candidate_count": 17,
+  "old_control_candidate_count": 13,
+  "old_state_candidate_count": 4,
+  "forbidden_domains": [
+    "agent",
+    "guardian",
+    "startup"
+  ],
+  "stop_triggers": [
+    {
+      "id": "G1-STOP-001",
+      "class": "Authority",
+      "domain": "startup",
+      "source": "codex-rs/core/src/tasks/regular.rs:64-70",
+      "haskell_constructor": null,
+      "constructor_status": "blocked_pending_scope_review"
+    },
+    {
+      "id": "G1-STOP-002",
+      "class": "Authority",
+      "domain": "guardian",
+      "source": "codex-rs/core/src/session/handlers.rs:864-870",
+      "haskell_constructor": null,
+      "constructor_status": "blocked_pending_scope_review"
+    }
+  ],
+  "ledger_complete": false,
+  "g2_allowed": false,
+  "implementation_files_changed": 0
+}

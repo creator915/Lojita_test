@@ -1,11 +1,16 @@
 {
   "project": "codex-haskell-orchestration-kernel",
-  "gate": "G0",
-  "status": "passed",
+  "gate": "G1",
+  "status": "stopped_for_scope_review",
   "branch": "agent/haskell-orchestration-kernel",
   "upstream_commit": "98d28aab54ed86714901b6619400598598876dd0",
   "reference_binary_sha256": "88b3f7c8868db75a7bda36fb080ea500949a10fa59dce325ee71d7371ca1129b",
   "recovery_rebuild_sha256": "4edda46b1bbedeb47c3782b7db1b446ec18b96c66727a437bb514b13b162ae7f",
-  "next_action": "Begin G1 by creating the branch-level decision ledger; do not implement Haskell authority before G1 is reviewed.",
-  "development_allowed": true
+  "g1_stop_triggers": [
+    "codex-rs/core/src/tasks/regular.rs:64-70 (startup)",
+    "codex-rs/core/src/session/handlers.rs:864-870 (guardian)"
+  ],
+  "ledger_complete": false,
+  "next_action": "Review the G1 startup and Guardian boundary triggers; do not resume branch classification or begin G2 until the construction scope is explicitly revised.",
+  "development_allowed": false
 }

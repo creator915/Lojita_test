@@ -1,23 +1,29 @@
-# Resume after G0
+# Resume at G1 scope review
 
-G0 is closed. The exact Rust baseline and its recovery path are usable.
+G0 remains closed and valid. G1 is stopped and has not passed.
 
 Current authoritative state:
 
 - branch: `agent/haskell-orchestration-kernel`
 - upstream: `98d28aab54ed86714901b6619400598598876dd0`
-- baseline release build: PASS
-- persistent vendor/V8 and exact reference binary: PASS
-- fresh recovery rehearsal: PASS
-- Haskell reference offline build and differential: PASS
+- G0 baseline and recovery: PASS
+- G1 decision ledger: INCOMPLETE
+- G1 status: `STOP_REVIEW`
+- G2 implementation: FORBIDDEN
 
-The next allowed activity is G1:
+Two confirmed Authority branches hit domains that G1 explicitly forbids:
 
-1. build the branch-level decision ledger from the frozen source;
-2. classify each candidate branch as Authority, Effect, Invariant, or
-   Presentation;
-3. review the resulting minimum Turn decision boundary;
-4. only then decide whether G2 Rust reference-machine implementation begins.
+1. `core/src/tasks/regular.rs:64-70` — startup prewarm controls whether and
+   how the Turn enters sampling.
+2. `core/src/session/handlers.rs:864-870` — Guardian denial status controls
+   whether an exact-action approval is injected into history.
+
+Resume only by reviewing and explicitly revising the construction boundary.
+Do not continue enumerating the remaining branches, assign Haskell
+constructors to these triggers, or follow their call graphs before that review.
+
+The evidence and the unchanged 17-file candidate ceiling are recorded in
+`checkpoints/G1-decision-ledger/G1-decision-ledger-stop-review.zh-CN.md`.
 
 Do not revive the former 36-file translation as an implementation baseline.
 Do not substitute an npm binary or a different Codex version for the frozen
