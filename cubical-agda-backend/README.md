@@ -9,10 +9,10 @@
 | --- | --- | --- |
 | 1. stock Agda -> MAlonzo -> Haskell -> GHC 二进制 | **已实现并验收** | 锁定 Stock Agda 2.9.0 / MAlonzo / GHC 9.10.3；独立二进制审计 |
 | 2. 跨进程 `Term + Type` packet | **已有实现** | 仍需 clean-clone overlay 构建验收 |
-| 3. 最终程序进程内 runtime NbE | **已实现并验收** | cctt-informed typed runtime library；三路调度集成仍开放 |
+| 3. 最终程序进程内 runtime NbE | **未完成（1/11）** | 仅进程/数据边界完成；现有自定义 AST 原型不是 Agda runtime 集成 |
 
 当前可用的是候选 CubicalChez 后端、checked typed residual/packet、编译期
-NbE adapter 候选与完整的安全拒绝门禁。目标 1 和目标 3 的独立组件已关闭；
+NbE adapter 候选与完整的安全拒绝门禁。当前只有目标 1 关闭；
 三路调度和总体发布门禁未关闭前，不得将仓库标记为完整交付。
 
 ## 目标数据流
@@ -22,7 +22,7 @@ Agda source
    |
    +-- native-safe ------> stock Agda/MAlonzo -> erased Haskell -> binary   [IMPLEMENTED]
    +-- cross-process ----> checked Term + Type packet                       [IMPLEMENTED]
-   `-- runtime-higher ---> linked in-process runtime NbE             [IMPLEMENTED]
+   `-- runtime-higher ---> linked in-process runtime NbE             [NOT IMPLEMENTED]
 ```
 
 跨进程只传输 Agda Internal `Term + Type` 协议数据。NbE 语义值、closure 和
@@ -36,7 +36,7 @@ Agda source
 ├── DELIVERY_CHECKLIST.md        唯一验收清单
 ├── src/                         CubicalChez 编译器后端
 ├── runtime/agda-2.9/            v2 typed Term 运行时 overlay 源码
-├── runtime/nbe/                 最终进程 typed runtime NbE 库
+├── runtime/nbe/                 自定义 AST runtime NbE 原型（非目标 3 验收实现）
 ├── config/                      NbE/provider/性能锁定信息
 ├── compat/                      锁定上游的显式兼容补丁
 ├── test/fixtures/               Agda 测试输入
@@ -178,8 +178,8 @@ make verify-v2-runtime
 ## 当前边界
 
 - Chez 仍是独立候选静态目标；目标 1 由 `bin/cubical-agda-native` 的原版 MAlonzo/GHC 路径验收。
-- 编译器进程内 adapter candidate 不是目标 3 证据；目标 3 由 `runtime/nbe/`
-  的独立静态库、最终可执行文件与专项门禁验收。
+- 编译器进程内 adapter candidate 不是目标 3 证据；`runtime/nbe/` 的自定义
+  `Ty`/`Term`、静态库和命令行 harness 也未接通 Agda Internal 输入或最终用户程序。
 - `t11/t11b` 等已知残余不得进入无类型执行路径。
-- 编译器进程的默认 `nbe` provider lock 仍保持未选择和安全拒绝；目标 3 的
-  独立 runtime provider 已锁定并验收。
+- 编译器进程的默认 `nbe` provider lock 仍保持未选择和安全拒绝；cctt 目前仅为
+  锁定的算法参考，并未作为 runtime library 链接或完成目标 3 验收。

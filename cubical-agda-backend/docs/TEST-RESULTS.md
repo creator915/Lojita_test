@@ -16,7 +16,9 @@ under isolated GHC `-O2`. Its Higher/typed-residual RSS p95 is `1.194333`
 against the unchanged `1.30` ceiling. The earlier O0 result remains retained
 as an honest historical fail (`1.303373 > 1.30`). The compiler-process
 candidate's promotion identity and owner-approved production thresholds remain
-open; the separate Goal 3 runtime provider is selected.
+open; the Goal 3 provider remains unselected. cctt is pinned only as an
+algorithm reference because it is not linked and does not expose the required
+Agda runtime-library interface.
 Goal 1 now has separate Linux x86-64 evidence from official stock Agda commit
 `84497d0`, MAlonzo and GHC 9.10.3. The maintained lane and a clone of local
 commit `7578f56` both pass two compile/run cases and two fail-closed cases.
@@ -24,11 +26,16 @@ The controlled collector now fails closed before staging or replacing prior
 evidence when the fixed host/power/quiescence contract is not met. An earlier
 Battery Power retry was correctly rejected without staging or replacement;
 the subsequent AC-powered release run published 3,219 raw evidence files.
-Goal 3 now has separate final-process evidence: the cctt-informed typed runtime
-passes 24 positive/negative/link/lifecycle cases, and the external oracle gate
-typechecks the pinned Boundary/Higher modules with Agda 2.9 + Cubical v0.9
-before comparing five runtime scenarios. This evidence does not come from the
-compiler-process adapter.
+Goal 3 remains at 1/11. The custom-AST prototype passes 24
+positive/negative/link/lifecycle self-tests. The external script typechecks the
+pinned Boundary/Higher modules and separately checks five hand-written packet
+expectations; it does not extract Agda Internal `Term + Type` or execute a true
+same-input oracle/candidate differential. These results are prototype evidence
+only. They do not prove cctt linkage, Agda ABI integration, final-user-program
+linkage, semantic correctness, or CI coverage for Goal 3.
+The maintained `semantic-negative-index.packet` reproducer normalizes a closed,
+well-typed higher-order function to a term containing `Var (-2)`. The prototype
+gate records this as `KNOWN-SEMANTIC-BUG`, not `PASS`.
 
 ## Environment
 
@@ -49,8 +56,8 @@ the maintained source/input hashes and awaits an independent upstream match.
 
 | Target | Scope | Result | Time / peak RSS |
 | --- | --- | --- | --- |
-| `make verify-runtime-nbe` | selected provider/license, typed ABI, `t11/t11b/t16`, Glue/Pi/Sigma/hcomp/HIT, cache, limits, link and no-exec guard | 24/24 PASS | not measured |
-| `make verify-runtime-nbe-oracle` | pinned Agda 2.9 + Cubical v0.9 typecheck and five runtime comparisons | 2 modules / 5 scenarios PASS | not measured |
+| `make verify-runtime-nbe` | custom-AST prototype, reference/license pin, hand-written packets, cache, limits, archive/harness link and no-exec guard | 24/24 PROTOTYPE-PASS; not Goal 3 acceptance | not measured |
+| `make verify-runtime-nbe-oracle` | pinned Agda 2.9 + Cubical v0.9 typecheck plus five separately hand-written prototype expectations | 2 modules / 5 expectations PROTOTYPE-PASS; not a differential test | not measured |
 | `make verify-native-lane` | locked official Agda -> MAlonzo erased Haskell -> locked GHC ELF; ordinary and erased-Cubical compile/run, direct-stock differential, full-Cubical misclassification, stale publication and type-error comparison | 2 compile/run PASS + 2 fail-closed PASS; 28 generated Haskell files audited; no compiler, `TCState`, runtime NbE, Agda library or residual transport identity in either ELF; identical PASS from clean clone of `7578f56` | current Linux x86-64 run PASS on 2026-08-23; resources not benchmarked |
 | `make verify-runtime-nbe-boundary` | goal 3 final-process identity, linked-library requirement, immutable checked request/result boundary, and compiler/closure/subprocess/network prohibitions | boundary contract PASS; goal 3 remains unimplemented at 1/11 | under 1 s; resources not benchmarked |
 | `make verify` / `make -k verify` | current uploaded snapshot on Linux with the available Agda 2.9/GHC 9.10.3 toolchain | NOT PASS: the archive omits the 3,219-file historical benchmark evidence required by `verify-benchmarks-guide`; the fork origin does not match the still-unapproved provider identity; the remaining local smoke gates require the documented Agda 2.8/Cubical environment. Status, README, support, troubleshooting, native-lane, runtime-boundary, provider-census and four synthetic timing/performance/publication contracts PASS. | current Linux run on 2026-08-23; 15.6 s for keep-going audit |

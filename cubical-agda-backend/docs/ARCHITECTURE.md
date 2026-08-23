@@ -25,10 +25,12 @@ Last updated: 2026-08-23 (Asia/Shanghai)
 ```
 
 This document describes the implemented compiler/backend slice. Goal 1 has an
-independent locked stock Agda/MAlonzo/GHC lane. Goal 3 has an independent
-typed NbE library linked into a final-process executable under `runtime/nbe/`.
-The existing compiler-process adapter is not goal 3 evidence, and static Chez
-publication is not used as goal 1 evidence.
+independent locked stock Agda/MAlonzo/GHC lane. Goal 3 is not implemented.
+`runtime/nbe/` is a custom-AST prototype and command-line harness: it does not
+consume Agda Internal `Term + Type`, link cctt code, or enter an
+Agda/MAlonzo-generated final program. Neither that prototype nor the existing
+compiler-process adapter is Goal 3 evidence. Static Chez publication is not
+used as Goal 1 evidence.
 
 The dependency direction is one-way: `src` depends on Agda APIs but never on
 tests, compatibility patches, generated evidence, or documentation.  Test
@@ -80,14 +82,14 @@ other generated module and may not appear in the final binary.
 
 ## Safety boundary
 
-Goal 3's runtime sits in the final user-program process, outside this
-compiler-process diagram. Its normative process and data boundary is
+The required Goal 3 runtime will sit in the final user-program process, outside
+this compiler-process diagram. Its normative process and data boundary is
 `config/runtime-nbe-boundary.tsv`, explained in
 `docs/RUNTIME_NBE_BOUNDARY.md`. Only immutable checked `Term + Type`, a closed
 definition slice and context identity may enter that linked runtime. Semantic
 closures and `TCState` never cross; an Agda subprocess or compiler callback is
-forbidden. The linked implementation and ABI are documented in
-`docs/RUNTIME_NBE_ABI.md`.
+forbidden. `docs/RUNTIME_NBE_ABI.md` records the prototype wire format and the
+missing Agda ABI integration; it is not an implemented Goal 3 ABI claim.
 
 ```text
 Agda elaboration and type checking

@@ -7,7 +7,7 @@ cd "$repo_root"
 runtime_binary=${RUNTIME_NBE_BINARY:-build/runtime-nbe/cubical-runtime-nbe}
 runtime_library=${RUNTIME_NBE_LIBRARY:-build/runtime-nbe/libcubical-runtime-nbe.a}
 packet_generator=${RUNTIME_NBE_GENERATOR:-build/runtime-nbe/generate-packets}
-evidence_dir=build/runtime-nbe/acceptance
+evidence_dir=build/runtime-nbe/prototype
 packet_dir=$evidence_dir/packets
 summary=$evidence_dir/summary.tsv
 context='transport-fixtures-v1:b150186d2544e7ef'
@@ -15,30 +15,30 @@ provider_lock=config/runtime-nbe-provider.lock.tsv
 provider_license=runtime/nbe/third-party/cctt-LICENSE.txt
 
 fail() {
-  echo "runtime NbE acceptance failed: $*" >&2
+  echo "runtime NbE prototype test failed: $*" >&2
   exit 1
 }
 
 mkdir -p "$packet_dir"
 
 awk -F '\t' '
-  $1 == "status" && $2 == "selected" { status++ }
+  $1 == "status" && $2 == "reference-only" { status++ }
   $1 == "upstream-provider" && $2 == "cctt" { provider++ }
   $1 == "upstream-revision" && $2 == "ba16f3758a322e9be77ada1da2b93f45d500192e" { revision++ }
   $1 == "upstream-source-archive-sha256" && $2 == "8d83adcb45ea827583f02fb6fb5c7d023ae97fdf6dd7816e9069ee45c67b6b5d" { source++ }
   $1 == "upstream-license-spdx" && $2 == "MIT" { license++ }
-  $1 == "integration" && $2 == "backend-owned-agda-runtime-adapter" { integration++ }
+  $1 == "integration" && $2 == "prototype-custom-ast-adapter" { integration++ }
   END { exit !(status == 1 && provider == 1 && revision == 1 && source == 1 && license == 1 && integration == 1) }
-' "$provider_lock" || fail "selected runtime provider lock is incomplete"
+' "$provider_lock" || fail "runtime algorithm-reference lock is incomplete"
 [ "$(sha256sum "$provider_license" | awk '{ print $1 }')" = \
   6d1af462b683165c1b10ed36a0d3c1e1b09f50924b30f16d85918402523210f9 ] ||
   fail "cctt MIT license hash drifted"
 
 "$packet_generator" "$packet_dir"
 printf 'scenario\tresult\texpected\tstatus\n' > "$summary"
-printf 'provider-lock\tselected-cctt-ba16f375\tselected-cctt-ba16f375\tPASS\n' >> "$summary"
+printf 'provider-lock\treference-only-cctt-ba16f375\treference-only-cctt-ba16f375\tPASS\n' >> "$summary"
 
-while IFS='	' read -r scenario expected_term expected_type agda_evidence; do
+while IFS='	' read -r scenario expected_term expected_type related_fixture; do
   [ "$scenario" = scenario ] && continue
   output=$($runtime_binary "$context" "$packet_dir/$scenario.packet") ||
     fail "$scenario returned a failure"
@@ -47,8 +47,8 @@ while IFS='	' read -r scenario expected_term expected_type agda_evidence; do
     "$expected"*) ;;
     *) fail "$scenario output mismatch: $output" ;;
   esac
-  printf '%s\t%s\t%s\tPASS\n' "$scenario" "$expected_term" "$agda_evidence" >> "$summary"
-done < test/fixtures/runtime-nbe/oracle.tsv
+  printf '%s\t%s\t%s\tPASS\n' "$scenario" "$expected_term" "$related_fixture" >> "$summary"
+done < test/fixtures/runtime-nbe/prototype-expectations.tsv
 
 expect_error() {
   label=$1
@@ -121,10 +121,20 @@ CCZ_NOEXEC_LOG="$noexec_log" LD_PRELOAD="$repo_root/$evidence_dir/noexec.so" \
 [ ! -s "$noexec_log" ] || fail "runtime attempted to start a subprocess"
 noexec_expected=$(printf 'OK\tIntLit 2\tTyInt\t')
 grep -Fq "$noexec_expected" "$evidence_dir/noexec.out" ||
-  fail "no-exec guarded runtime did not produce the oracle result"
+  fail "no-exec guarded runtime did not produce the prototype expectation"
 printf 'no-subprocess-trace\tzero-exec-attempts\tzero-exec-attempts\tPASS\n' >> "$summary"
+
+# This closed, well-typed higher-order term currently reads back a negative
+# de Bruijn index. Preserve the reproducer as explicit evidence that the
+# prototype is semantically unsound; observing the bug is not an acceptance
+# PASS and must not increase the completed-case counter below.
+semantic_bug_output=$($runtime_binary "$context" "$packet_dir/semantic-negative-index.packet") ||
+  fail "semantic counterexample no longer reaches readback; classify the new behavior"
+printf '%s\n' "$semantic_bug_output" | grep -Fq 'Var (-2)' ||
+  fail "semantic counterexample changed; fix or reclassify it explicitly"
+printf 'semantic-negative-index\tVar (-2) readback\tno negative de Bruijn index\tKNOWN-SEMANTIC-BUG\n' >> "$summary"
 
 positive_count=$(awk -F '\t' 'NR > 1 && $4 == "PASS" { count++ } END { print count + 0 }' "$summary")
 [ "$positive_count" -eq 24 ] || fail "expected 24 PASS rows, observed $positive_count"
 
-echo "RuntimeNbe PASS ($positive_count)"
+echo "RuntimeNbe PROTOTYPE-PASS ($positive_count; not Goal 3 acceptance)"

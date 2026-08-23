@@ -12,8 +12,8 @@ Chez/compiler-process-NbE scope and is retired.
 | --- | ---: | --- |
 | 1. stock Agda -> MAlonzo -> erased Haskell -> native binary | 9/9 | IMPLEMENTED; VERIFIED |
 | 2. cross-process checked `Term + Type` | 8/9 | IMPLEMENTED; clean-clone gate open |
-| 3. linked NbE inside the final program process | 11/11 | IMPLEMENTED; VERIFIED |
-| Complete revised checklist | 43/56 | 76.8% by item count; not effort-weighted |
+| 3. linked NbE inside the final program process | 1/11 | NOT IMPLEMENTED; boundary only |
+| Complete revised checklist | 31/56 | 55.4% by item count; not effort-weighted |
 
 ## What is usable now
 
@@ -22,7 +22,7 @@ Chez/compiler-process-NbE scope and is retired.
 - Typed residual and packet production retain checked `Term + Type`.
 - The v2 packet consumer source and tests are maintained under
   `runtime/agda-2.9/`.
-- The complete root-layout local `make verify` contract passes on 2026-08-23.
+- The complete root-layout local `make verify` contract is not green in the current workspace.
 - The isolated compiler-process NbE candidate passed the recorded 8-group,
   42-row differential matrix and controlled O2 provisional performance gate.
 - Default production `nbe` remains fail closed because the provider lock is
@@ -30,9 +30,10 @@ Chez/compiler-process-NbE scope and is retired.
 - The locked stock Agda/MAlonzo/GHC lane passes ordinary and erased-Cubical
   compile/run, stock differential, misclassification, stale-artifact, and
   binary-runtime audits from both the working tree and a clean clone.
-- The final-process typed NbE library is locked to the cctt algorithm source,
-  linked into its executable, and passes 24 in-process/negative/link tests plus
-  the pinned Agda oracle gate for `t11/t11b/t16`.
+- `runtime/nbe/` builds a self-contained custom-AST prototype and passes its
+  local tests. This is not Goal 3 evidence: it does not consume Agda Internal
+  `Term + Type`, does not link cctt code, and is not linked into an
+  Agda/MAlonzo-generated final user program.
 
 ## What is not yet delivered
 
@@ -46,16 +47,18 @@ fail-closed behavior. Static Chez output is not used as evidence for this goal.
 
 ### Goal 3
 
-`runtime/nbe/` supplies a standalone typed runtime core, static archive and
-final executable. It validates the ABI/provider/context and definition slice,
-evaluates with request-local environments, closures and cache, implements the
-audited Glue/Pi/Sigma/Vec/HIT/Kan fragment, quotes by type and rechecks the
-quoted term. Fuel, allocation and packet caps fail closed.
-
-The selected algorithm source is cctt commit `ba16f375...`, MIT. cctt is not a
-drop-in Agda library; the linked code is the approved backend-owned adapter.
-The compiler-process candidate is still separate and supplies no Goal 3
-evidence. Three-lane scheduling into this runtime remains open in checklist F.
+Only the normative final-process/data boundary is complete. The current
+prototype defines its own `Ty`, `Term`, `Family` and `Equiv`; its packet
+generator hand-constructs those values. cctt commit `ba16f375...` (MIT) is a
+pinned algorithm reference, but no cctt implementation is linked. The command
+line harness is not a generated user program. The so-called oracle gate only
+typechecks Agda fixtures and compares separately hand-authored expectations;
+it does not run the same Agda Internal input through two evaluators. The
+maintained `semantic-negative-index` counterexample also proves the prototype
+can read back `Var (-2)` from a closed well-typed higher-order term.
+Consequently Goal 3 is 1/11.
+The only checked-in GitHub Actions job is `locked-stock-native`; it covers Goal
+1 and provides no Goal 3 CI evidence.
 
 ## Repository state
 
@@ -73,14 +76,15 @@ The current and retained candidate evidence is:
 - root-layout local `make verify`: PASS on 2026-08-23;
 - goal 1 `make verify-native-lane`: PASS on 2026-08-23, including a separate
   clean clone from local commit `7578f56`;
-- goal 3 `make verify-runtime-nbe`: 24/24 PASS on 2026-08-23;
-- goal 3 `make verify-runtime-nbe-oracle`: 2 Agda modules and 5 runtime
-  scenarios PASS on 2026-08-23;
+- prototype `make verify-runtime-nbe`: 24/24 self-test PASS on 2026-08-23;
+  explicitly not Goal 3 acceptance;
+- prototype `make verify-runtime-nbe-oracle`: 2 Agda modules typecheck and 5
+  hand-authored runtime expectations PASS; explicitly not differential evidence;
 - Agda 2.9: 155 positive executions and 146 expected rejections PASS;
 - formal candidate differential: 8/8 groups and 42/42 rows PASS;
 - controlled O2 provisional performance: `ENGINEERING-PERFORMANCE-PASS`.
 
-Goal 1 and Goal 3 component gates are closed. Goal 2 clean-clone validation,
+Only Goal 1 is closed. Goal 2 clean-clone validation, Goal 3 implementation,
 three-lane dispatch/integration and overall release validation remain open.
 
 ## Reproduce the current root contract

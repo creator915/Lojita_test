@@ -10,12 +10,12 @@ cubical_dir=${RUNTIME_NBE_CUBICAL_DIR:?set RUNTIME_NBE_CUBICAL_DIR to the clean 
 cctt_dir=${RUNTIME_NBE_CCTT_DIR:?set RUNTIME_NBE_CCTT_DIR to the clean locked cctt checkout}
 runtime_binary=${RUNTIME_NBE_BINARY:-build/runtime-nbe/cubical-runtime-nbe}
 evidence_dir=build/runtime-nbe/oracle
-runtime_summary=build/runtime-nbe/acceptance/summary.tsv
+runtime_summary=build/runtime-nbe/prototype/summary.tsv
 
 mkdir -p "$evidence_dir"
 
 fail() {
-  echo "runtime NbE oracle acceptance failed: $*" >&2
+  echo "runtime NbE fixture-correlation test failed: $*" >&2
   exit 1
 }
 
@@ -77,12 +77,12 @@ rg -F 'e16a = true' test/fixtures/transport/TransportHigher.agda >/dev/null ||
 [ "$(rg -Fc 'e16c = pos 2' test/fixtures/transport/TransportHigher.agda)" -eq 1 ] ||
   fail "t16c expected value drifted"
 
-printf 'scenario\tagda-oracle\truntime\tstatus\n' > "$evidence_dir/summary.tsv"
-printf 't11\ttypechecks-with-stock-residual\tcanonical-Vec-not\tBOUNDARY-PASS\n' >> "$evidence_dir/summary.tsv"
-printf 't11b\tpropositionally-equal-e11b\tcanonical-e11b\tDIFFERENTIAL-PASS\n' >> "$evidence_dir/summary.tsv"
-printf 't16a\trefl-true\ttrue\tDIFFERENTIAL-PASS\n' >> "$evidence_dir/summary.tsv"
-printf 't16b\trefl-pos-2\tint-2\tDIFFERENTIAL-PASS\n' >> "$evidence_dir/summary.tsv"
-printf 't16c\trefl-pos-2\tint-2\tDIFFERENTIAL-PASS\n' >> "$evidence_dir/summary.tsv"
+printf 'scenario\tagda-fixture\tprototype-expectation\tstatus\n' > "$evidence_dir/summary.tsv"
+printf 't11\ttypechecks-with-stock-residual\tcanonical-Vec-not\tCORRELATION-ONLY\n' >> "$evidence_dir/summary.tsv"
+printf 't11b\tpropositionally-equal-e11b\tcanonical-e11b\tCORRELATION-ONLY\n' >> "$evidence_dir/summary.tsv"
+printf 't16a\trefl-true\ttrue\tCORRELATION-ONLY\n' >> "$evidence_dir/summary.tsv"
+printf 't16b\trefl-pos-2\tint-2\tCORRELATION-ONLY\n' >> "$evidence_dir/summary.tsv"
+printf 't16c\trefl-pos-2\tint-2\tCORRELATION-ONLY\n' >> "$evidence_dir/summary.tsv"
 
 [ -x "$runtime_binary" ] || fail "linked runtime executable is missing"
-echo "RuntimeNbeOracle PASS (2 Agda modules, 5 runtime scenarios)"
+echo "RuntimeNbeFixtureCorrelation PROTOTYPE-PASS (2 Agda modules, 5 hand-written expectations; not differential)"

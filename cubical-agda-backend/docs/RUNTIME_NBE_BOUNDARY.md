@@ -1,8 +1,8 @@
 # Final-process runtime NbE boundary
 
-This document fixes the process and data boundary for goal 3. The boundary is
-implemented by `runtime/nbe/`; `make verify-runtime-nbe` supplies linked
-library, final-process and negative-path evidence.
+This document fixes the required process and data boundary for goal 3. The
+boundary definition is complete, but no current implementation satisfies it.
+`runtime/nbe/` and `make verify-runtime-nbe` are prototype code/evidence only.
 
 ## Process identity
 
@@ -36,7 +36,7 @@ versioning and error codes without weakening these rules.
 
 ## Acceptance consequence
 
-A goal 3 executable must prove, from final-binary and runtime-trace evidence,
+A future Goal 3 executable must prove, from final-binary and runtime-trace evidence,
 that the linked runtime library handled the request in the final process and
 that no Agda/compiler subprocess or callback occurred. The acceptance gate
 interposes the supported process-launch entry points and audits source and

@@ -8,7 +8,7 @@ guide="$repo_root/docs/RUNTIME_NBE_BOUNDARY.md"
 goals="$repo_root/GOALS.md"
 architecture="$repo_root/docs/ARCHITECTURE.md"
 abi="$repo_root/docs/RUNTIME_NBE_ABI.md"
-runtime_source="$repo_root/runtime/nbe/src/Cubical/Runtime/Nbe.hs"
+checklist="$repo_root/DELIVERY_CHECKLIST.md"
 
 fail() {
   echo "Runtime NbE boundary contract FAIL: $*" >&2
@@ -23,7 +23,7 @@ value() {
   ' "$boundary" || fail "missing or duplicate boundary key: $key"
 }
 
-for file in "$boundary" "$guide" "$goals" "$architecture" "$abi" "$runtime_source"
+for file in "$boundary" "$guide" "$goals" "$architecture" "$abi" "$checklist"
 do
   [ -s "$file" ] || fail "required file is missing or empty: $file"
 done
@@ -64,7 +64,11 @@ grep -Fq '最终用户程序的运行进程，不是 Agda' "$goals" ||
   fail "GOALS process definition drifted"
 grep -Fq 'compiler-process' "$architecture" ||
   fail "architecture no longer distinguishes compiler process"
-grep -Fq 'providerIdentity' "$runtime_source" ||
-  fail "runtime provider marker is not implemented"
+grep -Fq 'boundary definition is complete' "$guide" ||
+  fail "boundary guide omits the completed normative definition"
+grep -Fq 'no current implementation satisfies it' "$guide" ||
+  fail "boundary guide incorrectly claims an implementation"
+grep -Fq '目标 3 为 1/11' "$checklist" ||
+  fail "checklist must keep Goal 3 at boundary-only 1/11"
 
-echo 'Runtime NbE boundary contract PASS (final process, immutable checked data, no compiler/closure crossing)'
+echo 'Runtime NbE boundary contract PASS (normative boundary only; Goal 3 remains 1/11)'

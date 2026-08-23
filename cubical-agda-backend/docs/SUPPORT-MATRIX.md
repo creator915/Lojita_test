@@ -23,7 +23,7 @@ released.
 | Surface | Status | Current behavior and evidence |
 | --- | --- | --- |
 | Goal 1 stock Agda/MAlonzo/GHC native lane | `VERIFIED` | Locked official Agda `84497d0` emits audited MAlonzo `AgdaAny` Haskell; locked GHC 9.10.3 builds the audited ELF. Ordinary and erased-Cubical compile/run, direct-stock differential, type-error, misclassification, stale-artifact, and clean-clone gates pass. Static Chez output is not used as evidence. |
-| Goal 3 NbE linked into the final program process | `NOT-VERIFIED` | Process identity and immutable checked-data boundary are fixed and contract-tested; no runtime library is implemented or linked. The current in-process candidate runs inside the Agda compiler process, not the final program. |
+| Goal 3 NbE linked into the final program process | `NOT-VERIFIED` | Only the process/immutable-data boundary is fixed (1/11). `runtime/nbe/` is a custom-AST prototype linked only to its CLI harness; it does not consume Agda Internal input, link cctt, or enter an Agda/MAlonzo user program. |
 | Default binary, `agda-baseline` | `VERIFIED` | Uses Agda normalization as the correctness/performance oracle. It is not counted as NbE acceleration. |
 | Default binary, `nbe` | `FAIL-CLOSED` | Returns `CCZ-NBE-UNAVAILABLE`; it never silently falls back and publishes no stale executable artifact. |
 | Test-only adapter spike | `VERIFIED` | Fourteen baseline-equal results and nine fail-closed controls cover the narrow semantic domain. |
@@ -88,7 +88,7 @@ engine provenance.
 | Capability | Status | Boundary |
 | --- | --- | --- |
 | Whole-entry v2 packet | `VERIFIED` | Agda 2.9 only; carries checked `Term + Type`, exact interface identity, and a checked type/body dependency slice rather than the whole signature. |
-| Final-process runtime NbE | `NOT-VERIFIED` | No linked runtime semantic domain exists yet; v2 `TCState + normalise` and compiler-process adapter evidence do not satisfy goal 3. |
+| Final-process runtime NbE | `NOT-VERIFIED` | No Agda-connected linked runtime semantic domain exists yet; the custom-AST prototype, v2 `TCState + normalise`, and compiler-process adapter evidence do not satisfy goal 3. |
 | File and stdin/stdout packet transport | `VERIFIED` | Higher cases pass across independent processes; incompatible consumers reject before evaluation. |
 | Mixed closed/open typed holes | `VERIFIED` | Stable hole IDs, unique Internal `Term : Type` matching, lambda lifting, and `opaque-import-v1` static shells are checked before publication. |
 | Ground codecs | `VERIFIED` | Bool, bounded Nat, Word64, Unicode-scalar Char, and signed-64 Int across unary, single-slot lexical, ordered, and 2-64-slot dependent replay. |

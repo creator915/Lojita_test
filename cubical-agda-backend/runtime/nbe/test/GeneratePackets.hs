@@ -58,6 +58,9 @@ fixtures =
       (Def "checked.cycle") TyBool
       [Definition "checked.cycle" TyBool (Def "checked.cycle")])
   , ("wrong-type.packet", packet (BoolLit True) TyNat [])
+  , ("semantic-negative-index.packet", packet
+      (Lam (TyPi TyNat TyNat) (Lam TyNat (App (Var 1) (Var 0))))
+      (TyPi (TyPi TyNat TyNat) (TyPi TyNat TyNat)) [])
   ]
 
 main :: IO ()

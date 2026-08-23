@@ -1,6 +1,7 @@
 {-# LANGUAGE DeriveGeneric #-}
 
--- | A closed, typed runtime NbE core for the audited Goal 3 fragment.
+-- | A closed, typed custom-AST NbE prototype. This is not a Goal 3 runtime:
+-- it does not consume Agda.Syntax.Internal Term/Type or link cctt code.
 --
 -- The semantic architecture (syntax -> environments/closures -> values ->
 -- type-directed quotation) follows the evaluator/quotation split audited in
@@ -37,8 +38,8 @@ import Text.Read (readMaybe)
 abiVersion :: String
 abiVersion = "runtime-nbe-abi-v1"
 
--- Kept live in the final executable so binary/link audits can prove that the
--- runtime library, rather than an external helper, supplied the evaluator.
+-- Kept live in the prototype harness so archive/link tests can distinguish
+-- this object from an external helper. It is not a final-user-program marker.
 providerIdentity :: String
 providerIdentity = "cctt-informed-agda-runtime-v1@ba16f3758a322e9be77ada1da2b93f45d500192e"
 
