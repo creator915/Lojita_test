@@ -22,8 +22,8 @@ released.
 
 | Surface | Status | Current behavior and evidence |
 | --- | --- | --- |
-| Goal 1 stock Agda/MAlonzo/GHC native lane | `NOT-VERIFIED` | Not implemented. Static Chez output is not accepted as evidence for this lane. |
-| Goal 3 NbE linked into the final program process | `NOT-VERIFIED` | Not implemented. The current in-process candidate runs inside the Agda compiler process, not the final program. |
+| Goal 1 stock Agda/MAlonzo/GHC native lane | `VERIFIED` | Locked official Agda `84497d0` emits audited MAlonzo `AgdaAny` Haskell; locked GHC 9.10.3 builds the audited ELF. Ordinary and erased-Cubical compile/run, direct-stock differential, type-error, misclassification, stale-artifact, and clean-clone gates pass. Static Chez output is not used as evidence. |
+| Goal 3 NbE linked into the final program process | `NOT-VERIFIED` | Process identity and immutable checked-data boundary are fixed and contract-tested; no runtime library is implemented or linked. The current in-process candidate runs inside the Agda compiler process, not the final program. |
 | Default binary, `agda-baseline` | `VERIFIED` | Uses Agda normalization as the correctness/performance oracle. It is not counted as NbE acceleration. |
 | Default binary, `nbe` | `FAIL-CLOSED` | Returns `CCZ-NBE-UNAVAILABLE`; it never silently falls back and publishes no stale executable artifact. |
 | Test-only adapter spike | `VERIFIED` | Fourteen baseline-equal results and nine fail-closed controls cover the narrow semantic domain. |
@@ -102,6 +102,7 @@ engine provenance.
 | --- | --- | --- |
 | Agda 2.8, GHC 9.12.3, Chez 10.4.1 | `VERIFIED` | Local smoke, contracts, static Scheme, failure taxonomy, and candidate spike. Binary v2 packet production intentionally rejects on Agda 2.8. |
 | Pinned Agda 2.9 snapshot, GHC 9.6.7, Chez 10.4.1 | `VERIFIED` | Full archived v2 runtime, candidate gates, formal projections/monolith, typed packets, and official test evidence. |
+| Official Agda `84497d0` (2.9.0), GHC 9.10.3, Linux x86-64 | `VERIFIED` | Goal 1 stock MAlonzo native lane, two compile/run cases, two fail-closed cases, provenance and binary audit, plus clean-clone replay. |
 | macOS Apple M4, AC Power, GHC 9.6.7 `-O2` | `VERIFIED-CANDIDATE` | Controlled three-run release performance profile with 48/48 host preflights. |
 | Other OS/CPU/GHC/Agda combinations | `NOT-VERIFIED` | No compatibility or performance claim beyond the exact environments above. |
 
@@ -123,7 +124,6 @@ Stable error-code meanings are defined in `FAILURE_CODES.md`.
 The following remain open even though the compiler candidate's engineering
 gates pass:
 
-- implement goal 1 as a stock Agda/MAlonzo/GHC native lane;
 - implement goal 3 as NbE linked into the final user-program process;
 - approve the final three-lane routing policy and official-test scope;
 - approve an immutable provider revision and the license/NOTICE identity;

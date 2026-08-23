@@ -40,7 +40,7 @@ safe_relative_path() {
 [ -d "$source_root" ] || fail "source root is missing: $source_root"
 [ -f "$identity_file" ] || fail "identity record is missing: $identity_file"
 
-temporary_dir=$(mktemp -d /private/tmp/nbe-adapter-source-identity.XXXXXX)
+temporary_dir=$(mktemp -d "${TMPDIR:-/tmp}/nbe-adapter-source-identity.XXXXXX")
 cleanup() {
   rm -rf "$temporary_dir"
 }

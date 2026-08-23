@@ -43,7 +43,7 @@ do
 done
 
 for fact in \
-  'stock Agda -> MAlonzo -> Haskell -> GHC 二进制 | **未实现**' \
+  'stock Agda -> MAlonzo -> Haskell -> GHC 二进制 | **已实现并验收**' \
   '最终程序进程内 runtime NbE | **未实现**' \
   'runtime/agda-2.9/' \
   '不在 Git' \
@@ -77,7 +77,7 @@ do
   require_text "$readme" "$variable=/path/to/"
 done
 
-cli_specs=$(mktemp /private/tmp/cubical-chez-readme-cli.XXXXXX)
+cli_specs=$(mktemp "${TMPDIR:-/tmp}/cubical-chez-readme-cli.XXXXXX")
 cleanup() {
   rm -f "$cli_specs"
 }

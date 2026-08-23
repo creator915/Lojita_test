@@ -39,28 +39,29 @@ require_text "$goals" '## 目标 1：原版编译器的本地二进制路径'
 require_text "$goals" '## 目标 2：跨进程 Term 搬运'
 require_text "$goals" '## 目标 3：最终程序进程内的 runtime NbE'
 goal_open_count=$(grep -Fxc '**状态：未实现。**' "$goals")
-[ "$goal_open_count" -eq 2 ] || fail "goals 1 and 3 are not both explicitly unimplemented"
+[ "$goal_open_count" -eq 1 ] || fail "goal 3 is not the sole explicitly unimplemented goal"
+require_text "$goals" '**状态：已实现并通过专项及 clean-clone 验收。**'
 require_text "$goals" '现有 compiler-process NbE candidate 不等于目标 3'
-require_text "$goals" '现有 static Chez 输出不等于目标 1'
+require_text "$goals" '目标 1 使用独立的 stock MAlonzo/GHC 路径'
 
 done_count=$(awk '/^- \[[xX]\] / { count++ } END { print count + 0 }' "$checklist")
 open_count=$(awk '/^- \[ \] / { count++ } END { print count + 0 }' "$checklist")
 total_count=$((done_count + open_count))
 completion_pct=$(awk -v done="$done_count" -v total="$total_count" \
   'BEGIN { printf "%.1f", 100 * done / total }')
-[ "$done_count" -eq 20 ] || fail "completed checklist count is $done_count, expected 20"
-[ "$open_count" -eq 36 ] || fail "open checklist count is $open_count, expected 36"
+[ "$done_count" -eq 30 ] || fail "completed checklist count is $done_count, expected 30"
+[ "$open_count" -eq 26 ] || fail "open checklist count is $open_count, expected 26"
 require_text "$checklist" \
   "新范围统计：$done_count/$total_count 项已完成（$completion_pct%）"
-require_text "$checklist" '目标 1 为 0/9'
+require_text "$checklist" '目标 1 为 9/9'
 require_text "$checklist" '目标 2 为 8/9'
-require_text "$checklist" '目标 3 为 0/11'
-require_text "$checklist" '当前 static Chez 路径不能代替本节验收'
+require_text "$checklist" '目标 3 为 1/11'
+require_text "$checklist" 'static Chez 结果未被用于本节验收'
 require_text "$checklist" '当前 NbE candidate 只在编译器进程中运行'
 
-require_text "$readme" '| 1. stock Agda -> MAlonzo -> Haskell -> GHC 二进制 | **未实现** |'
+require_text "$readme" '| 1. stock Agda -> MAlonzo -> Haskell -> GHC 二进制 | **已实现并验收** |'
 require_text "$readme" '| 3. 最终程序进程内 runtime NbE | **未实现** |'
-require_text "$status_doc" '| Complete revised checklist | 20/56 | 35.7% by item count; not effort-weighted |'
+require_text "$status_doc" '| Complete revised checklist | 30/56 | 53.6% by item count; not effort-weighted |'
 
 require_text "$runtime_source" 'maxRuntimePacketBytes = 64 * 1024 * 1024'
 require_text "$runtime_source" 'cubicalRuntimeResultTermFile'
@@ -78,4 +79,4 @@ if grep -Fq 'make -C backend' \
   fail "pre-flattening make command remains"
 fi
 
-echo "Project status contract PASS ($done_count/$total_count; goals 1 and 3 explicitly open)"
+echo "Project status contract PASS ($done_count/$total_count; goal 1 closed, goal 3 explicitly open)"

@@ -1,8 +1,8 @@
 # 交付验收清单
 
 > 范围基准：[`GOALS.md`](GOALS.md) 定义的三路架构。
-> 当前结论：目标 1 **未实现**；目标 2 **已有实现，待 clean-clone 验收**；目标 3 **未实现**。
-> 新范围统计：20/56 项已完成（35.7%）；目标 1 为 0/9，目标 2 为 8/9，目标 3 为 0/11。
+> 当前结论：目标 1 **已实现并通过 clean-clone 验收**；目标 2 **已有实现，待 clean-clone 验收**；目标 3 **未实现**。
+> 新范围统计：30/56 项已完成（53.6%）；目标 1 为 9/9，目标 2 为 8/9，目标 3 为 1/11。
 > 旧的 `224/321` 统计针对 Chez/编译期 NbE 旧范围，不再代表当前三路目标的完成度。
 
 ## 勾选规则
@@ -33,17 +33,17 @@
 
 ## C. 目标 1：Stock Agda -> MAlonzo -> GHC
 
-**本节整体未完成。当前 static Chez 路径不能代替本节验收。**
+**本节已由独立的 stock MAlonzo/GHC 路径关闭。static Chez 结果未被用于本节验收。**
 
-- [ ] **P0** 定义“无需运行时高阶搬运”的可审计分类规则。
-- [ ] **P0** 在 driver 中实现 native lane，调用锁定的 stock Agda compiler。
-- [ ] **P0** 确认 native lane 生成 MAlonzo 类型擦除 Haskell。
-- [ ] **P0** 由锁定 GHC 将 Haskell 构建为可执行二进制。
-- [ ] **P0** 审计二进制，证明未链接 `Term` / `Type` / `TCState` / runtime NbE。
-- [ ] **P1** 普通 Agda 程序从源码到二进制端到端 PASS。
-- [ ] **P1** 对“含 Cubical 语法但可静态消除”的范围获得书面验收定义。
-- [ ] **P1** native lane 与 stock Agda 的输出、退出码和错误行为差分一致。
-- [ ] **P1** 建立 native lane 的 clean-clone 和 CI 验收。
+- [x] **P0** 定义“无需运行时高阶搬运”的可审计分类规则。
+- [x] **P0** 在 driver 中实现 native lane，调用锁定的 stock Agda compiler。
+- [x] **P0** 确认 native lane 生成 MAlonzo 类型擦除 Haskell。
+- [x] **P0** 由锁定 GHC 将 Haskell 构建为可执行二进制。
+- [x] **P0** 审计二进制，证明未链接 `Term` / `Type` / `TCState` / runtime NbE。
+- [x] **P1** 普通 Agda 程序从源码到二进制端到端 PASS。
+- [x] **P1** 对“含 Cubical 语法但可静态消除”的范围获得书面验收定义。
+- [x] **P1** native lane 与 stock Agda 的输出、退出码和错误行为差分一致。
+- [x] **P1** 建立 native lane 的 clean-clone 和 CI 验收。
 
 ## D. 目标 2：跨进程 Term + Type 协议
 
@@ -61,7 +61,7 @@
 
 **本节整体未完成。当前 NbE candidate 只在编译器进程中运行。**
 
-- [ ] **P0** 固定“进程内”指最终用户程序进程，并固定运行时数据边界。
+- [x] **P0** 固定“进程内”指最终用户程序进程，并固定运行时数据边界。
 - [ ] **P0** 选定可作为 runtime library 的成熟 NbE 源码、revision 和许可证。
 - [ ] **P0** 定义 runtime NbE ABI，包括输入 Term/Type、上下文和结果/错误。
 - [ ] **P0** 将 runtime NbE 库链接进最终程序产物。
@@ -96,4 +96,4 @@
 ## 验收结论
 
 当前仅能对外说“候选后端、typed packet 和编译期 NbE 验证基础可用”。
-在 C 与 E 两节全部关闭前，不得声称目标 1 或目标 3 已完成，也不得声称项目已完整验收。
+C 节已经关闭，可以声称目标 1 已完成。E 节关闭前不得声称目标 3 或整个项目已完整验收。

@@ -7,7 +7,7 @@ backend_dir=$(CDPATH= cd -- "$script_dir/../.." && pwd)
 profile="$backend_dir/config/nbe-performance-profile.tsv"
 release_profile="$backend_dir/config/nbe-performance-release-profile.tsv"
 host_profile="$backend_dir/config/nbe-performance-host-profile.tsv"
-workspace=$(mktemp -d /private/tmp/formal-performance-self.XXXXXX)
+workspace=$(mktemp -d "${TMPDIR:-/tmp}/formal-performance-self.XXXXXX")
 raw_root="$workspace/raw"
 result_dir="$workspace/result"
 cleanup() {

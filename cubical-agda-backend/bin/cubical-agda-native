@@ -1,0 +1,329 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: cubical-agda-native \
+  --lock FILE --agda FILE --agda-source DIR --agda-data-dir DIR \
+  --ghc FILE --classification ordinary|erased-cubical \
+  --source FILE --output FILE [--include DIR ...]
+
+Compile one Agda main module through the locked stock MAlonzo backend and the
+locked GHC. The final binary, FILE.provenance.tsv, FILE.malonzo.sha256 and
+FILE.malonzo.tar are published only after all source, generated-Haskell and
+binary audits pass.
+EOF
+}
+
+fail() {
+  printf 'CCZ-NATIVE-REJECT: %s\n' "$*" >&2
+  exit 65
+}
+
+need_value() {
+  [[ $# -ge 2 ]] || fail "missing value for $1"
+}
+
+lock_file=
+agda=
+agda_source=
+agda_data_dir=
+ghc=
+classification=
+source_file=
+output_file=
+declare -a include_dirs=()
+
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --lock)
+      need_value "$@"; lock_file=$2; shift 2 ;;
+    --agda)
+      need_value "$@"; agda=$2; shift 2 ;;
+    --agda-source)
+      need_value "$@"; agda_source=$2; shift 2 ;;
+    --agda-data-dir)
+      need_value "$@"; agda_data_dir=$2; shift 2 ;;
+    --ghc)
+      need_value "$@"; ghc=$2; shift 2 ;;
+    --classification)
+      need_value "$@"; classification=$2; shift 2 ;;
+    --source)
+      need_value "$@"; source_file=$2; shift 2 ;;
+    --output)
+      need_value "$@"; output_file=$2; shift 2 ;;
+    --include)
+      need_value "$@"; include_dirs+=("$2"); shift 2 ;;
+    -h|--help)
+      usage; exit 0 ;;
+    *)
+      fail "unknown argument: $1" ;;
+  esac
+done
+
+for required in lock_file agda agda_source agda_data_dir ghc classification source_file output_file; do
+  [[ -n ${!required} ]] || fail "missing required option for $required"
+done
+
+[[ $classification == ordinary || $classification == erased-cubical ]] ||
+  fail "classification must be ordinary or erased-cubical"
+[[ -f $lock_file ]] || fail "toolchain lock is not a file: $lock_file"
+[[ -x $agda ]] || fail "stock Agda is not executable: $agda"
+[[ -d $agda_source/.git ]] || fail "Agda source is not a Git checkout: $agda_source"
+[[ -f $agda_data_dir/lib/prim/Agda/Builtin/Nat.agda || \
+   -f $agda_data_dir/Agda/Builtin/Nat.agda ]] ||
+  fail "Agda data directory does not contain the primitive library: $agda_data_dir"
+[[ -x $ghc ]] || fail "GHC is not executable: $ghc"
+[[ -f $source_file ]] || fail "source is not a file: $source_file"
+[[ $source_file == *.agda ]] || fail "source must have an .agda suffix"
+
+[[ -d $(dirname -- "$output_file") ]] ||
+  fail "output parent directory does not exist: $(dirname -- "$output_file")"
+output_parent=$(CDPATH= cd -- "$(dirname -- "$output_file")" && pwd -P)
+output_file=$output_parent/$(basename -- "$output_file")
+provenance_file=$output_file.provenance.tsv
+malonzo_manifest=$output_file.malonzo.sha256
+malonzo_archive=$output_file.malonzo.tar
+binary_audit_file=$output_file.binary-audit.txt
+
+# These are the complete published artifact names for this lane. Removing only
+# these exact names prevents any rejection, including a lock or classification
+# rejection, from leaving an earlier success that could be mistaken for the
+# current result.
+rm -f -- "$output_file" "$provenance_file" "$malonzo_manifest" \
+  "$malonzo_archive" "$binary_audit_file"
+
+lock_value() {
+  local key=$1
+  awk -F '\t' -v key="$key" '
+    $1 == key { count++; value=$2 }
+    END {
+      if (count != 1 || value == "") exit 1
+      print value
+    }
+  ' "$lock_file" || fail "lock key is missing or duplicated: $key"
+}
+
+[[ $(lock_value format) == native-toolchain-lock-v1 ]] ||
+  fail "unsupported native toolchain lock format"
+expected_agda_origin=$(lock_value stock-agda-origin)
+expected_agda_revision=$(lock_value stock-agda-revision)
+expected_agda_version=$(lock_value stock-agda-version)
+expected_ghc_version=$(lock_value ghc-version)
+expected_ghc_revision=$(lock_value ghc-project-revision)
+
+actual_agda_origin=$(git -C "$agda_source" remote get-url origin 2>/dev/null) ||
+  fail "cannot read stock Agda origin"
+actual_agda_revision=$(git -C "$agda_source" rev-parse HEAD 2>/dev/null) ||
+  fail "cannot read stock Agda revision"
+[[ -z $(git -C "$agda_source" status --porcelain 2>/dev/null) ]] ||
+  fail "stock Agda source checkout is dirty"
+[[ $actual_agda_origin == "$expected_agda_origin" ]] ||
+  fail "stock Agda origin mismatch: $actual_agda_origin"
+[[ $actual_agda_revision == "$expected_agda_revision" ]] ||
+  fail "stock Agda revision mismatch: $actual_agda_revision"
+
+actual_agda_version=$($agda --numeric-version 2>/dev/null) ||
+  fail "cannot query stock Agda version"
+actual_ghc_version=$($ghc --numeric-version 2>/dev/null) ||
+  fail "cannot query GHC version"
+actual_ghc_revision=$($ghc --print-project-git-commit-id 2>/dev/null) ||
+  fail "cannot query GHC project revision"
+[[ $actual_agda_version == "$expected_agda_version" ]] ||
+  fail "stock Agda version mismatch: $actual_agda_version"
+[[ $actual_ghc_version == "$expected_ghc_version" ]] ||
+  fail "GHC version mismatch: $actual_ghc_version"
+[[ $actual_ghc_revision == "$expected_ghc_revision" ]] ||
+  fail "GHC project revision mismatch: $actual_ghc_revision"
+
+if grep -Eq -- '--(erased-)?cubical([=[:space:]}]|$)' "$source_file"; then
+  source_has_cubical=yes
+else
+  source_has_cubical=no
+fi
+
+case $classification in
+  ordinary)
+    [[ $source_has_cubical == no ]] ||
+      fail "ordinary classification forbids every Cubical language mode"
+    ;;
+  erased-cubical)
+    if grep -Eq -- '--cubical=(full|no-glue)([[:space:]}]|$)|--cubical([[:space:]}]|$)' \
+      "$source_file"; then
+      fail "erased-cubical classification rejects full and no-glue Cubical modes"
+    fi
+    grep -Eq -- '--cubical=erased([[:space:]}]|$)|--erased-cubical([[:space:]}]|$)' \
+      "$source_file" ||
+      fail "erased-cubical classification requires stock Agda's erased Cubical mode"
+    ;;
+esac
+
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{ print $1 }'
+  else
+    shasum -a 256 "$1" | awk '{ print $1 }'
+  fi
+}
+
+stage=$(mktemp -d "$output_parent/.cubical-agda-native.XXXXXX")
+cleanup() {
+  rm -rf -- "$stage"
+}
+trap cleanup EXIT HUP INT TERM
+
+source_dir=$(CDPATH= cd -- "$(dirname -- "$source_file")" && pwd -P)
+source_file=$source_dir/$(basename -- "$source_file")
+declare -a include_args=(-i "$source_dir")
+for include_dir in "${include_dirs[@]}"; do
+  [[ -d $include_dir ]] || fail "include directory does not exist: $include_dir"
+  include_args+=(-i "$include_dir")
+done
+
+declare -a generate_args=(
+  --compile
+  --ghc-dont-call-ghc
+  --compile-dir="$stage"
+  --no-libraries
+  "${include_args[@]}"
+  "$source_file"
+)
+
+set +e
+Agda_datadir="$agda_data_dir" "$agda" "${generate_args[@]}" \
+  >"$stage/agda-generate.stdout" 2>"$stage/agda-generate.stderr"
+generate_status=$?
+set -e
+cat "$stage/agda-generate.stdout"
+cat "$stage/agda-generate.stderr" >&2
+[[ $generate_status -eq 0 ]] || exit "$generate_status"
+
+[[ -d $stage/MAlonzo/Code ]] || fail "stock Agda produced no MAlonzo/Code tree"
+find "$stage/MAlonzo" -type f -name '*.hs' -print | LC_ALL=C sort \
+  > "$stage/malonzo-files.list"
+[[ -s $stage/malonzo-files.list ]] || fail "stock Agda produced no Haskell files"
+
+: > "$stage/malonzo-before.sha256"
+while IFS= read -r hs_file; do
+  relative=${hs_file#"$stage/"}
+  printf '%s\t%s\n' "$(sha256_file "$hs_file")" "$relative" \
+    >> "$stage/malonzo-before.sha256"
+done < "$stage/malonzo-files.list"
+
+grep -Fqs -- 'type AgdaAny = GHC.Any' "$stage/MAlonzo/RTE.hs" ||
+  fail "MAlonzo RTE does not define the erased AgdaAny representation"
+grep -Rqs -- 'AgdaAny' "$stage/MAlonzo/Code" ||
+  fail "generated Haskell does not use the erased AgdaAny representation"
+
+generated_forbidden='Agda\.Syntax\.Internal|Agda\.TypeChecking|TCState|CubicalChez|RuntimeN[Bb][Ee]|primGlue|transpX'
+if grep -REn -- "$generated_forbidden" "$stage/MAlonzo" \
+    > "$stage/generated-forbidden.txt"; then
+  cat "$stage/generated-forbidden.txt" >&2
+  fail "generated Haskell retains a compiler/typechecker/runtime-transport blocker"
+fi
+
+erased_primitive_module="$stage/MAlonzo/Code/Agda/Primitive/Cubical.hs"
+if [[ $classification == ordinary ]]; then
+  if grep -REn -- 'primTransp|primHComp|primComp' "$stage/MAlonzo" \
+      > "$stage/generated-erased-primitives.txt"; then
+    cat "$stage/generated-erased-primitives.txt" >&2
+    fail "ordinary output unexpectedly contains an erased Cubical primitive"
+  fi
+else
+  [[ -f $erased_primitive_module ]] ||
+    fail "erased-Cubical output lacks the locked stock primitive module"
+  if grep -REl -- 'primTransp|primHComp|primComp' "$stage/MAlonzo" |
+      grep -Fvx -- "$erased_primitive_module" \
+      > "$stage/generated-erased-primitives-outside-stub.txt"; then
+    cat "$stage/generated-erased-primitives-outside-stub.txt" >&2
+    fail "erased Cubical primitive escaped the locked stock stub module"
+  fi
+  grep -Fqx 'd_primComp_78 = \_ _ _ _ x -> x' "$erased_primitive_module" ||
+    fail "locked stock primComp erased stub changed"
+  grep -Fqx 'd_primTransp_90 = \_ _ _ x -> x' "$erased_primitive_module" ||
+    fail "locked stock primTransp erased stub changed"
+  grep -Fqx 'd_primHComp_104 = \_ _ _ _ x -> x' "$erased_primitive_module" ||
+    fail "locked stock primHComp erased stub changed"
+fi
+tar -cf "$stage/malonzo-sources.tar" -C "$stage" MAlonzo
+
+declare -a compile_args=(
+  --compile
+  --compile-dir="$stage"
+  --no-libraries
+  --with-compiler="$ghc"
+  --ghc-flag=-o
+  --ghc-flag="$stage/native-program"
+  "${include_args[@]}"
+  "$source_file"
+)
+
+set +e
+Agda_datadir="$agda_data_dir" "$agda" "${compile_args[@]}" \
+  >"$stage/agda-ghc.stdout" 2>"$stage/agda-ghc.stderr"
+compile_status=$?
+set -e
+cat "$stage/agda-ghc.stdout"
+cat "$stage/agda-ghc.stderr" >&2
+[[ $compile_status -eq 0 ]] || exit "$compile_status"
+[[ -x $stage/native-program ]] || fail "locked GHC produced no executable"
+
+: > "$stage/malonzo-after.sha256"
+while IFS= read -r hs_file; do
+  relative=${hs_file#"$stage/"}
+  printf '%s\t%s\n' "$(sha256_file "$hs_file")" "$relative" \
+    >> "$stage/malonzo-after.sha256"
+done < "$stage/malonzo-files.list"
+cmp -s "$stage/malonzo-before.sha256" "$stage/malonzo-after.sha256" ||
+  fail "MAlonzo Haskell changed between the audited generation and GHC build"
+
+{
+  file "$stage/native-program" 2>/dev/null || true
+  if command -v ldd >/dev/null 2>&1; then
+    ldd "$stage/native-program" 2>&1 || true
+  fi
+  if command -v nm >/dev/null 2>&1; then
+    nm -a "$stage/native-program" 2>&1 || true
+  fi
+  strings "$stage/native-program" 2>/dev/null || true
+} > "$stage/binary-audit.txt"
+
+binary_forbidden='Agda\.Syntax\.Internal|Agda\.TypeChecking|TCState|CubicalChez\.Nbe|RuntimeN[Bb][Ee]|libHSAgda|Agda\.Compiler|Agda\.Interaction|primTransp|primHComp|primComp|primGlue|transpX'
+if grep -En -- "$binary_forbidden" "$stage/binary-audit.txt" \
+    > "$stage/binary-forbidden.txt"; then
+  cat "$stage/binary-forbidden.txt" >&2
+  fail "native binary links compiler/typechecker/runtime NbE state"
+fi
+
+cp "$stage/native-program" "$output_file"
+chmod 755 "$output_file"
+cp "$stage/malonzo-before.sha256" "$malonzo_manifest"
+cp "$stage/binary-audit.txt" "$binary_audit_file"
+cp "$stage/malonzo-sources.tar" "$malonzo_archive"
+
+{
+  printf 'format\tnative-lane-provenance-v1\n'
+  printf 'lane\tnative-malonzo-ghc\n'
+  printf 'classification\t%s\n' "$classification"
+  printf 'classification-authority\tstock-agda-erasure-plus-generated-and-binary-audit\n'
+  printf 'source-cubical-mode\t%s\n' "$source_has_cubical"
+  printf 'source-sha256\t%s\n' "$(sha256_file "$source_file")"
+  printf 'stock-agda-origin\t%s\n' "$actual_agda_origin"
+  printf 'stock-agda-revision\t%s\n' "$actual_agda_revision"
+  printf 'stock-agda-version\t%s\n' "$actual_agda_version"
+  printf 'stock-agda-executable-sha256\t%s\n' "$(sha256_file "$agda")"
+  printf 'backend\tMAlonzo\n'
+  printf 'haskell-erasure-witness\tMAlonzo.RTE.AgdaAny=GHC.Any\n'
+  printf 'generated-runtime-blockers\tnone\n'
+  printf 'ghc-version\t%s\n' "$actual_ghc_version"
+  printf 'ghc-project-revision\t%s\n' "$actual_ghc_revision"
+  printf 'ghc-executable-sha256\t%s\n' "$(sha256_file "$ghc")"
+  printf 'binary-internal-runtime\tnone\n'
+  printf 'binary-sha256\t%s\n' "$(sha256_file "$output_file")"
+  printf 'malonzo-manifest-sha256\t%s\n' "$(sha256_file "$malonzo_manifest")"
+  printf 'malonzo-archive-sha256\t%s\n' "$(sha256_file "$malonzo_archive")"
+  printf 'result\tPASS\n'
+} > "$provenance_file"
+
+printf 'native lane PASS: %s\n' "$output_file"

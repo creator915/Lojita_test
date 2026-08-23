@@ -10,10 +10,10 @@ Chez/compiler-process-NbE scope and is retired.
 
 | Goal | Checklist | Status |
 | --- | ---: | --- |
-| 1. stock Agda -> MAlonzo -> erased Haskell -> native binary | 0/9 | NOT IMPLEMENTED |
+| 1. stock Agda -> MAlonzo -> erased Haskell -> native binary | 9/9 | IMPLEMENTED; VERIFIED |
 | 2. cross-process checked `Term + Type` | 8/9 | IMPLEMENTED; clean-clone gate open |
-| 3. linked NbE inside the final program process | 0/11 | NOT IMPLEMENTED |
-| Complete revised checklist | 20/56 | 35.7% by item count; not effort-weighted |
+| 3. linked NbE inside the final program process | 1/11 | NOT IMPLEMENTED; process/data boundary fixed |
+| Complete revised checklist | 30/56 | 53.6% by item count; not effort-weighted |
 
 ## What is usable now
 
@@ -27,16 +27,19 @@ Chez/compiler-process-NbE scope and is retired.
   42-row differential matrix and controlled O2 provisional performance gate.
 - Default production `nbe` remains fail closed because the provider lock is
   unselected.
+- The locked stock Agda/MAlonzo/GHC lane passes ordinary and erased-Cubical
+  compile/run, stock differential, misclassification, stale-artifact, and
+  binary-runtime audits from both the working tree and a clean clone.
 
 ## What is not yet delivered
 
 ### Goal 1
 
-There is no production routing lane that invokes stock Agda/MAlonzo, emits
-type-erased Haskell, builds it with GHC, and proves the resulting binary does
-not carry `Term`, `Type`, `TCState`, or runtime NbE.
-
-The existing static Chez path is useful evidence but does not satisfy goal 1.
+`bin/cubical-agda-native` validates the locked official Agda source identity,
+generates and audits MAlonzo Haskell before invoking the locked GHC, then
+audits and transactionally publishes the native binary and provenance. The
+maintained test proves ordinary and stock-erased-Cubical output equality and
+fail-closed behavior. Static Chez output is not used as evidence for this goal.
 
 ### Goal 3
 
@@ -47,6 +50,10 @@ lowering. It therefore cannot be reported as runtime NbE.
 Goal 3 still needs a runtime ABI, Term-to-semantic reflect, environment and
 closure evaluation, Cubical operations, typed reify, resource bounds, linking,
 and no-subprocess end-to-end tests.
+
+The final-user-process identity and immutable checked-data boundary are fixed
+by `config/runtime-nbe-boundary.tsv` and `docs/RUNTIME_NBE_BOUNDARY.md`. This is
+one closed design P0, not runtime implementation evidence.
 
 ## Repository state
 
@@ -62,6 +69,8 @@ Generated files live under `build/` and are not build inputs.
 The current and retained candidate evidence is:
 
 - root-layout local `make verify`: PASS on 2026-08-23;
+- goal 1 `make verify-native-lane`: PASS on 2026-08-23, including a separate
+  clean clone from local commit `7578f56`;
 - Agda 2.9: 155 positive executions and 146 expected rejections PASS;
 - formal candidate differential: 8/8 groups and 42/42 rows PASS;
 - controlled O2 provisional performance: `ENGINEERING-PERFORMANCE-PASS`.

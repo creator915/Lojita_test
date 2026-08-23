@@ -3,7 +3,7 @@
 set -eu
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-workspace=$(mktemp -d /private/tmp/formal-performance-publish-self.XXXXXX)
+workspace=$(mktemp -d "${TMPDIR:-/tmp}/formal-performance-publish-self.XXXXXX")
 root="$workspace/root"
 final="$root/formal-transport-performance"
 

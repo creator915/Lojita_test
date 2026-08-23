@@ -319,7 +319,7 @@ then
   # Cabal passes the package source path to GHC 9.6 while building the
   # generator. Keep this disposable workspace ASCII-only on a host whose
   # project path is non-ASCII.
-  workspace_dir=$(mktemp -d /private/tmp/agda29-stdlib-workspace.XXXXXX)
+  workspace_dir=$(mktemp -d "${TMPDIR:-/tmp}/agda29-stdlib-workspace.XXXXXX")
 else
   workspace_dir=$(mktemp -d "$evidence_dir/workspace.XXXXXX")
 fi
@@ -535,14 +535,14 @@ if [ "$OFFICIAL_NATIVE_GROUP" = interaction-custom ]; then
   # path with this GHC release. Point it at the existing build through a
   # disposable ASCII-only alias; all test inputs still run in the isolated
   # workspace below build.
-  cabal_alias_dir=$(mktemp -d /private/tmp/agda29-native-cabal.XXXXXX)
+  cabal_alias_dir=$(mktemp -d "${TMPDIR:-/tmp}/agda29-native-cabal.XXXXXX")
   ln -s "$fdebug_dist" "$cabal_alias_dir/fdebug-dist"
   native_runghc="$cabal29_resolved -v0 exec --project-dir=$agda_source_dir --builddir=$cabal_alias_dir/fdebug-dist -w $ghc29_resolved -- $runghc29 --ghc-arg=-package=Agda"
 elif [ "$OFFICIAL_NATIVE_GROUP" = benchmark-without-logs ]; then
   native_runghc=$runghc29
 fi
 if [ "$OFFICIAL_NATIVE_GROUP" = api-test ]; then
-  cabal_alias_dir=$(mktemp -d /private/tmp/agda29-api-cabal.XXXXXX)
+  cabal_alias_dir=$(mktemp -d "${TMPDIR:-/tmp}/agda29-api-cabal.XXXXXX")
   ln -s "$fdebug_dist" "$cabal_alias_dir/fdebug-dist"
   native_ghc="$cabal29_resolved -v0 exec --project-dir=$agda_source_dir --builddir=$cabal_alias_dir/fdebug-dist -w $ghc29_resolved -- $ghc29_resolved"
 fi

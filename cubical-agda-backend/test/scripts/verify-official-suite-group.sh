@@ -247,7 +247,7 @@ fi
 if [ "$prepare_stdlib_interfaces" -eq 1 ]; then
   # Cabal passes the package source path to GHC while building
   # GenerateEverything. Keep that disposable path ASCII-only.
-  workspace_dir=$(mktemp -d /private/tmp/agda29-stdlib-compiler-workspace.XXXXXX)
+  workspace_dir=$(mktemp -d "${TMPDIR:-/tmp}/agda29-stdlib-compiler-workspace.XXXXXX")
 else
   workspace_dir=$(mktemp -d "$evidence_dir/workspace.XXXXXX")
 fi

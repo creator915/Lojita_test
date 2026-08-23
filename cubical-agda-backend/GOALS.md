@@ -21,7 +21,7 @@ Agda 源程序
 
 ## 目标 1：原版编译器的本地二进制路径
 
-**状态：未实现。**
+**状态：已实现并通过专项及 clean-clone 验收。**
 
 对不需要运行时搬运高阶同伦结构的程序，使用原版 Agda
 MAlonzo 路径编译为类型擦除的 Haskell，再由 GHC 生成单个本地二进制。
@@ -60,6 +60,6 @@ interface identity。消费端必须重新检查闭性、metavariable、类型�
 ## 当前代码不得被误解为的内容
 
 - 现有 compiler-process NbE candidate 不等于目标 3。
-- 现有 static Chez 输出不等于目标 1 的 MAlonzo/GHC 路径。
+- 目标 1 使用独立的 stock MAlonzo/GHC 路径；现有 static Chez 输出未作为其证据。
 - 候选 NbE 的 8 组/42 行差分通过，不等于已通过 runtime NbE 验收。
-- 目标 1 和目标 3 全部验收项关闭前，项目不得声称“完整交付”。
+- 目标 3 及总体发布门禁关闭前，项目不得声称“完整交付”。

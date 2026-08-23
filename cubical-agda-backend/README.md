@@ -7,20 +7,20 @@
 
 | 目标 | 状态 | 当前边界 |
 | --- | --- | --- |
-| 1. stock Agda -> MAlonzo -> Haskell -> GHC 二进制 | **未实现** | 现有 static Chez 输出不等于该目标 |
+| 1. stock Agda -> MAlonzo -> Haskell -> GHC 二进制 | **已实现并验收** | 锁定 Stock Agda 2.9.0 / MAlonzo / GHC 9.10.3；独立二进制审计 |
 | 2. 跨进程 `Term + Type` packet | **已有实现** | 仍需 clean-clone overlay 构建验收 |
 | 3. 最终程序进程内 runtime NbE | **未实现** | 当前 NbE 只在 Agda 编译器进程内 |
 
 当前可用的是候选 CubicalChez 后端、checked typed residual/packet、编译期
-NbE adapter 候选与完整的安全拒绝门禁。目标 1 和 3 未关闭前，不得将
-仓库标记为完整交付。
+NbE adapter 候选与完整的安全拒绝门禁。目标 1 已关闭；目标 3 和总体发布
+门禁未关闭前，不得将仓库标记为完整交付。
 
 ## 目标数据流
 
 ```text
 Agda source
    |
-   +-- native-safe ------> stock Agda/MAlonzo -> erased Haskell -> binary   [OPEN]
+   +-- native-safe ------> stock Agda/MAlonzo -> erased Haskell -> binary   [IMPLEMENTED]
    +-- cross-process ----> checked Term + Type packet                       [IMPLEMENTED]
    `-- runtime-higher ---> linked in-process runtime NbE                    [OPEN]
 ```
@@ -68,6 +68,16 @@ Homebrew 布局可以直接使用 Make 默认值。其他布局可传入：
 - `GHC_PREFIX`
 - `GHC`
 
+目标 1 的锁定原生通道还使用：
+
+- `NATIVE_AGDA`
+- `NATIVE_AGDA_SOURCE_DIR`
+- `NATIVE_AGDA_DATA_DIR`
+- `NATIVE_GHC`
+
+版本与官方源码 revision 固定在
+[`config/native-toolchain.lock.tsv`](config/native-toolchain.lock.tsv)。
+
 ## 快速开始
 
 从仓库根目录执行：
@@ -92,6 +102,16 @@ Scheme。
 
 ```sh
 make verify
+```
+
+目标 1 的真实 Stock Agda/MAlonzo/GHC 验收：
+
+```sh
+NATIVE_AGDA=/path/to/agda \
+NATIVE_AGDA_SOURCE_DIR=/path/to/clean/agda-source \
+NATIVE_AGDA_DATA_DIR=/path/to/agda-data \
+NATIVE_GHC=/path/to/ghc \
+make verify-native-lane
 ```
 
 长时间 Agda 2.9 验收需要显式的锁定路径：
@@ -123,6 +143,8 @@ make verify-formal-transport-production-candidate
 
 ```sh
 make verify-status-guide
+make verify-native-lane-contract
+make verify-native-lane
 make verify-support-matrix
 make verify-nbe-adapter-spike
 make verify-nbe-production-candidate
@@ -140,6 +162,8 @@ make verify-v2-runtime
 - [`GOALS.md`](GOALS.md)：最终三路目标。
 - [`DELIVERY_CHECKLIST.md`](DELIVERY_CHECKLIST.md)：验收唯一事实源。
 - [`ARCHITECTURE.md`](docs/ARCHITECTURE.md)：现有编译期架构。
+- [`NATIVE_LANE.md`](docs/NATIVE_LANE.md)：目标 1 分类、工具链锁与产物审计。
+- [`RUNTIME_NBE_BOUNDARY.md`](docs/RUNTIME_NBE_BOUNDARY.md)：目标 3 最终进程与数据边界。
 - [`ENGINE_CONTRACT.md`](docs/ENGINE_CONTRACT.md)：引擎请求/结果与 typed residual 契约。
 - [`SUPPORT-MATRIX.md`](docs/SUPPORT-MATRIX.md)：支持、候选、残余与拒绝状态。
 - [`STATUS.md`](docs/STATUS.md)：当前实现与未交付项。
@@ -150,7 +174,7 @@ make verify-v2-runtime
 
 ## 当前边界
 
-- Chez 是现有候选静态目标，不是目标 1 要求的原版 MAlonzo/GHC 路径。
+- Chez 仍是独立候选静态目标；目标 1 由 `bin/cubical-agda-native` 的原版 MAlonzo/GHC 路径验收。
 - 编译器进程内 adapter candidate 不是目标 3 要求的最终程序 runtime NbE。
 - `t11/t11b` 等已知残余不得进入无类型执行路径。
 - 生产 NbE provider 仍缺正式仓库/revision/许可证批准，默认保持安全拒绝。

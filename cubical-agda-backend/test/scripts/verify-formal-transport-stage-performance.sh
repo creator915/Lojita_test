@@ -22,7 +22,7 @@ printf '%s\n' "$required_runs" | grep -Eq '^[1-9][0-9]*$' || {
   exit 2
 }
 
-temporary_dir=$(mktemp -d /private/tmp/formal-stage-performance.XXXXXX)
+temporary_dir=$(mktemp -d "${TMPDIR:-/tmp}/formal-stage-performance.XXXXXX")
 cleanup() {
   rm -rf "$temporary_dir"
 }

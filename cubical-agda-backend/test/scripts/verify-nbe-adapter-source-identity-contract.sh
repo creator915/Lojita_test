@@ -9,7 +9,7 @@ promotion_checker="$script_dir/check-nbe-production-promotion.sh"
 evidence_dir="$backend_dir/build/nbe-adapter-source-identity-contract"
 summary="$evidence_dir/summary.tsv"
 
-temporary_dir=$(mktemp -d /private/tmp/nbe-adapter-source-contract.XXXXXX)
+temporary_dir=$(mktemp -d "${TMPDIR:-/tmp}/nbe-adapter-source-contract.XXXXXX")
 cleanup() {
   rm -rf "$temporary_dir"
 }

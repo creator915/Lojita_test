@@ -8,7 +8,7 @@ validator="$script_dir/verify-formal-transport-stage-timings.sh"
 evidence_dir="$backend_dir/build/formal-transport-stage-timings-self"
 summary="$evidence_dir/summary.tsv"
 
-temporary_dir=$(mktemp -d /private/tmp/formal-stage-timing-self.XXXXXX)
+temporary_dir=$(mktemp -d "${TMPDIR:-/tmp}/formal-stage-timing-self.XXXXXX")
 cleanup() {
   rm -rf "$temporary_dir"
 }

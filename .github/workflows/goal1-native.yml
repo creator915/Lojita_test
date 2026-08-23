@@ -1,0 +1,64 @@
+name: goal1-native-malonzo-ghc
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  locked-stock-native:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: cubical-agda-backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install locked GHC
+        uses: haskell-actions/setup@v2
+        with:
+          ghc-version: 9.10.3
+          cabal-version: latest
+
+      - name: Install native linker prerequisites
+        run: sudo apt-get update && sudo apt-get install -y libgmp-dev libtinfo-dev
+
+      - name: Fetch and build locked stock Agda
+        shell: bash
+        run: |
+          set -euo pipefail
+          agda_origin=$(awk -F '\t' '$1 == "stock-agda-origin" { print $2 }' config/native-toolchain.lock.tsv)
+          agda_revision=$(awk -F '\t' '$1 == "stock-agda-revision" { print $2 }' config/native-toolchain.lock.tsv)
+          mkdir -p .toolchain/agda
+          git -C .toolchain/agda init
+          git -C .toolchain/agda remote add origin "$agda_origin"
+          git -C .toolchain/agda fetch --depth 1 origin "$agda_revision"
+          git -C .toolchain/agda checkout --detach FETCH_HEAD
+          cabal update
+          cabal build --project-dir=.toolchain/agda exe:agda
+          agda_bin=$(cabal list-bin --project-dir=.toolchain/agda exe:agda)
+          {
+            echo "NATIVE_AGDA=$agda_bin"
+            echo "NATIVE_AGDA_SOURCE_DIR=$PWD/.toolchain/agda"
+            echo "NATIVE_AGDA_DATA_DIR=$PWD/.toolchain/agda/src/data"
+            echo "NATIVE_GHC=$(command -v ghc)"
+          } >> "$GITHUB_ENV"
+
+      - name: Verify goal 1 contract
+        run: make verify-native-lane-contract
+
+      - name: Compile, run, compare and audit goal 1
+        run: make verify-native-lane
+
+      - name: Retain goal 1 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: goal1-native-evidence
+          path: cubical-agda-backend/build/native-lane
+          if-no-files-found: error
+

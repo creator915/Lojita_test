@@ -11,7 +11,7 @@ if [ ! -f "$lock_file" ]; then
   exit 2
 fi
 
-temporary_dir=$(mktemp -d /private/tmp/nbe-adapter-lock.XXXXXX)
+temporary_dir=$(mktemp -d "${TMPDIR:-/tmp}/nbe-adapter-lock.XXXXXX")
 cleanup() {
   rm -rf "$temporary_dir"
 }
