@@ -1,10 +1,23 @@
 # NbE dependency selection record
 
-Last updated: 2026-08-22 (Asia/Shanghai)
+Last updated: 2026-08-23 (Asia/Shanghai)
 
 ## Status
 
-`ROUTE APPROVED — functional and provisional O2 performance gates passed; identity/owner thresholds pending`
+`GOAL 3 PROVIDER NOT SELECTED — cctt is a reference only`
+
+For Goal 3 research, the owner authorized `AndrasKovacs/cctt` commit
+`ba16f3758a322e9be77ada1da2b93f45d500192e` under MIT as the mature algorithm
+source on 2026-08-23. `config/runtime-nbe-provider.lock.tsv` records the source
+archive and license identities as `reference-only`. Because cctt has its own
+language and no library target, it does not satisfy the checklist item requiring
+a mature runtime library. `runtime/nbe/` is a backend-owned custom-AST
+prototype, not an Agda adapter and not an unmodified cctt library. Its prototype
+wire format and missing integration are documented in `RUNTIME_NBE_ABI.md`.
+
+The older `config/nbe-adapter.lock.tsv` below controls the separate
+compiler-process backend candidate. It intentionally remains unselected and
+must not be confused with a final-process runtime provider; none is selected.
 
 On 2026-08-22 the owner approved option A: productionize the existing
 Agda-specific in-process Haskell adapter, using cctt/Kovács as an algorithmic

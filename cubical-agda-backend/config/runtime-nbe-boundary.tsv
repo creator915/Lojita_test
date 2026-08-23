@@ -1,5 +1,7 @@
 key	value
 format	runtime-nbe-boundary-v1
+wire-abi	runtime-nbe-abi-v1
+provider-lock	config/runtime-nbe-provider.lock.tsv
 execution-process	final-user-program-process
 linkage	linked-library-in-final-executable
 request	checked-term+type+closed-definition-slice+context-identity
@@ -10,4 +12,3 @@ tcstate-transfer	forbidden
 compiler-callback	forbidden
 agda-subprocess	forbidden
 network-provider	forbidden
-

@@ -24,11 +24,15 @@ Last updated: 2026-08-23 (Asia/Shanghai)
 └── README.md                          operator-facing quick start
 ```
 
-This document describes the implemented compiler/backend slice. Goal 1 now has
-an independent locked stock Agda/MAlonzo/GHC lane. Goal 3 still requires an NbE
-component linked into the final program process. The existing compiler-process
-adapter must not be presented as goal 3, and static Chez publication is not
-used as goal 1 evidence.
+This document describes the implemented compiler/backend slice. Goal 1 has an
+independent locked stock Agda/MAlonzo/GHC lane. Goal 3 is partially implemented:
+the compiler-side bridge translates a fail-closed subset of checked Internal
+`Term + Type` plus definitions into the shared wire model, and a registered
+static Haskell package is linked into an Agda/MAlonzo-generated final program.
+That path covers ordinary closures and canonical constant-family `PrimTrans` /
+ground-face `PrimHComp`; it does not yet link cctt or cover the full acceptance
+fragment. The existing compiler-process adapter is not Goal 3 evidence. Static
+Chez publication is not used as Goal 1 evidence.
 
 The dependency direction is one-way: `src` depends on Agda APIs but never on
 tests, compatibility patches, generated evidence, or documentation.  Test
@@ -78,15 +82,16 @@ must accept the program. Three exact generated-only identity stubs in the
 locked primitive support module are permitted, but they may not occur in any
 other generated module and may not appear in the final binary.
 
-## Safety boundary
+## Goal 3 final-process runtime
 
-Goal 3's future runtime sits in the final user-program process, outside this
+The Goal 3 runtime sits in the final user-program process, outside this
 compiler-process diagram. Its normative process and data boundary is
 `config/runtime-nbe-boundary.tsv`, explained in
 `docs/RUNTIME_NBE_BOUNDARY.md`. Only immutable checked `Term + Type`, a closed
 definition slice and context identity may enter that linked runtime. Semantic
 closures and `TCState` never cross; an Agda subprocess or compiler callback is
-forbidden. No linked runtime implementation exists yet.
+forbidden. `docs/RUNTIME_NBE_ABI.md` records the implemented narrow-waist ABI
+and its remaining semantic/provider limits.
 
 ```text
 Agda elaboration and type checking

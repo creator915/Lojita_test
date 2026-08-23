@@ -1,8 +1,8 @@
 # 交付验收清单
 
 > 范围基准：[`GOALS.md`](GOALS.md) 定义的三路架构。
-> 当前结论：目标 1 **已实现并通过 clean-clone 验收**；目标 2 **已有实现，待 clean-clone 验收**；目标 3 **未实现**。
-> 新范围统计：30/56 项已完成（53.6%）；目标 1 为 9/9，目标 2 为 8/9，目标 3 为 1/11。
+> 当前结论：目标 1 **已实现并通过 clean-clone 验收**；目标 2 **已有实现，待 clean-clone 验收**；目标 3 **部分实现，尚未完成**。
+> 新范围统计：38/56 项已完成（67.9%）；目标 1 为 9/9，目标 2 为 8/9，目标 3 为 8/11。
 > 旧的 `224/321` 统计针对 Chez/编译期 NbE 旧范围，不再代表当前三路目标的完成度。
 
 ## 勾选规则
@@ -59,18 +59,20 @@
 
 ## E. 目标 3：最终程序进程内 runtime NbE
 
-**本节整体未完成。当前 NbE candidate 只在编译器进程中运行。**
+**本节仍未完成。真实 Agda Internal 桥、运行时 ABI、最终 MAlonzo 链接和基础
+`transp`/`hcomp` 差分已落地，但 cctt 尚未作为 provider 接入，且
+`t11/t11b/t16`、Glue/record/HIT 的真实 Agda 片段尚未通过。**
 
 - [x] **P0** 固定“进程内”指最终用户程序进程，并固定运行时数据边界。
 - [ ] **P0** 选定可作为 runtime library 的成熟 NbE 源码、revision 和许可证。
-- [ ] **P0** 定义 runtime NbE ABI，包括输入 Term/Type、上下文和结果/错误。
-- [ ] **P0** 将 runtime NbE 库链接进最终程序产物。
-- [ ] **P1** 实现运行时 `Term + Type -> semantic domain` reflect。
-- [ ] **P1** 实现运行时 environment/closure 语义和必要的 definition lookup。
+- [x] **P0** 定义 runtime NbE ABI，包括输入 Term/Type、上下文和结果/错误。
+- [x] **P0** 将 runtime NbE 库链接进最终程序产物。
+- [x] **P1** 实现运行时 `Term + Type -> semantic domain` reflect。
+- [x] **P1** 实现运行时 environment/closure 语义和必要的 definition lookup。
 - [ ] **P1** 实现验收片段需要的 `transp` / `hcomp` / Glue / Pi / record / HIT 语义。
-- [ ] **P1** 实现类型导向 reify/readback 和结果重检。
-- [ ] **P1** 实现 fuel、内存/包大小限额、缓存生命周期和 fail-closed 错误。
-- [ ] **P1** 验收证明运行时不启动 Agda 子进程、不调用编译期 `normalise`。
+- [x] **P1** 实现类型导向 reify/readback 和结果重检。
+- [x] **P1** 实现 fuel、内存/包大小限额、缓存生命周期和 fail-closed 错误。
+- [x] **P1** 验收证明运行时不启动 Agda 子进程、不调用编译期 `normalise`。
 - [ ] **P1** 对 `t11/t11b/t16` 及新增进程内用例执行 Agda oracle 差分验收。
 
 ## F. 三路调度与端到端集成
@@ -86,7 +88,7 @@
 
 ## G. 发布门禁
 
-- [ ] **P0** 目标 1 全部 P0/P1 勾选。
+- [x] **P0** 目标 1 全部 P0/P1 勾选。
 - [ ] **P0** 目标 3 全部 P0/P1 勾选。
 - [ ] **P0** NbE provider 仓库、revision、内容身份和许可证获得批准。
 - [ ] **P1** 官方回归、三路端到端、安全负例和性能门禁全部 PASS。
@@ -95,5 +97,7 @@
 
 ## 验收结论
 
-当前仅能对外说“候选后端、typed packet 和编译期 NbE 验证基础可用”。
-C 节已经关闭，可以声称目标 1 已完成。E 节关闭前不得声称目标 3 或整个项目已完整验收。
+当前只能认定目标 1 完成。目标 3 为 8/11：真实 Agda `Term + Type` 的受限桥、
+definition slice、进程内静态链接、语义域/readback、安全限额以及 Stock
+Agda/MAlonzo/GHC 最终程序证据已完成。成熟 provider 接入、完整验收语义片段和
+`t11/t11b/t16` 同输入差分仍开放，因此不得认定目标 3 完成。

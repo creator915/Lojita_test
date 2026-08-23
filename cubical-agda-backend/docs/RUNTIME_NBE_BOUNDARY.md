@@ -1,8 +1,9 @@
 # Final-process runtime NbE boundary
 
-This document fixes the process and data boundary for goal 3. It is a
-normative design boundary, not evidence that the runtime library or ABI has
-already been implemented.
+This document fixes the required process and data boundary for goal 3. The
+boundary definition is complete. The checked narrow-waist/final-MAlonzo path
+satisfies it for the currently declared runtime fragment; Goal 3 remains partial.
+`runtime/nbe/` and `make verify-runtime-nbe` are prototype code/evidence only.
 
 ## Process identity
 
@@ -31,13 +32,13 @@ bytes contain:
 The runtime result is either a reified `Term + Type` result or a closed,
 versioned error. Semantic values, environments, Haskell closures, `TCState`,
 `TCM` actions, live definition handles, and compiler callbacks may not cross
-the boundary. The later ABI P0 must assign concrete encodings, ownership,
+the boundary. `docs/RUNTIME_NBE_ABI.md` assigns concrete encodings, ownership,
 versioning and error codes without weakening these rules.
 
 ## Acceptance consequence
 
-A goal 3 executable must prove, from final-binary and runtime-trace evidence,
+A future Goal 3 executable must prove, from final-binary and runtime-trace evidence,
 that the linked runtime library handled the request in the final process and
-that no Agda/compiler subprocess or callback occurred. Until such code exists,
-the goal remains unimplemented even though this boundary is fixed.
-
+that no Agda/compiler subprocess or callback occurred. The acceptance gate
+interposes the supported process-launch entry points and audits source and
+binary identities while executing the linked evaluator.

@@ -1,0 +1,11 @@
+scenario	expected-term	expected-type	related-fixture
+t11	VecLit TyBool [BoolLit False,BoolLit True]	TyVec TyBool 2	TransportBoundary.e11
+t11b	VecLit TyBool [BoolLit True,BoolLit False]	TyVec TyBool 2	TransportBoundary.t11b-e11b-proof
+t16a	BoolLit True	TyBool	TransportHigher.t16a-e16a-refl
+t16b	IntLit 2	TyInt	TransportHigher.t16b-e16b-refl
+t16c	IntLit 2	TyInt	TransportHigher.t16c-e16c-refl
+glue	BoolLit False	TyBool	local-unglue-glue-law
+record	Pair (BoolLit False) (NatLit 3)	TySigma TyBool TyNat	TransportTests.t09-e09-refl
+hcomp-one	BoolLit True	TyBool	primHComp-total-face
+hcomp-zero	BoolLit False	TyBool	primHComp-empty-face
+lambda	Lam TyBool (Not (Var 0))	TyPi TyBool TyBool	typed-core-reflect-reify

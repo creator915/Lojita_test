@@ -44,7 +44,7 @@ interface identity。消费端必须重新检查闭性、metavariable、类型�
 
 ## 目标 3：最终程序进程内的 runtime NbE
 
-**状态：未实现。**
+**状态：部分实现（8/11）；成熟 provider 与完整语义/oracle 验收仍开放。**
 
 这里的“进程内”明确指最终用户程序的运行进程，不是 Agda
 编译器进程。必须把成熟 NbE 作为 runtime 组件链接到最终产物，在同一进程内
@@ -59,7 +59,9 @@ interface identity。消费端必须重新检查闭性、metavariable、类型�
 
 ## 当前代码不得被误解为的内容
 
-- 现有 compiler-process NbE candidate 不等于目标 3。
+- 现有 compiler-process NbE candidate 不等于目标 3；`runtime/nbe/` 已通过窄腰
+  ABI 接收真实 Agda Internal 输入并进入最终 MAlonzo 程序，但只覆盖已列明的
+  受限片段，且尚未链接成熟 cctt provider，不能据此宣称目标 3 完成。
 - 目标 1 使用独立的 stock MAlonzo/GHC 路径；现有 static Chez 输出未作为其证据。
 - 候选 NbE 的 8 组/42 行差分通过，不等于已通过 runtime NbE 验收。
-- 目标 3 及总体发布门禁关闭前，项目不得声称“完整交付”。
+- 三路调度与总体发布门禁关闭前，项目不得声称“完整交付”。
