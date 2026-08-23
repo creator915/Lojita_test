@@ -1,0 +1,4 @@
+path	role
+src/CubicalChez/Backend.hs	engine-boundary
+src/CubicalChez/Nbe/AdapterSpike.hs	evaluator-readback
+src/Main.hs	plugin-entry

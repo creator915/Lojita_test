@@ -1,0 +1,12 @@
+schema	1
+status	selected
+provider	agda-specific-in-process-v1
+repository	https://example.invalid/cubical-nbe.git
+revision	aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+source-sha256	bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+license	MIT
+integration	in-process
+adapter-api	engine-request-v1
+acceptance-profile	formal-transport-v1
+decision-owner	test-owner
+approved-at	2026-08-20

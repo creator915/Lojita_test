@@ -1,0 +1,92 @@
+# Project status
+
+Last updated: 2026-08-23 (Asia/Shanghai)
+
+## Executive status
+
+The repository now follows the three-lane product definition in
+[`GOALS.md`](../GOALS.md). The old 224/321 counter described a narrower
+Chez/compiler-process-NbE scope and is retired.
+
+| Goal | Checklist | Status |
+| --- | ---: | --- |
+| 1. stock Agda -> MAlonzo -> erased Haskell -> native binary | 0/9 | NOT IMPLEMENTED |
+| 2. cross-process checked `Term + Type` | 8/9 | IMPLEMENTED; clean-clone gate open |
+| 3. linked NbE inside the final program process | 0/11 | NOT IMPLEMENTED |
+| Complete revised checklist | 20/56 | 35.7% by item count; not effort-weighted |
+
+## What is usable now
+
+- The CubicalChez compiler backend builds from `src/`.
+- Static Chez publication is guarded by Internal and Treeless audits.
+- Typed residual and packet production retain checked `Term + Type`.
+- The v2 packet consumer source and tests are maintained under
+  `runtime/agda-2.9/`.
+- The complete root-layout local `make verify` contract passes on 2026-08-23.
+- The isolated compiler-process NbE candidate passed the recorded 8-group,
+  42-row differential matrix and controlled O2 provisional performance gate.
+- Default production `nbe` remains fail closed because the provider lock is
+  unselected.
+
+## What is not yet delivered
+
+### Goal 1
+
+There is no production routing lane that invokes stock Agda/MAlonzo, emits
+type-erased Haskell, builds it with GHC, and proves the resulting binary does
+not carry `Term`, `Type`, `TCState`, or runtime NbE.
+
+The existing static Chez path is useful evidence but does not satisfy goal 1.
+
+### Goal 3
+
+There is no NbE library linked into the final user-program process. The
+existing adapter is invoked from the Agda compiler process before Treeless
+lowering. It therefore cannot be reported as runtime NbE.
+
+Goal 3 still needs a runtime ABI, Term-to-semantic reflect, environment and
+closure evaluation, Cubical operations, typed reify, resource bounds, linking,
+and no-subprocess end-to-end tests.
+
+## Repository state
+
+The Git delivery tree contains project code, maintained tests, configuration,
+runtime overlay source, technical documentation, and the two root-level
+authority documents. Raw chats, temporary answers, old reports, generated
+evidence, and ZIP archives are not tracked.
+
+Generated files live under `build/` and are not build inputs.
+
+## Verification snapshot
+
+The current and retained candidate evidence is:
+
+- root-layout local `make verify`: PASS on 2026-08-23;
+- Agda 2.9: 155 positive executions and 146 expected rejections PASS;
+- formal candidate differential: 8/8 groups and 42/42 rows PASS;
+- controlled O2 provisional performance: `ENGINEERING-PERFORMANCE-PASS`.
+
+These results validate existing compiler/packet behavior only. They do not
+validate goal 1 or goal 3. Clean-clone validation remains open.
+
+## Reproduce the current root contract
+
+```sh
+make build
+make verify-status-guide
+make verify-readme-guide
+make verify-readme-quickstart
+```
+
+Pinned Agda 2.9 and formal commands require the variables documented in
+[`README.md`](../README.md).
+
+## Maintenance contract
+
+1. Update `GOALS.md` only when the product boundary changes.
+2. Update `DELIVERY_CHECKLIST.md` whenever implementation or acceptance state
+   changes.
+3. Do not mark goal 1 complete using Chez output.
+4. Do not mark goal 3 complete using compiler-process NbE evidence.
+5. Record a new test result only after the corresponding command passes from
+   the committed root layout.

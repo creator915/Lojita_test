@@ -1,0 +1,176 @@
+diff --git a/src/full/Agda/TypeChecking/Primitive/Cubical/Runtime.hs b/src/full/Agda/TypeChecking/Primitive/Cubical/Runtime.hs
+--- a/src/full/Agda/TypeChecking/Primitive/Cubical/Runtime.hs
++++ b/src/full/Agda/TypeChecking/Primitive/Cubical/Runtime.hs
+@@ -20,6 +20,7 @@
+   ) where
+ 
+ import Control.DeepSeq (NFData)
++import Control.Exception (ErrorCall, try)
+ import Control.Monad (unless, when)
+ import Control.Monad.IO.Class (liftIO)
+ import Control.Monad.Trans.Maybe (MaybeT, runMaybeT)
+@@ -28,6 +29,7 @@
+ import Data.Map (Map)
+ import Data.Word (Word64)
+ import GHC.Generics (Generic)
++import System.Directory (doesFileExist, getFileSize)
+ import System.IO (hFlush, hSetBinaryMode, stdin, stdout)
+ 
+ import Agda.Compiler.Backend
+@@ -69,6 +71,7 @@
+   , cubicalRuntimeExportExpression :: Maybe String
+   , cubicalRuntimeImportConsumer :: Maybe String
+   , cubicalRuntimeTermFile :: Maybe FilePath
++  , cubicalRuntimeResultTermFile :: Maybe FilePath
+   }
+   deriving (Generic)
+ 
+@@ -80,6 +83,7 @@
+   , cubicalRuntimeExportExpression = Nothing
+   , cubicalRuntimeImportConsumer = Nothing
+   , cubicalRuntimeTermFile = Nothing
++  , cubicalRuntimeResultTermFile = Nothing
+   }
+ 
+ cubicalRuntimeFlags :: [OptDescr (Flag CubicalRuntimeOptions)]
+@@ -96,6 +100,9 @@
+   , Option [] ["cubical-term-file"]
+       (ReqArg setTermFile "FILE")
+       "Term packet path; use - for stdout (export) or stdin (import)"
++  , Option [] ["cubical-result-term-file"]
++      (ReqArg setResultTermFile "FILE")
++      "write an imported consumer result as a new typed Term packet"
+   ]
+   where
+   setExpression expression options =
+@@ -106,6 +113,8 @@
+     pure options { cubicalRuntimeImportConsumer = Just expression }
+   setTermFile file options =
+     pure options { cubicalRuntimeTermFile = Just file }
++  setResultTermFile file options =
++    pure options { cubicalRuntimeResultTermFile = Just file }
+ 
+ -- | Backend exported to the small @agda-cubical-run@ executable.
+ cubicalRuntimeBackend :: Backend
+@@ -166,6 +175,7 @@
+       , cubicalRuntimeExportExpression = Nothing
+       , cubicalRuntimeImportConsumer = Nothing
+       , cubicalRuntimeTermFile = Nothing
++      , cubicalRuntimeResultTermFile = Nothing
+       } -> runtimeEvaluate expression
+ 
+     CubicalRuntimeOptions
+@@ -173,6 +183,7 @@
+       , cubicalRuntimeExportExpression = Just expression
+       , cubicalRuntimeImportConsumer = Nothing
+       , cubicalRuntimeTermFile = Just file
++      , cubicalRuntimeResultTermFile = Nothing
+       } -> runtimeExport file expression
+ 
+     CubicalRuntimeOptions
+@@ -180,17 +191,19 @@
+       , cubicalRuntimeExportExpression = Nothing
+       , cubicalRuntimeImportConsumer = Just consumer
+       , cubicalRuntimeTermFile = Just file
+-      } -> runtimeImport file consumer
++      , cubicalRuntimeResultTermFile = resultFile
++      } -> runtimeImport file resultFile consumer
+ 
+     _ -> runtimeAbort $
+       "select exactly one of --cubical-run, --cubical-export, or " ++
+-      "--cubical-import; export/import also require --cubical-term-file"
++      "--cubical-import; result packets require import and both file options"
+ 
+ cubicalRuntimeEnabled :: CubicalRuntimeOptions -> Bool
+ cubicalRuntimeEnabled options = any isJust
+   [ cubicalRuntimeExpression options
+   , cubicalRuntimeExportExpression options
+   , cubicalRuntimeImportConsumer options
++  , cubicalRuntimeResultTermFile options
+   ]
+ 
+ runtimeInfer :: String -> TCM (Term, Type)
+@@ -229,11 +242,20 @@
+ runtimePacketVersion :: Word64
+ runtimePacketVersion = 2
+ 
++-- Reject unexpectedly large inputs before decoding.  This is a protocol
++-- limit, not a claim that all inputs below the limit are trustworthy.
++maxRuntimePacketBytes :: Integer
++maxRuntimePacketBytes = 64 * 1024 * 1024
++
+ runtimeExport :: FilePath -> String -> TCM ()
+ runtimeExport file expression = do
+   (term0, ty0) <- runtimeInfer expression
+   ty <- normalise ty0
+   term <- runtimeNormalise term0 ty
++  writeRuntimePacket file term ty
++
++writeRuntimePacket :: FilePath -> Term -> Type -> TCM ()
++writeRuntimePacket file term ty = do
+   ensurePortableTerm term ty
+ 
+   iface <- curIF
+@@ -253,10 +275,13 @@
+   bytes <- liftIO $ RawSerialise.serialize encoded
+   writePacketBytes file bytes
+ 
+-runtimeImport :: FilePath -> String -> TCM ()
+-runtimeImport file consumerExpression = do
++runtimeImport :: FilePath -> Maybe FilePath -> String -> TCM ()
++runtimeImport file resultFile consumerExpression = do
+   bytes <- readPacketBytes file
+-  encoded <- liftIO (RawSerialise.deserialize bytes :: IO Serialise.Encoded)
++  decodedEncoded <- liftIO
++    (try (RawSerialise.deserialize bytes) ::
++      IO (Either ErrorCall Serialise.Encoded))
++  encoded <- either (const $ runtimeAbort "malformed or truncated Term packet") pure decodedEncoded
+   decoded <- runMaybeT (Serialise.decode encoded :: MaybeT TCM RuntimePacket)
+   packet <- maybe (runtimeAbort "malformed or incompatible Term packet") pure decoded
+ 
+@@ -286,7 +311,15 @@
+   let result = consumer `apply` [Arg (domInfo domain) term]
+       resultTy = codomain `absApp` term
+   CheckInternal.checkInternal result CmpLeq resultTy
+-  runtimeNormalise result resultTy >>= printRuntimeTerm
++  normalisedResultTy <- normalise resultTy
++  value <- runtimeNormalise result normalisedResultTy
++  case resultFile of
++    Nothing -> printRuntimeTerm value
++    Just output -> do
++      when (output /= "-") $ do
++        exists <- liftIO $ doesFileExist output
++        when exists $ runtimeAbort "result Term packet already exists"
++      writeRuntimePacket output value normalisedResultTy
+ 
+ ensurePortableTerm :: Term -> Type -> TCM ()
+ ensurePortableTerm term ty = do
+@@ -303,11 +336,25 @@
+ writePacketBytes file bytes = liftIO $ ByteString.writeFile file bytes
+ 
+ readPacketBytes :: FilePath -> TCM ByteString.ByteString
+-readPacketBytes "-" = liftIO $ do
+-  hSetBinaryMode stdin True
+-  ByteString.hGetContents stdin
+-readPacketBytes file = liftIO $ ByteString.readFile file
++readPacketBytes "-" = do
++  bytes <- liftIO $ do
++    hSetBinaryMode stdin True
++    ByteString.hGet stdin (fromInteger maxRuntimePacketBytes + 1)
++  ensurePacketSize bytes
++  pure bytes
++readPacketBytes file = do
++  fileSize <- liftIO $ getFileSize file
++  when (fileSize > maxRuntimePacketBytes) $
++    runtimeAbort "Term packet exceeds the 64 MiB size limit"
++  bytes <- liftIO $ ByteString.readFile file
++  ensurePacketSize bytes
++  pure bytes
+ 
++ensurePacketSize :: ByteString.ByteString -> TCM ()
++ensurePacketSize bytes =
++  when (toInteger (ByteString.length bytes) > maxRuntimePacketBytes) $
++    runtimeAbort "Term packet exceeds the 64 MiB size limit"
++
+ runtimeAbort :: String -> TCM a
+ runtimeAbort message = liftIO $ ioError $ userError $ "Cubical runtime: " ++ message

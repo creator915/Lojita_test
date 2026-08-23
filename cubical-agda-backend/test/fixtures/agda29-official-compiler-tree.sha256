@@ -1,0 +1,4 @@
+file  test/Main.hs  8dc0a439ae2d85be076c8d3573b707bf290e281f5ec3bbd9eb9cc7dd59b96381
+file  test/Utils.hs  9698226322b774e02642daad1a7656d0411b649f614d7c68edc58c78e2906760
+file  test/Compiler/Tests.hs  fa62aceb799f70ee12734b65b833e73d340cf57953256d83e260c6c98baf1e00
+tree  test/Compiler  c8bd51e4447da1bd2f3aacdc8fe3d332f0f674e88fe68a7dfef038d3f13182e4

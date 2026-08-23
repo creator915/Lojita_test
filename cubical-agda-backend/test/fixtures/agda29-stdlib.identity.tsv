@@ -1,0 +1,7 @@
+kind	name	value
+metadata	agda-parent-commit	d8a73ff720197796fb64c7652202d33e7abb3eb6
+metadata	stdlib-gitlink-commit	9a543dc8eb1abce4853c356de35c870d66a27984
+metadata	official-archive-url	https://codeload.github.com/agda/agda-stdlib/tar.gz/9a543dc8eb1abce4853c356de35c870d66a27984
+metadata	official-archive-sha256	5142be83052fb089e3bd106e271a5d1d39904159f77049065e138c26bd88cba4
+projection	files	1408
+projection	manifest-sha256	33ffd9bd0f4c62c6c4c402f35bdb684c3fc1fe88a31c2b7c52edd629c70a6e7a

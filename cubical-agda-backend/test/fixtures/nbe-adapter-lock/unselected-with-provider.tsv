@@ -1,0 +1,12 @@
+schema	1
+status	unselected
+provider	premature-provider
+repository	UNRESOLVED
+revision	UNRESOLVED
+source-sha256	UNRESOLVED
+license	UNRESOLVED
+integration	UNRESOLVED
+adapter-api	engine-request-v1
+acceptance-profile	UNRESOLVED
+decision-owner	UNRESOLVED
+approved-at	UNRESOLVED

@@ -1,0 +1,10 @@
+metadata	reported-commit	d8a73ff720197796fb64c7652202d33e7abb3eb6
+metadata	official-archive-url	https://codeload.github.com/agda/agda/tar.gz/d8a73ff720197796fb64c7652202d33e7abb3eb6
+metadata	official-archive-bytes	5346291
+metadata	official-archive-sha256	03f587904de6db00d101b189800c44a1fa41f763ac071e62a84340bff12227ea
+metadata	upstream-Agda.cabal-sha256	3d0a4dc6900906c4fc3b3e17c07210157aa5ca5b48045ccf0fd7db52a602d123
+tree	.	10084	9f05bc6d2fc957292f2355e04176523c3f449ad1c37167d87e4ba789933d6a27
+tree	./src	600	3f07ab98804ef4172cf234ba918757b882ad4ce0a0a6affafac82efe10c78c33
+tree	./test	8726	55c546a2813aac6ca53d389fee588ac7348d16bc7755f4786c4cbe6beaca78db
+tree	./doc	176	0bdde69f49e4255f9067e9ac695d36040185f1fcab3a898a6646fb01a2cb1bea
+tree	./mk	8	34f982447611c1ef0932deba06505de8b0824ca66b7f8c905c6f306d01862ea6

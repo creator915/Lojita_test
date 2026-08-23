@@ -1,0 +1,15 @@
+key	value
+schema	1
+status	engineering-provisional
+profile	formal-transport-host-v1
+cpu-model	Apple M4
+logical-cpus	10
+memory-bytes	25769803776
+required-power-source	AC Power
+required-low-power-mode	0
+required-thermal-state	nominal
+minimum-cpu-idle-percent	75
+minimum-memory-free-percent	20
+required-consecutive-samples	2
+maximum-sample-attempts	12
+process-snapshot-count	12

@@ -1,0 +1,19 @@
+-- Full Cubical typed-Term runtime
+---------------------------------------------------------------------------
+
+executable agda-cubical-run
+  hs-source-dirs: src/cubical-run
+  main-is:        Main.hs
+  build-depends:
+    , Agda
+    , base
+  default-language: Haskell2010
+  ghc-options:
+    -rtsopts
+
+  if !arch(wasm32)
+    ghc-options:
+      -threaded
+      "-with-rtsopts=-I0 -N1 -qb0"
+  else
+    ghc-options: -with-rtsopts=-I0
