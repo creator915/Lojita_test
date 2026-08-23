@@ -24,11 +24,11 @@ Last updated: 2026-08-23 (Asia/Shanghai)
 └── README.md                          operator-facing quick start
 ```
 
-This document describes the implemented compiler/backend slice. Goal 1 now has
-an independent locked stock Agda/MAlonzo/GHC lane. Goal 3 still requires an NbE
-component linked into the final program process. The existing compiler-process
-adapter must not be presented as goal 3, and static Chez publication is not
-used as goal 1 evidence.
+This document describes the implemented compiler/backend slice. Goal 1 has an
+independent locked stock Agda/MAlonzo/GHC lane. Goal 3 has an independent
+typed NbE library linked into a final-process executable under `runtime/nbe/`.
+The existing compiler-process adapter is not goal 3 evidence, and static Chez
+publication is not used as goal 1 evidence.
 
 The dependency direction is one-way: `src` depends on Agda APIs but never on
 tests, compatibility patches, generated evidence, or documentation.  Test
@@ -80,13 +80,14 @@ other generated module and may not appear in the final binary.
 
 ## Safety boundary
 
-Goal 3's future runtime sits in the final user-program process, outside this
+Goal 3's runtime sits in the final user-program process, outside this
 compiler-process diagram. Its normative process and data boundary is
 `config/runtime-nbe-boundary.tsv`, explained in
 `docs/RUNTIME_NBE_BOUNDARY.md`. Only immutable checked `Term + Type`, a closed
 definition slice and context identity may enter that linked runtime. Semantic
 closures and `TCState` never cross; an Agda subprocess or compiler callback is
-forbidden. No linked runtime implementation exists yet.
+forbidden. The linked implementation and ABI are documented in
+`docs/RUNTIME_NBE_ABI.md`.
 
 ```text
 Agda elaboration and type checking

@@ -15,12 +15,20 @@ NATIVE_AGDA ?= $(AGDA_PREFIX)/bin/agda
 NATIVE_AGDA_SOURCE_DIR ?=
 NATIVE_AGDA_DATA_DIR ?= $(AGDA_PREFIX)/share/agda
 NATIVE_GHC ?= $(GHC)
+RUNTIME_NBE_GHC ?= $(GHC)
+RUNTIME_NBE_AR ?= ar
+RUNTIME_NBE_LDFLAGS ?=
 
 BUILD_DIR := build
 BINARY := $(BUILD_DIR)/cubical-chez
 SOURCES := src/Main.hs src/CubicalChez/Backend.hs src/CubicalChez/Nbe/AdapterSpike.hs
+RUNTIME_NBE_DIR := $(BUILD_DIR)/runtime-nbe
+RUNTIME_NBE_LIB_DIR := $(RUNTIME_NBE_DIR)/lib
+RUNTIME_NBE_LIBRARY := $(RUNTIME_NBE_DIR)/libcubical-runtime-nbe.a
+RUNTIME_NBE_BINARY := $(RUNTIME_NBE_DIR)/cubical-runtime-nbe
+RUNTIME_NBE_GENERATOR := $(RUNTIME_NBE_DIR)/generate-packets
 
-.PHONY: build build-nbe-production-candidate check-nbe-production-promotion smoke verify verify-status-guide verify-readme-guide verify-readme-quickstart verify-support-matrix verify-troubleshooting-guide verify-benchmarks-guide verify-native-lane-contract verify-native-lane verify-runtime-nbe-boundary verify-nbe-provider-selection verify-nbe-adapter-source-identity verify-nbe-adapter-spike verify-nbe-production-candidate verify-nbe-adapter-transport-base verify-nbe-adapter-transport-glue verify-nbe-adapter-transport-int verify-nbe-adapter-transport-core verify-nbe-adapter-transport-hit verify-nbe-adapter-contract verify-nbe-fallback verify-engine-result-gate verify-binding-time verify-typed-residual-contract verify-primitive-audit verify-static-closure verify-chez-core-abi verify-failure-taxonomy verify-agda29 verify-agda29-stock-baseline verify-transport-shards verify-formal-transport verify-formal-transport-production-candidate verify-formal-transport-production-performance verify-formal-transport-production-release-performance verify-formal-transport-performance-self verify-formal-transport-performance-host-self verify-formal-transport-performance-publication-self verify-formal-transport-stage-timings-self verify-formal-transport-base verify-formal-transport-glue verify-formal-transport-int verify-formal-transport-core verify-formal-transport-boundary verify-formal-transport-hit verify-formal-transport-higher verify-formal-transport-monolithic verify-formal-transport-differential verify-formal-transport-differential-self verify-v2-runtime verify-official-targeted verify-official-compiler verify-official-suite-preflight verify-official-suite-group verify-official-native-group clean
+.PHONY: build build-runtime-nbe build-nbe-production-candidate check-nbe-production-promotion smoke verify verify-runtime-nbe verify-runtime-nbe-oracle verify-status-guide verify-readme-guide verify-readme-quickstart verify-support-matrix verify-troubleshooting-guide verify-benchmarks-guide verify-native-lane-contract verify-native-lane verify-runtime-nbe-boundary verify-nbe-provider-selection verify-nbe-adapter-source-identity verify-nbe-adapter-spike verify-nbe-production-candidate verify-nbe-adapter-transport-base verify-nbe-adapter-transport-glue verify-nbe-adapter-transport-int verify-nbe-adapter-transport-core verify-nbe-adapter-transport-hit verify-nbe-adapter-contract verify-nbe-fallback verify-engine-result-gate verify-binding-time verify-typed-residual-contract verify-primitive-audit verify-static-closure verify-chez-core-abi verify-failure-taxonomy verify-agda29 verify-agda29-stock-baseline verify-transport-shards verify-formal-transport verify-formal-transport-production-candidate verify-formal-transport-production-performance verify-formal-transport-production-release-performance verify-formal-transport-performance-self verify-formal-transport-performance-host-self verify-formal-transport-performance-self verify-formal-transport-performance-publication-self verify-formal-transport-stage-timings-self verify-formal-transport-base verify-formal-transport-glue verify-formal-transport-int verify-formal-transport-core verify-formal-transport-boundary verify-formal-transport-hit verify-formal-transport-higher verify-formal-transport-monolithic verify-formal-transport-differential verify-formal-transport-differential-self verify-v2-runtime verify-official-targeted verify-official-compiler verify-official-suite-preflight verify-official-suite-group verify-official-native-group clean
 
 build: $(BINARY)
 
@@ -29,6 +37,29 @@ $(BINARY): $(SOURCES)
 	$(GHC) -O0 -Wall -Werror -dynamic $(CPP_FLAGS) \
 		-package-db $(AGDA_PACKAGE_DB) -package Agda \
 		-isrc -outputdir $(BUILD_DIR)/ghc -o $@ src/Main.hs
+
+build-runtime-nbe:
+	mkdir -p "$(RUNTIME_NBE_LIB_DIR)" "$(RUNTIME_NBE_DIR)/app" "$(RUNTIME_NBE_DIR)/test"
+	$(RUNTIME_NBE_GHC) -O2 -Wall -Werror -fforce-recomp \
+		-iruntime/nbe/src -odir "$(RUNTIME_NBE_LIB_DIR)" -hidir "$(RUNTIME_NBE_LIB_DIR)" \
+		-c runtime/nbe/src/Cubical/Runtime/Nbe.hs
+	$(RUNTIME_NBE_AR) rcs "$(RUNTIME_NBE_LIBRARY)" \
+		"$(RUNTIME_NBE_LIB_DIR)/Cubical/Runtime/Nbe.o"
+	mkdir -p "$(RUNTIME_NBE_DIR)/app/Cubical/Runtime" "$(RUNTIME_NBE_DIR)/test/Cubical/Runtime"
+	cp "$(RUNTIME_NBE_LIB_DIR)/Cubical/Runtime/Nbe.hi" \
+		"$(RUNTIME_NBE_DIR)/app/Cubical/Runtime/Nbe.hi"
+	cp "$(RUNTIME_NBE_LIB_DIR)/Cubical/Runtime/Nbe.hi" \
+		"$(RUNTIME_NBE_DIR)/test/Cubical/Runtime/Nbe.hi"
+	$(RUNTIME_NBE_GHC) -O2 -Wall -Werror -fforce-recomp \
+		-i"$(RUNTIME_NBE_DIR)/app" -odir "$(RUNTIME_NBE_DIR)/app" -hidir "$(RUNTIME_NBE_DIR)/app" \
+		-c runtime/nbe/app/Main.hs -o "$(RUNTIME_NBE_DIR)/app/Main.o"
+	$(RUNTIME_NBE_GHC) -O2 $(RUNTIME_NBE_LDFLAGS) -o "$(RUNTIME_NBE_BINARY)" \
+		"$(RUNTIME_NBE_DIR)/app/Main.o" "$(RUNTIME_NBE_LIBRARY)"
+	$(RUNTIME_NBE_GHC) -O2 -Wall -Werror -fforce-recomp \
+		-i"$(RUNTIME_NBE_DIR)/test" -odir "$(RUNTIME_NBE_DIR)/test" -hidir "$(RUNTIME_NBE_DIR)/test" \
+		-c runtime/nbe/test/GeneratePackets.hs -o "$(RUNTIME_NBE_DIR)/test/Main.o"
+	$(RUNTIME_NBE_GHC) -O2 $(RUNTIME_NBE_LDFLAGS) -o "$(RUNTIME_NBE_GENERATOR)" \
+		"$(RUNTIME_NBE_DIR)/test/Main.o" "$(RUNTIME_NBE_LIBRARY)"
 
 build-nbe-production-candidate:
 	NBE_ADAPTER_SOURCE_IDENTITY="$(NBE_SOURCE_IDENTITY)" sh test/scripts/verify-nbe-adapter-source-identity.sh
@@ -63,7 +94,7 @@ smoke: build
 	chez --version
 
 
-verify: build verify-status-guide verify-readme-guide verify-support-matrix verify-troubleshooting-guide verify-benchmarks-guide verify-native-lane-contract verify-runtime-nbe-boundary verify-nbe-provider-selection verify-nbe-adapter-source-identity verify-nbe-adapter-spike verify-nbe-production-candidate verify-nbe-adapter-contract verify-nbe-fallback verify-engine-result-gate verify-binding-time verify-typed-residual-contract verify-primitive-audit verify-static-closure verify-chez-core-abi verify-failure-taxonomy verify-formal-transport-stage-timings-self verify-formal-transport-performance-host-self verify-formal-transport-performance-self verify-formal-transport-performance-publication-self
+verify: build verify-runtime-nbe verify-status-guide verify-readme-guide verify-support-matrix verify-troubleshooting-guide verify-benchmarks-guide verify-native-lane-contract verify-runtime-nbe-boundary verify-nbe-provider-selection verify-nbe-adapter-source-identity verify-nbe-adapter-spike verify-nbe-production-candidate verify-nbe-adapter-contract verify-nbe-fallback verify-engine-result-gate verify-binding-time verify-typed-residual-contract verify-primitive-audit verify-static-closure verify-chez-core-abi verify-failure-taxonomy verify-formal-transport-stage-timings-self verify-formal-transport-performance-host-self verify-formal-transport-performance-self verify-formal-transport-performance-publication-self
 	AGDA_PREFIX="$(AGDA_PREFIX)" AGDA_LIBRARY_REGISTRY="$(AGDA_LIBRARY_REGISTRY)" \
 		sh test/scripts/verify-smoke.sh
 
@@ -99,6 +130,16 @@ verify-native-lane:
 
 verify-runtime-nbe-boundary:
 	sh test/scripts/verify-runtime-nbe-boundary.sh
+
+verify-runtime-nbe: build-runtime-nbe
+	RUNTIME_NBE_BINARY="$(RUNTIME_NBE_BINARY)" \
+	RUNTIME_NBE_LIBRARY="$(RUNTIME_NBE_LIBRARY)" \
+	RUNTIME_NBE_GENERATOR="$(RUNTIME_NBE_GENERATOR)" \
+		sh test/scripts/verify-runtime-nbe.sh
+
+verify-runtime-nbe-oracle: verify-runtime-nbe
+	RUNTIME_NBE_BINARY="$(RUNTIME_NBE_BINARY)" \
+		sh test/scripts/verify-runtime-nbe-oracle.sh
 
 verify-nbe-provider-selection:
 	sh test/scripts/verify-nbe-provider-selection.sh

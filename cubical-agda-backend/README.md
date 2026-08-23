@@ -9,11 +9,11 @@
 | --- | --- | --- |
 | 1. stock Agda -> MAlonzo -> Haskell -> GHC 二进制 | **已实现并验收** | 锁定 Stock Agda 2.9.0 / MAlonzo / GHC 9.10.3；独立二进制审计 |
 | 2. 跨进程 `Term + Type` packet | **已有实现** | 仍需 clean-clone overlay 构建验收 |
-| 3. 最终程序进程内 runtime NbE | **未实现** | 当前 NbE 只在 Agda 编译器进程内 |
+| 3. 最终程序进程内 runtime NbE | **已实现并验收** | cctt-informed typed runtime library；三路调度集成仍开放 |
 
 当前可用的是候选 CubicalChez 后端、checked typed residual/packet、编译期
-NbE adapter 候选与完整的安全拒绝门禁。目标 1 已关闭；目标 3 和总体发布
-门禁未关闭前，不得将仓库标记为完整交付。
+NbE adapter 候选与完整的安全拒绝门禁。目标 1 和目标 3 的独立组件已关闭；
+三路调度和总体发布门禁未关闭前，不得将仓库标记为完整交付。
 
 ## 目标数据流
 
@@ -22,7 +22,7 @@ Agda source
    |
    +-- native-safe ------> stock Agda/MAlonzo -> erased Haskell -> binary   [IMPLEMENTED]
    +-- cross-process ----> checked Term + Type packet                       [IMPLEMENTED]
-   `-- runtime-higher ---> linked in-process runtime NbE                    [OPEN]
+   `-- runtime-higher ---> linked in-process runtime NbE             [IMPLEMENTED]
 ```
 
 跨进程只传输 Agda Internal `Term + Type` 协议数据。NbE 语义值、closure 和
@@ -36,6 +36,7 @@ Agda source
 ├── DELIVERY_CHECKLIST.md        唯一验收清单
 ├── src/                         CubicalChez 编译器后端
 ├── runtime/agda-2.9/            v2 typed Term 运行时 overlay 源码
+├── runtime/nbe/                 最终进程 typed runtime NbE 库
 ├── config/                      NbE/provider/性能锁定信息
 ├── compat/                      锁定上游的显式兼容补丁
 ├── test/fixtures/               Agda 测试输入
@@ -145,6 +146,7 @@ make verify-formal-transport-production-candidate
 make verify-status-guide
 make verify-native-lane-contract
 make verify-native-lane
+make verify-runtime-nbe
 make verify-support-matrix
 make verify-nbe-adapter-spike
 make verify-nbe-production-candidate
@@ -164,6 +166,7 @@ make verify-v2-runtime
 - [`ARCHITECTURE.md`](docs/ARCHITECTURE.md)：现有编译期架构。
 - [`NATIVE_LANE.md`](docs/NATIVE_LANE.md)：目标 1 分类、工具链锁与产物审计。
 - [`RUNTIME_NBE_BOUNDARY.md`](docs/RUNTIME_NBE_BOUNDARY.md)：目标 3 最终进程与数据边界。
+- [`RUNTIME_NBE_ABI.md`](docs/RUNTIME_NBE_ABI.md)：目标 3 ABI、provider 和资源边界。
 - [`ENGINE_CONTRACT.md`](docs/ENGINE_CONTRACT.md)：引擎请求/结果与 typed residual 契约。
 - [`SUPPORT-MATRIX.md`](docs/SUPPORT-MATRIX.md)：支持、候选、残余与拒绝状态。
 - [`STATUS.md`](docs/STATUS.md)：当前实现与未交付项。
@@ -175,6 +178,8 @@ make verify-v2-runtime
 ## 当前边界
 
 - Chez 仍是独立候选静态目标；目标 1 由 `bin/cubical-agda-native` 的原版 MAlonzo/GHC 路径验收。
-- 编译器进程内 adapter candidate 不是目标 3 要求的最终程序 runtime NbE。
+- 编译器进程内 adapter candidate 不是目标 3 证据；目标 3 由 `runtime/nbe/`
+  的独立静态库、最终可执行文件与专项门禁验收。
 - `t11/t11b` 等已知残余不得进入无类型执行路径。
-- 生产 NbE provider 仍缺正式仓库/revision/许可证批准，默认保持安全拒绝。
+- 编译器进程的默认 `nbe` provider lock 仍保持未选择和安全拒绝；目标 3 的
+  独立 runtime provider 已锁定并验收。

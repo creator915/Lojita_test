@@ -12,8 +12,8 @@ Chez/compiler-process-NbE scope and is retired.
 | --- | ---: | --- |
 | 1. stock Agda -> MAlonzo -> erased Haskell -> native binary | 9/9 | IMPLEMENTED; VERIFIED |
 | 2. cross-process checked `Term + Type` | 8/9 | IMPLEMENTED; clean-clone gate open |
-| 3. linked NbE inside the final program process | 1/11 | NOT IMPLEMENTED; process/data boundary fixed |
-| Complete revised checklist | 30/56 | 53.6% by item count; not effort-weighted |
+| 3. linked NbE inside the final program process | 11/11 | IMPLEMENTED; VERIFIED |
+| Complete revised checklist | 43/56 | 76.8% by item count; not effort-weighted |
 
 ## What is usable now
 
@@ -30,6 +30,9 @@ Chez/compiler-process-NbE scope and is retired.
 - The locked stock Agda/MAlonzo/GHC lane passes ordinary and erased-Cubical
   compile/run, stock differential, misclassification, stale-artifact, and
   binary-runtime audits from both the working tree and a clean clone.
+- The final-process typed NbE library is locked to the cctt algorithm source,
+  linked into its executable, and passes 24 in-process/negative/link tests plus
+  the pinned Agda oracle gate for `t11/t11b/t16`.
 
 ## What is not yet delivered
 
@@ -43,17 +46,16 @@ fail-closed behavior. Static Chez output is not used as evidence for this goal.
 
 ### Goal 3
 
-There is no NbE library linked into the final user-program process. The
-existing adapter is invoked from the Agda compiler process before Treeless
-lowering. It therefore cannot be reported as runtime NbE.
+`runtime/nbe/` supplies a standalone typed runtime core, static archive and
+final executable. It validates the ABI/provider/context and definition slice,
+evaluates with request-local environments, closures and cache, implements the
+audited Glue/Pi/Sigma/Vec/HIT/Kan fragment, quotes by type and rechecks the
+quoted term. Fuel, allocation and packet caps fail closed.
 
-Goal 3 still needs a runtime ABI, Term-to-semantic reflect, environment and
-closure evaluation, Cubical operations, typed reify, resource bounds, linking,
-and no-subprocess end-to-end tests.
-
-The final-user-process identity and immutable checked-data boundary are fixed
-by `config/runtime-nbe-boundary.tsv` and `docs/RUNTIME_NBE_BOUNDARY.md`. This is
-one closed design P0, not runtime implementation evidence.
+The selected algorithm source is cctt commit `ba16f375...`, MIT. cctt is not a
+drop-in Agda library; the linked code is the approved backend-owned adapter.
+The compiler-process candidate is still separate and supplies no Goal 3
+evidence. Three-lane scheduling into this runtime remains open in checklist F.
 
 ## Repository state
 
@@ -71,12 +73,15 @@ The current and retained candidate evidence is:
 - root-layout local `make verify`: PASS on 2026-08-23;
 - goal 1 `make verify-native-lane`: PASS on 2026-08-23, including a separate
   clean clone from local commit `7578f56`;
+- goal 3 `make verify-runtime-nbe`: 24/24 PASS on 2026-08-23;
+- goal 3 `make verify-runtime-nbe-oracle`: 2 Agda modules and 5 runtime
+  scenarios PASS on 2026-08-23;
 - Agda 2.9: 155 positive executions and 146 expected rejections PASS;
 - formal candidate differential: 8/8 groups and 42/42 rows PASS;
 - controlled O2 provisional performance: `ENGINEERING-PERFORMANCE-PASS`.
 
-These results validate existing compiler/packet behavior only. They do not
-validate goal 1 or goal 3. Clean-clone validation remains open.
+Goal 1 and Goal 3 component gates are closed. Goal 2 clean-clone validation,
+three-lane dispatch/integration and overall release validation remain open.
 
 ## Reproduce the current root contract
 

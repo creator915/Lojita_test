@@ -44,7 +44,7 @@ done
 
 for fact in \
   'stock Agda -> MAlonzo -> Haskell -> GHC 二进制 | **已实现并验收**' \
-  '最终程序进程内 runtime NbE | **未实现**' \
+  '最终程序进程内 runtime NbE | **已实现并验收**' \
   'runtime/agda-2.9/' \
   '不在 Git' \
   '`CCZ-NBE-UNAVAILABLE`' \
@@ -122,6 +122,7 @@ for link in \
   '(docs/TEST-RESULTS.md)' \
   '(docs/BENCHMARKS.md)' \
   '(docs/NBE_SELECTION.md)' \
+  '(docs/RUNTIME_NBE_ABI.md)' \
   '(docs/TROUBLESHOOTING.md)'
 do
   require_text "$readme" "$link"
