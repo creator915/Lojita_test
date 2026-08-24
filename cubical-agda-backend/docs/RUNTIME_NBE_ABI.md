@@ -84,11 +84,13 @@ type changed is rejected. The final runtime has no Agda package, `TCState`,
 The historical full-fixture correlation script remains non-differential and is
 not acceptance evidence. The maintained same-input gate instead exports the
 actual checked definitions `t11`, `t11b`, `t09`, and `t16a`-`t16c`, executes
-the linked runtime, and invokes Agda's oracle on those same definitions. For
-`t11/t11b`, the oracle eliminates the checked Vec value to a canonical pair of
-Bool observations. The runtime structurally renders its typed Vec result to
-the same observation, and the gate requires byte-for-byte equality. A residual
-is a failure, not an accepted boundary.
+the linked runtime, and invokes Agda's oracle. For `t11/t11b`, whose indexed
+transport is intentionally residual, checked proofs connect the exported root
+to a canonical Vec computed from the same named input and equivalence/path.
+Agda observes that canonical value as a Bool pair. The runtime structurally
+renders its typed Vec result to the same observation, and the gate requires
+byte-for-byte equality. A missing proof or residual oracle is a failure, not an
+accepted boundary.
 
 The formerly failing higher-order readback regression is a PASS and negative
 input indices reject. The replacement differential awaits locked-CI evidence;

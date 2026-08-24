@@ -102,6 +102,7 @@ Internal 桥覆盖验收所需的 `transp`/`hcomp`/Glue/Pi/Sigma(record)/S¹
 vendored Core 模块由内容哈希锁定，`Core.eval` 与 `Quotation.quoteUnfold`
 链接进最终 ELF；provider 已对实际 Bool/Int/Vec/Sigma 输入归一化并以结果驱动
 readback，不再使用固定 probe。`t11/t11b/t09/t16a/t16b/t16c` 的新门禁从同一
-checked definition 导出 runtime 输入；其中 t11/t11b 通过对该定义做 Vec 消去
-取得 Agda canonical observation，并要求与 runtime observation 逐字相等。该门禁
+checked definition 导出 runtime 输入；Agda 对 t11/t11b 的 indexed transport
+会保留 `transpX-Vec`，因此门禁改用已类型检查的等价性证明把同一输入的实际定义
+连接到可计算 canonical oracle，要求与 runtime observation 逐字相等。该门禁
 尚需锁定 CI 成功后才能勾选，CI 全绿本身也不自动构成最终用户验收。

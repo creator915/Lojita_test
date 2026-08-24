@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 26785)
-Total output lines: 1565
-
 # Test results
 
 Last updated: 2026-08-23 (Asia/Shanghai)
@@ -39,9 +36,10 @@ The maintained `semantic-negative-index.packet` regression now returns the
 correct `App (Var 1) (Var 0)`, and a malicious negative-index packet rejects.
 cctt linkage passes ten source hashes, eleven actual-input eval/quotation cases
 and final-ELF symbol checks. The replacement same-input gate covers
-`t11/t11b/t09/t16a/t16b/t16c`; t11/t11b now eliminate the exported definition
-to canonical Bool-pair observations and compare them exactly. Its locked-CI
-result is pending, so this ledger does not record Goal 3 acceptance.
+`t11/t11b/t09/t16a/t16b/t16c`; checked proofs now connect the residual indexed
+`t11/t11b` definitions to canonical oracles computed from their shared inputs,
+and the gate compares the Bool-pair observations exactly. Its locked-CI result
+is pending, so this ledger does not record Goal 3 acceptance.
 
 ## Environment
 
@@ -455,7 +453,462 @@ The backend classifies each producer as a typed residual, self-validates its v2
 packet, and sends it to an independently built archived consumer. `p16a/c16a`
 returns `true` by file and direct pipe, while `p16b/c16b` and `p16c/c16c`
 return `pos 2` by direct pipe. `p16a/c16b` is rejected before application with
-`UnequalTypes`. The retained fil…6785 tokens truncated…oundary transformations are
+`UnequalTypes`. The retained file packet is 13,390 bytes with SHA-256
+`57c7f7ca3100ec98618ea353184a2dbe4de4d1ab110d1e56adb43b2c618b6caa`;
+the three pipe cases leave no packet file and no Higher case emits Scheme.
+
+The seven groups above are source-level exact projections, not handwritten IR;
+the separate original-monolith result follows below. The maintained base gate
+creates 35 reusable `.agdai` files only inside its disposable
+workspace. With engine-result and binding-time gates active, its cases took
+3.16, 0.17, and 0.17 seconds, with peak RSS 223,625,216, 110,264,320, and 110,166,016
+bytes. The Glue gate uses 76
+disposable interfaces; its cases took 6.87, 0.35, and 0.35 seconds with peak RSS
+367,722,496, 181,649,408, and 181,583,872 bytes. The Int gate uses 122
+interfaces; its cases took 11.49 and 0.53 seconds with peak RSS 492,617,728 and
+241,451,008 bytes. The Core gate uses 81 interfaces; its cases took 7.38 and
+0.37 seconds with peak RSS 307,953,664 and 183,746,560 bytes. The supplied
+cubical tree was manifest-equal before and after all groups and retained zero
+generated interfaces.
+
+The Boundary gate uses 78 disposable interfaces; after four-way classification,
+`t11/t11b` took 7.35 and 0.39 seconds with peak RSS 311,574,528 and 180,928,512
+bytes. The Hit gate uses
+125 disposable interfaces; `t12`-`t15` took 11.59, 0.55, 0.57, and 0.54 seconds
+with peak RSS 494,698,496, 249,856,000, 266,469,376, and 249,790,464 bytes.
+These first six groups took 51.83 case-seconds. Higher uses 125 disposable
+interfaces; its file and three pipe positives took 11.58, 0.60, 0.60, and 0.60
+seconds with peak RSS 431,783,936, 252,035,072, 252,411,904, and 252,280,832
+bytes. Across all seven groups, the 20 timed cases took 65.21 case-seconds and
+the highest child RSS was 494,698,496 bytes; the additional wrong-consumer case
+is an untimed expected rejection.
+
+The original-monolith gate fixes source SHA-256
+`8dc43da819617ae66cee4b975cb12c10bef25e928fa395b6bf18f7d612914e0b`.
+Inside one disposable workspace it first typechecks the seven projections and
+then the original module with stock Agda, creating 134 reusable interfaces.
+Those eight prewarm steps take 15.30 seconds with a 548,552,704-byte maximum.
+The formal backend then selects every `TransportTests.t01`-`t15` entry and all
+three higher producers from that same original module. It records 14 static
+PASS, 2 `EXPECTED-RESIDUAL`, 4 packet PASS, and one `EXPECTED-REJECT`; its 20
+timed cases total 11.55 seconds with a 266,010,624-byte maximum. The retained
+file packet is 13,385 bytes with SHA-256
+`11ae3c9f9be97e43e656f417f756e36765b9269a5c3f6b0e53ead71885d3c60d`;
+the three direct pipes leave no packet file.
+
+For comparison, an earlier projected `t01` run with interface writing disabled
+took 254.24 seconds and 11,722,457,088 bytes. A direct cold formal-backend
+attempt on the complete original source was manually terminated after 906.67
+seconds at 12,254,330,880 bytes and produced no semantic failure
+classification. These remain resource diagnostics, not a production-NbE
+performance PASS.
+
+Evidence:
+
+- `build/agda29/transport-shards/`
+- `build/agda29/formal-transport/base/`
+- `build/agda29/formal-transport/glue/`
+- `build/agda29/formal-transport/int/`
+- `build/agda29/formal-transport/core/`
+- `build/agda29/formal-transport/boundary/`
+- `build/agda29/formal-transport/hit/`
+- `build/agda29/formal-transport/higher/`
+- `build/agda29/formal-transport/monolithic/`
+- `build/agda29/formal-transport/t01/`
+- `build/agda29/formal-transport-differential/self-check/`
+- `build/agda29/v2-runtime/`
+
+## Formal-engine differential controls
+
+The formal runner now accepts `FORMAL_TRANSPORT_ENGINE`. Baseline evidence stays
+under `formal-transport/`, while `nbe` evidence is directed to
+`formal-transport-nbe/`. The comparator validates 8/8 group contracts using the
+first five machine-readable summary columns and separately checks source hashes,
+exact fragments, scenario inventories, prewarm status, and recorded engine.
+
+The explicit self-check passes all groups with `SELF-CHECK-PASS` and cannot be
+reported as an NbE differential result. Three negative controls also pass:
+baseline self-comparison without authorization is rejected; changing one
+observed value is rejected with a contract diff; and absent candidate evidence
+is rejected with the exact generation command. The selected+linked production
+candidate now supplies independent evidence for all seven projections and the
+original monolith. The real comparator reports 8/8 `DIFFERENTIAL-PASS` groups
+covering 42/42 summary rows. Static observations match the oracle. Unsupported
+Boundary/Higher scenarios preserve their Agda-checked term/type as typed
+residuals, retain effective engine `nbe`, and contain no Agda-baseline
+normalization fallback. The unselected default binary remains a separate
+zero-publication negative control.
+
+## Production-candidate performance controls
+
+The O0 and release-O2 collectors first run a result-specific
+transactional-publication self-check with three positives and four negatives,
+then a host-contract self-check with one positive and six negatives. Its
+end-to-end comparator passes valid O0 and O2 datasets and rejects elapsed-time,
+RSS or allocation regression, wrong engine or optimization provenance,
+non-quiescent host evidence, missing process or allocation evidence, and a
+missing run. Its stage
+comparator separately passes one valid dataset and rejects malformed or
+missing stage evidence. The
+collector then runs three real full-matrix repetitions with alternating engine
+order. Each of the 48 engine/group executions must first provide two
+consecutive host samples with AC power, low-power mode off, nominal thermal
+state, at least 75% CPU idle and 20% memory free, followed by a 12-process
+snapshot.
+
+Profile v2 additionally enables GHC `+RTS -s` on every backend process. Each
+group must contain `allocations.tsv` with allocated heap bytes, GC-copied bytes,
+and maximum heap residency for exactly the timed scenarios. The comparator
+produces `allocation-summary.tsv` with median/p95/min/max/MAD. Provisional p95
+ceilings are 1.20 overall/static and 1.30 residual/per-group. The publisher
+requires this summary before promotion.
+
+The collector writes only to a sibling pending directory. After stage and
+end-to-end validation, the publisher accepts either a complete PASS or a
+complete threshold FAIL, records `publication.tsv`, archives the previous
+current result, and promotes the new directory. Any earlier failure removes
+only pending evidence. This distinction preserves valid failing benchmark
+results while preventing partial runs from becoming the current result.
+
+The latest accepted release-O2 dataset returns
+`ENGINEERING-PERFORMANCE-PASS`. Static projections have 43.03/43.00-second
+baseline/candidate medians and time/RSS/allocation p95 ratios
+1.027134/1.005906/1.000046. Typed-residual projections have 20.28/20.20-second
+medians and p95 ratios 0.999507/1.194333/0.999802. Overall medians are
+74.18/74.15 seconds with p95 ratios 1.016723/1.067052/0.999941. All 48 host
+preflights and allocation datasets pass, and the complete 3,219-file raw tree
+is transactionally published at
+`build/agda29/formal-transport-performance-release/`.
+
+The retained profile-v1 O0 dataset remains
+`ENGINEERING-PERFORMANCE-FAIL`.
+Static-projection median time is 43.15 seconds for baseline and 42.89 seconds
+for the candidate; time/RSS p95 ratios are 0.999535/1.109588. Typed-residual
+projections are 20.10/20.25 seconds with time/RSS p95 ratios
+1.009960/1.303373; the RSS value narrowly exceeds the 1.30 ceiling. Overall
+median time is 74.27/74.24 seconds, with time/RSS p95 ratios
+1.003106/1.030427. The three individual Higher RSS ratios are 1.186747,
+1.303373, and 0.941208. That retained dataset predates the host contract and is
+kept as historical diagnostic evidence rather than reclassified. The first
+controlled retry was rejected because the machine was on Battery Power; it exited before
+creating a pending result, archive entry, or replacing the 2,877 existing raw
+files. The later AC-powered O2 run completed and passed without changing the
+threshold.
+
+A non-controlled one-shot Base instrumentation check passed on both engines.
+The three scenario totals were 9,816,078,064 baseline and 9,818,742,744
+candidate allocated bytes (ratio 1.000271). Because the host was on battery,
+this is schema/instrumentation evidence only and not a performance verdict.
+
+The timing contract covers 40 timed scenarios per engine and exactly 11
+stages per scenario. Release candidate median-run totals include 0.023299
+seconds of NbE evaluation, 0.000107 seconds of readback over 32 supported
+cases, 0.022394 seconds of residualization, 0.015960 seconds of Scheme
+publication, 0.56 seconds of Chez execution, and 4.75 seconds of
+typed-consumer execution. The combined Agda frontend/module-loading remainder
+is 74.073513 seconds; because
+it is derived from process elapsed time it includes startup and does not split
+parser from type checker. Full statistics and raw paths are in
+`BENCHMARKS.md`.
+
+## Official targeted Agda tests
+
+The maintained target invokes the official `agda-tests` Tasty executable for
+`all/CubicalSucceed`, without recreating its assertion. `Issue5956` passes. The
+test executable was built without Agda's `-fdebug`; it prints the upstream
+warning that debug-dependent tests are skipped, but the selected CubicalSucceed
+test is not one of those tests.
+
+The target also invokes the official `test/api/Makefile` rules for:
+
+- `Issue1168.api`: interface-file loading;
+- `PrettyInterface.api`: API typechecking and interface inspection;
+- `ScopeFromInterface.api`: truncated interface decode and scope recovery via
+  `Agda.TypeChecking.Serialise`.
+
+All three compile with `-Wall -Werror` and execute successfully. This earlier
+targeted run classified `PrintImports.run` as `SKIP-ENVIRONMENT` because the
+supplied parent snapshot had an empty `std-lib` directory. The later complete
+`api-test` gate uses the parent commit's exact std-lib gitlink snapshot and now
+passes all four upstream API targets, closing that historical skip without
+substituting a host-installed library.
+
+The compiler-focused subset adds three upstream QuickCheck properties for
+`Internal.Compiler.MAlonzo.Encode`; each property completes 100 generated
+cases. It also runs these four official `MAlonzo_Lazy` golden tests:
+
+- `Cubical-is-not-supported`;
+- `Cubical-primitives-are-not-supported`;
+- `Erased-cubical-Pattern-matching`;
+- `Higher-inductive-types-are-not-supported`.
+
+All four pass their complete golden output, which requires exit status 42 and
+the `CubicalCompilationNotSupported` diagnostic. This proves the stock GHC
+backend's existing rejection behavior; it does not claim that the formal Chez
+backend should retain that limitation.
+
+The typechecking/conversion subset adds:
+
+- all 11 root `Internal.TypeChecking` QuickCheck properties, each with 100
+  generated cases, covering telescope flattening, reordering, splitting, scope,
+  dependencies, dependents, and permutation scope;
+- five success regressions: `EtaSingletonField`, `Issue6720`, `Issue7853`,
+  `NatEquals`, and the Cubical-sensitive `TranspReflPair`;
+- five golden failure regressions: `ConvErrCtxLam`, `ConvErrCtxLevels`,
+  `Issue3572`, `Issue8037`, and `UnequalTerms`.
+
+The failure cases are checked by the official Fail test driver against their
+complete `.err` files, rather than by merely observing a non-zero exit. Together
+these add 21/21 passing tests and bring this maintained official target to
+32/32 selected tests.
+
+Evidence:
+
+- `build/agda29/official-targeted/summary.tsv`
+- `build/agda29/official-targeted/cubical-succeed.stdout.log`
+- `build/agda29/official-targeted/api-interface.stdout.log`
+- `build/agda29/official-targeted/internal-compiler.stdout.log`
+- `build/agda29/official-targeted/compiler-cubical-negatives.stdout.log`
+- `build/agda29/official-targeted/internal-typechecking.stdout.log`
+- `build/agda29/official-targeted/conversion-succeed.stdout.log`
+- `build/agda29/official-targeted/conversion-fail.stdout.log`
+- `build/agda29/official-targeted/skips.log`
+
+## Official complete Compiler group
+
+The maintained full-group target follows the upstream `compiler-test` command:
+`--regex-include all/Compiler --regex-exclude AllStdLib`. It hashes all 334
+files below `test/Compiler` plus the three driver files, builds the pinned Agda
+and `agda-tests` with `-fdebug` in a separate build directory, and runs ten jobs
+against GHC 9.6.7 and Node 24.13.0. The six backend configurations report:
+
+| Backend configuration | Passed | Upstream-disabled |
+| --- | ---: | ---: |
+| MAlonzo Lazy | 130 | 2 |
+| MAlonzo StrictData | 129 | 2 |
+| MAlonzo Strict | 130 | 2 |
+| JS NonOptimized | 102 | 11 |
+| JS Optimized | 98 | 12 |
+| JS MinifiedOptimized | 98 | 12 |
+
+Thus the static 730-test inventory is fully accounted for: 687 tests execute
+and pass, 41 are explicitly disabled by upstream `Compiler.Tests.disabledTests`,
+and the two `AllStdLib`/`AllStdLibJS` cases are excluded by the upstream target.
+The two separate exact-gitlink runs above now close both exclusions:
+MAlonzo `AllStdLib` and JS MinifiedOptimized `AllStdLibJS`.
+
+An initial probe with the existing non-debug binary reached a `CaseOnCase`
+golden difference because the expected Treeless debug output was unavailable.
+This is classified `ENVIRONMENT-RESOLVED-BY-FDEBUG`, not a backend regression;
+the separate debug build passes that test and the complete matrix without
+changing any golden file.
+
+Evidence:
+
+- `build/agda29/official-compiler/summary.tsv`
+- `build/agda29/official-compiler/matrix.tsv`
+- `build/agda29/official-compiler/classification.tsv`
+- `build/agda29/official-compiler/compiler.stdout.log`
+- `build/agda29/official-compiler/compiler.stderr.log`
+- `build/agda29/official-compiler/non-fdebug-probe.stdout.log`
+- `build/agda29/official-compiler/skips.log`
+
+## Open test work
+
+- resolution of the LaTeX and fix-whitespace full-suite environment
+  prerequisites;
+- owner confirmation of the final speed/RSS/allocation/timeout thresholds;
+- direct upstream parser/typechecker instrumentation if that split is required;
+- production resource enforcement beyond the maintained group timeout, and a
+  final clean-package rerun.
+
+## NbE provider and adapter identity contracts
+
+`make verify-nbe-adapter-source-identity` regenerates the canonical
+manifest of the three in-tree provider source files. It confirms 465,028 bytes,
+zero patch files, and manifest SHA-256
+`3e0fa90e45f57a544b36f0041065c439a384d65a6e1ff19bf8a61ec4bdddfa9a`.
+Three positives cover the current content-pinned/legally blocked state, a
+synthetic Git source with approved MIT evidence, and its matching promotion
+lock. Six controls reject current production promotion, source mutation, stale
+manifest hash, path traversal, a license claim without Git provenance, and a
+mismatched lock. Evidence is under
+`build/nbe-adapter-source-identity-contract/`; the current regenerated
+manifest and verification record are under
+`build/nbe-adapter-source-identity/`.
+
+This is deliberately not a license conclusion. The current workspace has no
+usable Git revision and no project license, so
+`make check-nbe-production-promotion` returns
+`CCZ-NBE-PROMOTION-BLOCKED`. Candidate builds and formal NbE invocations recheck
+the content manifest; their `invocation.tsv` records the source manifest hash,
+`license-status=owner-action-required`, and
+`selection-eligibility=blocked`. A future eligible record must additionally
+match Git `HEAD`/`origin`, clean source files, an actual license-file hash,
+decision owner/date, and every corresponding selected-lock field.
+
+`make verify-nbe-provider-selection` validates the exact four-row
+public census in `config/nbe-provider-candidates.tsv`. The positive census
+records full commits, deterministic `git archive` SHA-256 values, licenses,
+languages, package boundaries, calculi, and integration dispositions for
+`cctt`, `cooltt`, `cubicaltt`, and `smalltt`. It currently reports zero drop-in
+Agda Internal adapters. Floating revision, fake drop-in capability, missing
+candidate, and prematurely selected lock variants are all `EXPECTED-REJECT`.
+Evidence is in `build/nbe-provider-selection/summary.tsv`.
+
+This feasibility result leaves the formal provider lock `unselected`; it does
+not convert the preferred `cctt` algorithm reference into a linked dependency.
+
+`make verify-nbe-production-candidate` passes two selected+linked
+positives and four expected rejections. The checked-in unselected lock and a
+schema-valid selected lock naming another provider are stopped before
+compilation; linked-only and selected-only binaries each return
+`CCZ-NBE-UNAVAILABLE` and remove stale publications. The positives use the
+validated synthetic selected fixture: one prints 42 and matches baseline
+observed/Treeless/Scheme byte-for-byte, and records effective `nbe`,
+`agda-specific-in-process-v1`, production-candidate linkage, selected build
+key, Agda result checking, and `candidate-not-accepted`; the other proves
+checked typed-residual preservation for an unsupported request with no Scheme
+or packet publication. Evidence is under
+`build/nbe-production-candidate/`.
+
+`make verify-nbe-adapter-spike` passes fourteen differential results
+and nine fail-closed controls. `flip (flip true)`, `flip true`, recursive
+`double 21` produce byte-equal Treeless and Scheme versus `agda-baseline`;
+the Nat case records 1 definition-cache miss, 21 hits, and maximum call depth
+22. A polymorphic Pi identity is also byte-equal and records 5 Type, 6 Sort,
+and 6 Level nodes evaluated by the adapter. A custom recursive `Tree` returns
+9; `Pair.right (pair 7 42)` returns 42 with one projection; a dependent
+`Family.Carrier` identity is byte-equal with two neutral type projections.
+The universe-polymorphic alias fixture is byte-equal with one checked alias
+reduction and maximum neutral level width two.
+The primitive fixture evaluates `6 * 7 + (5 - 5)` to 42 with three exact Agda
+`PrimitiveId` registry hits and three reductions; Treeless and Scheme remain
+byte-equal. An unregistered `PrimStringAppend` is rejected with its primitive
+ID, QName, and builtin binding-site range. A local postulated `_+_` is rejected
+as an `Axiom` at the fixture range, proving that matching text cannot impersonate
+a registered primitive.
+The first ground Cubical fixture composes `i0/i1` with exact
+`PrimIMin`/`PrimIMax`/`PrimINeg`, applies the generic `PrimTrans` identity rule
+at `i1`, and closes exact-Nat `PrimHComp` at `i0`. It returns 42 with 4 interval
+operations, 1 transport, and 1 hcomp, and remains byte-equal to the oracle.
+The neutral cofibration fixture simplifies the open expression
+`~~((phi ∧ i1) ∨ i0)` to `phi`, records three neutral identities, and
+transports through exact builtin Nat. Its separate `i0` entry returns 42 via
+the same exact constant-family rule. Both additions remain byte-equal to the
+oracle.
+The exact Nat-function fixture transports `suc : Nat -> Nat` at `i0`, then
+applies the result to 3. It returns 4 and records one dedicated
+Nat-function-transport reduction; observed output, Treeless, and Scheme remain
+byte-equal to the oracle.
+The Glue cancellation fixture constructs empty-face partial systems and checks
+`prim^unglue (prim^glue t 42)`. It returns 42 with two exact Glue primitive
+registry hits, one primitive reduction, and one cancellation; observed output,
+Treeless, and Scheme are byte-equal. It does not exercise ua or Glue Kan.
+The exact `TransportGlue` gate separately exercises canonical `ua notEq`, the
+narrow universe double-composition shell, and guarded canonical-domain Pi
+transport. Definition-headed path
+application, system clauses, and proper copattern projection reduce
+`transport notPath true` to `false`; the guarded HComp shell then reduces
+`transport (notPath ∙ notPath) true` to `true`. The Pi rule transports the
+identity closure from `notPath i0 -> Bool` to `notPath i1 -> Bool`, extracts
+the inverse from checked isomorphism record structure, and returns `false` at
+`true`. All three entries have byte-identical observed/Treeless/Scheme
+artifacts versus the baseline. `t04` records 14 path
+applications, one transport, one Glue transport, and one composed-Glue
+transport; `t08` records one transport, one Glue transport, and one Pi
+transport. The local `notPath i → notPath i` extension applies the checked
+domain inverse, invokes the source identity, and then maps the ground result
+through the codomain forward equivalence, returning `true`; it is
+baseline-equal across all three artifacts and records 13 path applications plus
+Pi/varying-codomain counters `1/1`. The local
+`(b : notPath i) → ConstantType b` extension evaluates its codomain with an
+opaque neutral binder at the probe and both endpoints; because `ConstantType`
+erases the binder, all three values are the same closed `Bool` definition. It
+returns `false`, is baseline-equal across all three artifacts, records 10 path
+applications and Pi/semantic-constant-codomain counters `1/1`, while its
+varying-codomain counter stays zero. The exact dependent self-path
+`(b : notPath i) → b ≡ b` preserves builtin `PathP` as a checked neutral shell,
+requires both endpoints to be the opaque binder, verifies that the inner path
+closure does not reference its interval binder and stays equal to the Pi
+domain at both outer endpoints, and checks the source proof at `i0`, a
+neutral probe, and `i1`. Its internal target reflexive path is observed at
+`i0`, returns `true`, is baseline-equal across all three artifacts, and records
+11 path applications plus Pi/dependent-self-path counters `1/1`. A
+canonical dependent singleton `Σ[ x ∈ notPath i ] b ≡ x` additionally matches
+the Sigma first type to the Pi domain and the second family to a directed
+binder-to-field `PathP`, validates the source `(b , refl)`, and rebuilds the
+target pair. Its `fst` observation returns `true`, remains baseline-equal, and
+records 13 path applications plus Pi/dependent-singleton counters `1/1`. The
+reversed `x ≡ b` orientation passes the same checks with the endpoint order
+reversed explicitly, returns `true`, and records 13 path applications plus
+Pi/dependent-reversed-singleton counters `1/1` while the forward counter is
+zero. The one-layer nested `Σ x. Σ y. b ≡ x` shape validates both point
+fields and the final proof, returns `true`, and records 31 path applications
+plus Pi/dependent-nested-singleton counters `1/1`, with both single-layer
+counters zero. Its reverse orientation also returns `true`, records 31 path
+applications and the reversed-nested counter `1`, while the forward counter is
+zero. The recursive classifier accepts exactly three Sigma layers in both
+final-path directions. Both return `true`, record 43 path applications, and
+set only their dedicated forward/reverse Sigma-spine counter to `1`. A
+fieldwise case maps two auxiliary `not b` points through canonical forward and
+checked inverse round-trip, returns `true`, and records fieldwise count `2`.
+The explicit dependent alias `SameType (notPath i) x` retains the same Glue
+base/face at the open probe and equal endpoint readbacks. Its independent
+`true` point maps to `false`; the observer returns `true`, remains
+baseline-equal, records 31 path applications, and sets nested/fieldwise
+counters `1/1`. The stable `ConstantType x = Bool` dependent field receives a
+jointly checked stable-identity plan; its source `true` remains `true`, the
+observer is baseline-equal at `true`, and stable-preserved/canonical-fieldwise
+counters are `1/0` with 13 path applications. A reversed `notPath (~ i)` field is rejected because its
+open shell matches neither the stable plan nor the outer canonical path. A
+parameterized `List Bool` field and its closed constructor spine are likewise
+baseline-equal at `true`, with 13 path applications and stable/canonical counts
+`1/0`. The binder-indexed lookalike `Tagged x` rejects because its retained
+index is the prior field neutral, even though the same neutral is reused in all
+three classifier observations. A three-layer custom data/record positive is
+baseline-equal at `true`, with 13 path applications, Sigma-spine count `1`, and
+stable/canonical counts `2/0`; both neutral data and record type-head counters
+are nonzero. An ordinary identity closure inside a record passes complete
+readback and Agda `closed`, is applied by the observer, and records
+closed-function/stable counts `1/1`; an internal canonical-transport function
+remains rejected. A direct stable `Bool -> Bool` field records closed Pi
+views/function/stable counts `3/1/1`; `Tagged x -> Bool` remains open through
+the prior field neutral under stable identity, but the audited outer-indexed
+plan accepts it after jointly identifying its outer type/value parameter slots.
+The target `tagged` constructor has zero payload arity, is rewritten to source
+parameters, and is consumed by a pattern-matching source function; indexed
+field/application counters are `1/1`. The same plan accepts
+`PayloadTagged x -> Bool`: its builtin-Bool payload is preserved unchanged,
+the pattern-matching source clause returns it, and the dedicated ground-payload
+counter is `1`. The clause's forced family index may remain unbound only because
+Agda `freeIn` proves the body does not reference that telescope slot. A nested
+custom constructor payload rejects outside the exact Nat/literal/builtin-Bool
+whitelist. A separate ground-Bool control rejects because its declared field
+type is the prior outer binder `A`, not an independently closed type. They, the
+binder-indexed stable lookalike, the reversed shell, the
+three-nontrivial-path double composition, and four-level nesting
+all have zero publication. This remains bounded evidence rather than general
+HCompU, equivalence-proof normalization, or general dependent Pi transport.
+The exact Int gate separately exercises both directions of `ua sucEq`.
+Forward `t05` returns `pos 1`; reverse `t06` validates identity at the start,
+extracts `predℤ` from checked isomorphism record structure, verifies both
+`sucℤ` round trips, and returns `negsuc 0`. Their observed/Treeless/Scheme
+artifacts are baseline-equal and the backward counter is 0/1. The local nested
+endpoint family is rejected with zero publication.
+The exact Core gate retains only applied builtin Sigma/List type heads.
+`t09` validates a canonical first parameter and stable closed Nat second
+family, transports the first ground field, and returns `(false, 3)`. `t10`
+validates the canonical element parameter and recursively maps the checked
+builtin List constructor spine to `false/true/false`. Both are baseline-equal
+across observed/Treeless/Scheme; the record/data counters are `1/0` and `0/1`.
+The varying-second-Sigma and nested-endpoint-List controls reject with zero
+publication.
+The exact Hit gate first exercises `t12`. Checked definition/primitive-head
+patterns select the generated S¹ eliminator clauses; `PrimComp` expands by the
+same transport/hcomp equation as Agda `mkComp`. The internal family is admitted
+only after endpoint substitution readbacks exactly to the actual i0/i1 types,
+the left boundary is constant, and both right-boundary transformations are
 canonical Glue paths with matching closed intermediate types. It returns
 `pos 2`, and observed/Treeless/Scheme are baseline-equal. Staging reports HIT
 definition patterns=4, comp expansions=4, universe transports=12,

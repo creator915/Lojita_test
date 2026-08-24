@@ -48,6 +48,7 @@ printf 'scenario\tpacket-source\truntime-result\tagda-oracle\tstatus\n' > "$summ
 run_case() {
   scenario=$1; module=$2; expected_term=$3; expected_type=$4
   oracle_expression=$5
+  oracle_mode=$6
   source=$fixture_workspace/$module.agda
   packet=$workspace/$scenario.packet
   evidence_packet=$evidence_dir/$scenario.packet
@@ -63,10 +64,16 @@ run_case() {
     > "$bridge_log" 2>&1 || fail "$scenario Internal export failed"
   grep -Fq "requestTerm = Def \"$module.$scenario\"" "$packet" ||
     fail "$scenario packet was not produced from the checked definition"
-  if [ "$oracle_expression" != "$scenario" ]; then
-    grep -Fq "$oracle_expression = head $scenario , head (tail $scenario)" "$source" ||
-      fail "$scenario oracle observation is not directly applied to the exported definition"
-  fi
+  case "$oracle_mode" in
+    direct) [ "$oracle_expression" = "$scenario" ] ||
+      fail "$scenario direct oracle does not name the exported definition" ;;
+    proof-linked)
+      grep -Fq "$scenario-sound : $scenario ≡ $scenario-oracle" "$source" ||
+        fail "$scenario oracle is not propositionally linked to the exported definition"
+      grep -Fq "$oracle_expression = head $scenario-oracle , head (tail $scenario-oracle)" "$source" ||
+        fail "$scenario oracle observation is not applied to its proved canonical value" ;;
+    *) fail "$scenario has an unknown oracle mode: $oracle_mode" ;;
+  esac
   context=$(sed -n '2s/.*packetContext = "\([^"]*\)".*/\1/p' "$packet")
   [ -n "$context" ] || fail "$scenario packet lacks a context identity"
   cp "$packet" "$evidence_packet"
@@ -85,7 +92,11 @@ run_case() {
     fail "$scenario Agda oracle failed"
   [ "$(cat "$runtime_observation")" = "$(cat "$oracle_out")" ] ||
     fail "$scenario same-input observation mismatch: runtime=$(cat "$runtime_observation"), Agda=$(cat "$oracle_out")"
-  status=SAME-INPUT-MATCH
+  status=$(if [ "$oracle_mode" = proof-linked ]; then
+    printf PROOF-LINKED-SAME-INPUT-MATCH
+  else
+    printf SAME-INPUT-MATCH
+  fi)
   printf '%s\t%s.%s\t%s\t%s\t%s\n' \
     "$scenario" "$module" "$scenario" "$expected_term" "$(cat "$oracle_out")" "$status" \
     >> "$summary"
@@ -93,17 +104,17 @@ run_case() {
 
 run_case t11 TransportBoundary \
   'VecLit TyBool [BoolLit False,BoolLit True]' 'TyVec TyBool 2' \
-  t11-observation
+  t11-oracle-observation proof-linked
 run_case t11b TransportBoundary \
   'VecLit TyBool [BoolLit True,BoolLit False]' 'TyVec TyBool 2' \
-  t11b-observation
+  t11b-oracle-observation proof-linked
 run_case t09 TransportCoreB \
   'Pair (BoolLit False) (NatLit 3)' 'TySigma TyBool TyNat' \
-  t09
-run_case t16a TransportHigher 'BoolLit True' 'TyBool' t16a
-run_case t16b TransportHigher 'IntLit 2' 'TyInt' t16b
-run_case t16c TransportHigher 'IntLit 2' 'TyInt' t16c
+  t09 direct
+run_case t16a TransportHigher 'BoolLit True' 'TyBool' t16a direct
+run_case t16b TransportHigher 'IntLit 2' 'TyInt' t16b direct
+run_case t16c TransportHigher 'IntLit 2' 'TyInt' t16c direct
 
 pass_count=$(awk -F '\t' 'NR > 1 && $5 ~ /PASS|MATCH/ { count++ } END { print count + 0 }' "$summary")
 [ "$pass_count" -eq 6 ] || fail "expected 6 same-input PASS/MATCH rows"
-echo "RuntimeNbeDifferential PASS ($pass_count exact same-input observations; t11/t11b canonicalized by Agda elimination)"
+echo "RuntimeNbeDifferential PASS ($pass_count exact same-input observations; t11/t11b proof-linked to checked canonical Agda oracles)"

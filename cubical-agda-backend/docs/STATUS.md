@@ -58,12 +58,14 @@ audit proves final-process execution. The former negative-index reproducer
 returns `App (Var 1) (Var 0)`, and explicit negative indices reject.
 
 The replacement same-input gate uses six actual checked definitions.
-`t11/t11b` are exported unchanged to the runtime and separately eliminated by
-Agda to canonical Bool-pair observations; the harness compares those exact
-strings with a structural rendering of the runtime result. Residual output is
-no longer a pass classification. This gate is awaiting locked-CI evidence, so
-Goal 3 remains 10/11 and is not accepted. The `goal3-runtime-nbe` workflow
-executes provider, runtime, real-Internal, differential and final-MAlonzo gates.
+`t11/t11b` are exported as the runtime roots. Because Agda deliberately leaves
+their indexed transports as `transpX-Vec`, checked equivalence-induction and
+set proofs connect each root to a canonical oracle computed from the same
+input. The harness compares those exact Bool-pair strings with a structural
+rendering of the runtime result. An unproved or residual oracle is a failure.
+This gate is awaiting locked-CI evidence, so Goal 3 remains 10/11 and is not
+accepted. The `goal3-runtime-nbe` workflow executes provider, runtime,
+real-Internal, differential and final-MAlonzo gates.
 
 ## Repository state
 
