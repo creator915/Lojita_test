@@ -2,9 +2,9 @@
 
 This document fixes the required process and data boundary for goal 3. The
 boundary definition is complete. The checked narrow-waist/final-MAlonzo path
-satisfies it for the declared and accepted Goal 3 fragment. `runtime/nbe/` is
-production runtime code for that bounded fragment; broader semantics remain
-fail closed.
+implements it for the declared Goal 3 fragment. The replacement exact
+differential is still awaiting locked-CI evidence and independent acceptance;
+broader semantics remain fail closed.
 
 ## Process identity
 

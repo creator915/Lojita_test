@@ -12,8 +12,8 @@ Chez/compiler-process-NbE scope and is retired.
 | --- | ---: | --- |
 | 1. stock Agda -> MAlonzo -> erased Haskell -> native binary | 9/9 | IMPLEMENTED; VERIFIED |
 | 2. cross-process checked `Term + Type` | 8/9 | IMPLEMENTED; clean-clone gate open |
-| 3. linked NbE inside the final program process | 11/11 | IMPLEMENTED; VERIFIED for declared fragment |
-| Complete revised checklist | 41/56 | 73.2% by item count; not effort-weighted |
+| 3. linked NbE inside the final program process | 10/11 | IMPLEMENTED; replacement differential awaiting locked CI |
+| Complete revised checklist | 40/56 | 71.4% by item count; not effort-weighted |
 
 ## What is usable now
 
@@ -34,7 +34,7 @@ Chez/compiler-process-NbE scope and is retired.
 - `runtime/nbe/` builds a compiler-independent runtime package. A real Agda
   Internal producer emits typed requests and definitions, and Stock
   Agda/MAlonzo/GHC links the evaluator plus pinned cctt Core into the final
-  user program. The declared acceptance fragment is closed.
+  user program. The replacement exact differential is pending locked-CI evidence.
 
 ## What is not yet delivered
 
@@ -57,13 +57,13 @@ are linked into the final ELF. A Stock Agda/MAlonzo/GHC fixture plus no-exec
 audit proves final-process execution. The former negative-index reproducer
 returns `App (Var 1) (Var 0)`, and explicit negative indices reject.
 
-The same-input gate uses six actual checked definitions. `t09/t16a/t16b/t16c`
-match Agda's canonical observations; `t11/t11b` record Agda's own
-`transpX-Vec` residual boundary and separately require the typed runtime result
-and a nonzero cctt provider-call count. Consequently the declared Goal 3 is
-11/11. The `goal3-runtime-nbe` workflow executes provider, runtime,
-real-Internal, differential and final-MAlonzo gates. General Cubical
-normalization outside this fragment remains fail closed.
+The replacement same-input gate uses six actual checked definitions.
+`t11/t11b` are exported unchanged to the runtime and separately eliminated by
+Agda to canonical Bool-pair observations; the harness compares those exact
+strings with a structural rendering of the runtime result. Residual output is
+no longer a pass classification. This gate is awaiting locked-CI evidence, so
+Goal 3 remains 10/11 and is not accepted. The `goal3-runtime-nbe` workflow
+executes provider, runtime, real-Internal, differential and final-MAlonzo gates.
 
 ## Repository state
 
@@ -83,21 +83,21 @@ The current and retained candidate evidence is:
   clean clone from local commit `7578f56`;
 - runtime `make verify-runtime-nbe`: 26/26 PASS on 2026-08-23, including the
   repaired higher-order readback and negative-index rejection;
-- `make verify-runtime-nbe-cctt-provider`: 10/10 source hashes, 9/9
-  eval/quotation probes, archive membership and final ELF symbols PASS;
+- `make verify-runtime-nbe-cctt-provider`: 10/10 source hashes, 11 input-driven
+  eval/quotation cases, archive membership and final ELF symbols PASS locally;
 - `make verify-runtime-nbe-agda-bridge`: 7/7 PASS for real Internal values,
   definitions, same-expression Agda oracle checks and fail-closed patterns;
 - `make verify-runtime-nbe-final-malonzo`: 9/9 PASS for Stock MAlonzo/GHC,
   linked symbols, real `PrimTrans`/`PrimHComp`, oracle and no-exec evidence;
-- `make verify-runtime-nbe-differential`: six real checked definitions PASS;
-  four exact matches and two explicit Agda residual-boundary matches;
+- `make verify-runtime-nbe-differential`: replacement six-definition exact
+  observation gate implemented; locked-CI result pending;
 - prototype `make verify-runtime-nbe-oracle`: 2 Agda modules typecheck and 5
   hand-authored runtime expectations PASS; explicitly not differential evidence;
 - Agda 2.9: 155 positive executions and 146 expected rejections PASS;
 - formal candidate differential: 8/8 groups and 42/42 rows PASS;
 - controlled O2 provisional performance: `ENGINEERING-PERFORMANCE-PASS`.
 
-Goals 1 and 3 are closed. Goal 2 clean-clone validation, three-lane
+Goal 1 is closed. Goal 3 exact differential, Goal 2 clean-clone validation, three-lane
 dispatch/integration and overall release validation remain open.
 
 ## Reproduce the current root contract

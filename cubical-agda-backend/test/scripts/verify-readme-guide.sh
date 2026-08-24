@@ -44,7 +44,7 @@ done
 
 for fact in \
   'stock Agda -> MAlonzo -> Haskell -> GHC 二进制 | **已实现并验收**' \
-  '最终程序进程内 runtime NbE | **已实现并验收（11/11）**' \
+  '最终程序进程内 runtime NbE | **修复已实现，待真实差分 CI（10/11）**' \
   'runtime/agda-2.9/' \
   '不在 Git' \
   '`CCZ-NBE-UNAVAILABLE`' \

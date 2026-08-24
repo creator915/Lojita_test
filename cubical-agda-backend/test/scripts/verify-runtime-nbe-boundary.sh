@@ -66,9 +66,9 @@ grep -Fq 'compiler-process' "$architecture" ||
   fail "architecture no longer distinguishes compiler process"
 grep -Fq 'boundary definition is complete' "$guide" ||
   fail "boundary guide omits the completed normative definition"
-grep -Fq 'satisfies it for the declared and accepted Goal 3 fragment' "$guide" ||
+grep -Fq 'implements it for the declared Goal 3 fragment' "$guide" ||
   fail "boundary guide omits the implemented narrow fragment"
-grep -Fq '目标 3 为 11/11' "$checklist" ||
-  fail "checklist must record Goal 3 as complete 11/11"
+grep -Fq '目标 3 为 10/11' "$checklist" ||
+  fail "checklist must keep Goal 3 differential open before locked CI"
 
-echo 'Runtime NbE boundary contract PASS (accepted bounded fragment; Goal 3 11/11)'
+echo 'Runtime NbE boundary contract PASS (implemented boundary; Goal 3 acceptance pending)'

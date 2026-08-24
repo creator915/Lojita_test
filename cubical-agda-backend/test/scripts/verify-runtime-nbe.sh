@@ -27,7 +27,7 @@ awk -F '\t' '
   $1 == "upstream-revision" && $2 == "ba16f3758a322e9be77ada1da2b93f45d500192e" { revision++ }
   $1 == "upstream-source-archive-sha256" && $2 == "8d83adcb45ea827583f02fb6fb5c7d023ae97fdf6dd7816e9069ee45c67b6b5d" { source++ }
   $1 == "upstream-license-spdx" && $2 == "MIT" { license++ }
-  $1 == "integration" && $2 == "linked-core-eval-quotation" { integration++ }
+  $1 == "integration" && $2 == "linked-core-input-normalization" { integration++ }
   END { exit !(status == 1 && provider == 1 && revision == 1 && source == 1 && license == 1 && integration == 1) }
 ' "$provider_lock" || fail "linked runtime provider lock is incomplete"
 [ "$(sha256sum "$provider_license" | awk '{ print $1 }')" = \
@@ -52,6 +52,14 @@ while IFS='	' read -r scenario expected_term expected_type related_fixture; do
       printf '%s\n' "$output" | grep -Eq 'provider-calls=[1-9][0-9]*' ||
         fail "$scenario did not execute the linked cctt provider"
       ;;
+  esac
+  case "$scenario" in
+    t11)
+      [ "$($runtime_binary --observation "$context" "$packet_dir/$scenario.packet")" = 'false , true' ] ||
+        fail "t11 structural observation mismatch" ;;
+    t11b)
+      [ "$($runtime_binary --observation "$context" "$packet_dir/$scenario.packet")" = 'true , false' ] ||
+        fail "t11b structural observation mismatch" ;;
   esac
   printf '%s\t%s\t%s\tPASS\n' "$scenario" "$expected_term" "$related_fixture" >> "$summary"
 done < test/fixtures/runtime-nbe/prototype-expectations.tsv

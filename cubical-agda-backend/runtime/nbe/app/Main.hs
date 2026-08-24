@@ -12,36 +12,41 @@ main = do
   arguments <- getArgs
   case parseArguments arguments of
     Left message -> putStrLn ("ERROR\tCCZ-RUNTIME-NBE-USAGE\t" ++ message) >> exitWith (ExitFailure 64)
-    Right (limits, context, packetFile) -> do
+    Right (observation, limits, context, packetFile) -> do
       packetSize <- withFile packetFile ReadMode hFileSize
       if packetSize > fromIntegral (limitPacketBytes limits)
-        then emit (RuntimeFailed (RuntimeError "CCZ-RUNTIME-NBE-PACKET-LIMIT" "packet exceeds configured byte limit"))
+        then emit observation (RuntimeFailed (RuntimeError "CCZ-RUNTIME-NBE-PACKET-LIMIT" "packet exceeds configured byte limit"))
         else do
           bytes <- readFile packetFile
           case decodePacket limits bytes of
-            Left failure -> emit (RuntimeFailed failure)
-            Right packet -> emit (runPacket limits context packet)
+            Left failure -> emit observation (RuntimeFailed failure)
+            Right packet -> emit observation (runPacket limits context packet)
 
-emit :: Response -> IO ()
-emit response = do
-  putStrLn (renderResponse response)
+emit :: Bool -> Response -> IO ()
+emit observation response = do
+  case (observation, response) of
+    (True, RuntimeOk term ty _) -> case renderObservation term ty of
+      Left failure -> putStrLn (renderResponse (RuntimeFailed failure)) >> exitWith (ExitFailure 65)
+      Right value -> putStrLn value
+    _ -> putStrLn (renderResponse response)
   case response of
     RuntimeOk {} -> pure ()
     RuntimeFailed {} -> exitWith (ExitFailure 65)
 
-parseArguments :: [String] -> Either String (Limits, String, FilePath)
-parseArguments = go defaultLimits
+parseArguments :: [String] -> Either String (Bool, Limits, String, FilePath)
+parseArguments = go False defaultLimits
   where
-    go limits [context, packetFile] = Right (limits, context, packetFile)
-    go limits (argument : rest)
+    go observation limits [context, packetFile] = Right (observation, limits, context, packetFile)
+    go _ limits ("--observation" : rest) = go True limits rest
+    go observation limits (argument : rest)
       | Just raw <- stripPrefix "--fuel=" argument = bounded "fuel" raw (limitFuel defaultLimits)
-          (\value -> limits { limitFuel = value }) rest
+          observation (\value -> limits { limitFuel = value }) rest
       | Just raw <- stripPrefix "--allocations=" argument = bounded "allocations" raw (limitAllocations defaultLimits)
-          (\value -> limits { limitAllocations = value }) rest
+          observation (\value -> limits { limitAllocations = value }) rest
       | Just raw <- stripPrefix "--packet-bytes=" argument = bounded "packet-bytes" raw (limitPacketBytes defaultLimits)
-          (\value -> limits { limitPacketBytes = value }) rest
-    go _ _ = Left "usage: cubical-runtime-nbe [--fuel=N] [--allocations=N] [--packet-bytes=N] CONTEXT PACKET"
+          observation (\value -> limits { limitPacketBytes = value }) rest
+    go _ _ _ = Left "usage: cubical-runtime-nbe [--observation] [--fuel=N] [--allocations=N] [--packet-bytes=N] CONTEXT PACKET"
 
-    bounded label raw maximumValue update rest = case readMaybe raw of
-      Just value | value > 0 && value <= maximumValue -> go (update value) rest
+    bounded label raw maximumValue observation update rest = case readMaybe raw of
+      Just value | value > 0 && value <= maximumValue -> go observation (update value) rest
       _ -> Left (label ++ " must be in 1.." ++ show maximumValue)

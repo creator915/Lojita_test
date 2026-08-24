@@ -12,8 +12,10 @@ on 2026-08-23. `config/runtime-nbe-provider.lock.tsv` records it as `linked`.
 Ten unmodified upstream Core modules and the MIT license are vendored with an
 exact source manifest; a repository-owned Cabal library exposes `Core.eval`
 and `Quotation.quoteUnfold`. `runtime/nbe/` supplies the smaller checked
-Agda-wire adapter and rejects any primitive whose cctt eval/quotation probe
-does not reach the required canonical form. See `RUNTIME_NBE_ABI.md`.
+Agda-wire adapter. Actual Bool/Int/Vec/Sigma inputs are encoded as closed cctt
+terms; `Core.eval`/`quoteUnfold` produce the value decoded by runtime readback.
+Fixed success probes are forbidden. Provider selection is recorded, while Goal
+3 acceptance remains pending independent review. See `RUNTIME_NBE_ABI.md`.
 
 The older `config/nbe-adapter.lock.tsv` below controls the separate
 compiler-process backend candidate. It intentionally remains unselected and

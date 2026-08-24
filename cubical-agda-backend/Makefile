@@ -63,14 +63,14 @@ build-runtime-nbe:
 		--builddir="$(abspath $(RUNTIME_NBE_CCTT_BUILD_DIR))" lib:cctt-core
 	mkdir -p "$(RUNTIME_NBE_LIB_DIR)" "$(RUNTIME_NBE_DIR)/app-exe" "$(RUNTIME_NBE_DIR)/test-exe"
 	$(RUNTIME_NBE_GHC) -O2 -Wall -Werror -fforce-recomp \
+		-this-unit-id "$(RUNTIME_NBE_PACKAGE_ID)" \
+		-iruntime/nbe/src -odir "$(RUNTIME_NBE_LIB_DIR)" -hidir "$(RUNTIME_NBE_LIB_DIR)" \
+		-c runtime/nbe/src/Cubical/Runtime/Nbe/Wire.hs
+	$(RUNTIME_NBE_GHC) -O2 -Wall -Werror -fforce-recomp \
 		-hide-all-packages -package base $(RUNTIME_NBE_EXTERNAL_PACKAGE_DBS) -package cctt-core \
 		-this-unit-id "$(RUNTIME_NBE_PACKAGE_ID)" \
 		-iruntime/nbe/src -odir "$(RUNTIME_NBE_LIB_DIR)" -hidir "$(RUNTIME_NBE_LIB_DIR)" \
 		-c runtime/nbe/src/Cubical/Runtime/Nbe/Cctt.hs
-	$(RUNTIME_NBE_GHC) -O2 -Wall -Werror -fforce-recomp \
-		-this-unit-id "$(RUNTIME_NBE_PACKAGE_ID)" \
-		-iruntime/nbe/src -odir "$(RUNTIME_NBE_LIB_DIR)" -hidir "$(RUNTIME_NBE_LIB_DIR)" \
-		-c runtime/nbe/src/Cubical/Runtime/Nbe/Wire.hs
 	$(RUNTIME_NBE_GHC) -O2 -Wall -Werror -fforce-recomp \
 		-hide-all-packages -package base $(RUNTIME_NBE_EXTERNAL_PACKAGE_DBS) -package cctt-core \
 		-this-unit-id "$(RUNTIME_NBE_PACKAGE_ID)" \

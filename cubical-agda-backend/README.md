@@ -9,10 +9,10 @@
 | --- | --- | --- |
 | 1. stock Agda -> MAlonzo -> Haskell -> GHC 二进制 | **已实现并验收** | 锁定 Stock Agda 2.9.0 / MAlonzo / GHC 9.10.3；独立二进制审计 |
 | 2. 跨进程 `Term + Type` packet | **已有实现** | 仍需 clean-clone overlay 构建验收 |
-| 3. 最终程序进程内 runtime NbE | **已实现并验收（11/11）** | 锁定 cctt Core、真实 Internal 桥、最终 MAlonzo 链接及同输入差分均通过 |
+| 3. 最终程序进程内 runtime NbE | **修复已实现，待真实差分 CI（10/11）** | cctt 已改为实际输入归一化；t11/t11b 不再接受 residual，等待锁定 CI 证据 |
 
 当前可用的是候选 CubicalChez 后端、checked typed residual/packet、编译期
-NbE adapter 候选与完整的安全拒绝门禁。当前目标 1 和目标 3 已关闭；
+NbE adapter 候选与完整的安全拒绝门禁。当前目标 1 已关闭，目标 3 待新差分证据；
 三路调度和总体发布门禁未关闭前，不得将仓库标记为完整交付。
 
 ## 目标数据流
@@ -22,7 +22,7 @@ Agda source
    |
    +-- native-safe ------> stock Agda/MAlonzo -> erased Haskell -> binary   [IMPLEMENTED]
    +-- cross-process ----> checked Term + Type packet                       [IMPLEMENTED]
-   `-- runtime-higher ---> linked in-process runtime NbE      [IMPLEMENTED: 11/11]
+   `-- runtime-higher ---> linked in-process runtime NbE      [IMPLEMENTED; VERIFYING: 10/11]
 ```
 
 跨进程只传输 Agda Internal `Term + Type` 协议数据。NbE 语义值、closure 和
@@ -185,8 +185,11 @@ make verify-v2-runtime
 - 编译器进程内 adapter candidate 不是目标 3 证据。目标 3 的独立窄腰接收
   真实 Agda Internal definition slice，覆盖验收所需 Bool/Nat/Int/Vec/Pi/
   Sigma/Glue/S¹ 与 transport/composition，并链接进 Stock Agda/MAlonzo/GHC
-  最终程序。未声明的通用 Kan、indexed data 和任意 HIT 仍 fail closed。
+  最终程序。cctt provider 的输出现在由实际 Bool/Int/Vec/Sigma 输入的 Core
+  归一形解码得到，不再以固定 probe 授权本地结果。未声明的通用 Kan、indexed
+  data 和任意 HIT 仍 fail closed。
 - `t11/t11b` 等已知残余不得进入无类型执行路径。
 - 编译器进程的默认 `nbe` provider lock 仍保持未选择和安全拒绝；它与目标 3
   最终进程 runtime 的独立 cctt lock 不同。后者已链接 vendored Core 的
-  `eval`/`quoteUnfold`，并通过 provider、ELF 符号和同输入差分门禁。
+  `eval`/`quoteUnfold`。provider 与 ELF 门禁已通过；新的 t11/t11b 精确同输入
+  差分必须在锁定 CI 通过后再记为验收证据。

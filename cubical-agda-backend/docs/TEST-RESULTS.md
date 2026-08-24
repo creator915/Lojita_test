@@ -26,7 +26,7 @@ The controlled collector now fails closed before staging or replacing prior
 evidence when the fixed host/power/quiescence contract is not met. An earlier
 Battery Power retry was correctly rejected without staging or replacement;
 the subsequent AC-powered release run published 3,219 raw evidence files.
-Goal 3 is now 11/11 for its declared fragment. The runtime passes 26 self-tests;
+Goal 3 is currently 10/11 for its declared fragment. The runtime passes 26 self-tests;
 the real Agda bridge passes seven cases for literals, Pi, checked definitions,
 same-expression oracle comparison and fail-closed pattern definitions. The
 Stock Agda/MAlonzo/GHC final-program gate passes nine rows, including static
@@ -34,11 +34,11 @@ runtime symbols, no compiler symbols, zero exec attempts and preserved
 `PrimTrans`/`PrimHComp` packets whose outputs agree with the Agda oracle.
 The maintained `semantic-negative-index.packet` regression now returns the
 correct `App (Var 1) (Var 0)`, and a malicious negative-index packet rejects.
-cctt linkage passes ten source hashes, nine eval/quotation probes and final-ELF
-symbol checks. The same-input gate passes six real checked definitions covering
-`t11/t11b/t09/t16a/t16b/t16c`, including Glue/Pi/Sigma/S¹ semantics. Four
-canonical observations match exactly; the two Vec cases explicitly reproduce
-Agda's `transpX-Vec` residual boundary rather than claiming a false equality.
+cctt linkage passes ten source hashes, eleven actual-input eval/quotation cases
+and final-ELF symbol checks. The replacement same-input gate covers
+`t11/t11b/t09/t16a/t16b/t16c`; t11/t11b now eliminate the exported definition
+to canonical Bool-pair observations and compare them exactly. Its locked-CI
+result is pending, so this ledger does not record Goal 3 acceptance.
 
 ## Environment
 
@@ -60,13 +60,13 @@ the maintained source/input hashes and awaits an independent upstream match.
 | Target | Scope | Result | Time / peak RSS |
 | --- | --- | --- | --- |
 | `make verify-runtime-nbe` | runtime semantic domain, typed requests, cache, limits, archive/harness link, no-exec and higher-order readback regression | 26/26 PASS | not measured |
-| `make verify-runtime-nbe-cctt-provider` | exact cctt Core source/license identity, real eval/quotation probes, runtime archive and ELF linkage | 10 source hashes + 9/9 semantic probes + symbol audits PASS | local Linux run |
+| `make verify-runtime-nbe-cctt-provider` | exact cctt Core source/license identity, input-driven eval/quotation, runtime archive and ELF linkage | 10 source hashes + 11 actual-input cases + symbol audits PASS | local Linux run |
 | `make verify-runtime-nbe-agda-bridge` | real checked Agda Internal Bool/Nat/Pi and single-clause definition slice, same-expression Agda oracle, unsupported-pattern rejection | 7/7 PASS | local Linux run |
-| `make verify-runtime-nbe-differential` | same checked Agda definitions exported to the linked runtime and invoked through the Agda oracle: `t11/t11b/t09/t16a/t16b/t16c` | 6/6 PASS; 4 exact matches + 2 explicit residual-boundary matches; every runtime row has nonzero provider calls | local Linux run |
+| `make verify-runtime-nbe-differential` | same checked Agda definitions exported to the linked runtime and observed by Agda: `t11/t11b/t09/t16a/t16b/t16c` | replacement exact 6/6 comparison implemented; locked-CI result pending | pending |
 | `make verify-runtime-nbe-final-malonzo` | Stock Agda -> MAlonzo -> GHC user program with linked runtime; real `PrimTrans`/`PrimHComp`, unsupported-face rejection, oracle, symbol and no-exec audits | 9/9 PASS | local Linux run |
 | `make verify-runtime-nbe-oracle` | pinned Agda 2.9 + Cubical v0.9 typecheck plus five separately hand-written prototype expectations | 2 modules / 5 expectations PROTOTYPE-PASS; not a differential test | not measured |
 | `make verify-native-lane` | locked official Agda -> MAlonzo erased Haskell -> locked GHC ELF; ordinary and erased-Cubical compile/run, direct-stock differential, full-Cubical misclassification, stale publication and type-error comparison | 2 compile/run PASS + 2 fail-closed PASS; 28 generated Haskell files audited; no compiler, `TCState`, runtime NbE, Agda library or residual transport identity in either ELF; identical PASS from clean clone of `7578f56` | current Linux x86-64 run PASS on 2026-08-23; resources not benchmarked |
-| `make verify-runtime-nbe-boundary` | goal 3 final-process identity, linked-library requirement, immutable checked request/result boundary, and compiler/closure/subprocess/network prohibitions | boundary contract PASS; implementation status 11/11 | under 1 s; resources not benchmarked |
+| `make verify-runtime-nbe-boundary` | goal 3 final-process identity, linked-library requirement, immutable checked request/result boundary, and compiler/closure/subprocess/network prohibitions | boundary contract PASS; acceptance pending | under 1 s; resources not benchmarked |
 | `make verify` / `make -k verify` | current uploaded snapshot on Linux with the available Agda 2.9/GHC 9.10.3 toolchain | NOT PASS: the archive omits the 3,219-file historical benchmark evidence required by `verify-benchmarks-guide`; the fork origin does not match the still-unapproved provider identity; the remaining local smoke gates require the documented Agda 2.8/Cubical environment. Status, README, support, troubleshooting, native-lane, runtime-boundary, provider-census and four synthetic timing/performance/publication contracts PASS. | current Linux run on 2026-08-23; 15.6 s for keep-going audit |
 | `make verify-agda29-stock-baseline` | official stock parent projection plus supplied v2 overlay | 10,084/10,084 stock files and 9/9 overlay files PASS | not benchmarked |
 | historical `make verify` | root-layout local Agda 2.8 static, goal/checklist/README/support/troubleshooting/benchmark documentation contracts, NbE provider census/source identity/test-only adapter spike/production candidate/lock/fallback policy, engine-result recheck, four-way binding time, typed-residual shell composition, primitive catalog, static-closure authorization, Chez core ABI, failure taxonomy, timing/host/performance/publication self-tests, Cubical static, typed rejection and safety smoke | pre-goal-1 status 20/56 with goals 1 and 3 explicitly open; root layout and seven-option CLI synchronized; source identity 3 positive + 6 negative; adapter spike 14 baseline-equal + 9 fail-closed; production candidate, lock, fallback, EngineResult, binding-time, residual, primitive, closure, ABI, failure, timing, performance, publication and smoke gates all PASS | supplied historical root-layout run PASS on 2026-08-23; wall time and peak RSS not separately captured |

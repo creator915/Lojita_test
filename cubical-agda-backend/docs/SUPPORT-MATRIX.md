@@ -23,7 +23,7 @@ released.
 | Surface | Status | Current behavior and evidence |
 | --- | --- | --- |
 | Goal 1 stock Agda/MAlonzo/GHC native lane | `VERIFIED` | Locked official Agda `84497d0` emits audited MAlonzo `AgdaAny` Haskell; locked GHC 9.10.3 builds the audited ELF. Ordinary and erased-Cubical compile/run, direct-stock differential, type-error, misclassification, stale-artifact, and clean-clone gates pass. Static Chez output is not used as evidence. |
-| Goal 3 NbE linked into the final program process | `VERIFIED` | 11/11 for the declared bounded fragment: pinned cctt Core eval/quotation is statically linked; the real Internal bridge covers required Vec/Glue/Pi/Sigma/S¹ semantics; six actual checked definitions drive the same-input runtime/Agda gate. General Cubical normalization remains outside the claim. |
+| Goal 3 NbE linked into the final program process | `NOT-VERIFIED` | 10/11: pinned cctt Core eval/quotation is statically linked and now normalizes actual Bool/Int/Vec/Sigma inputs; the replacement exact same-input Agda gate is awaiting locked-CI evidence and independent acceptance. General Cubical normalization remains outside the claim. |
 | Default binary, `agda-baseline` | `VERIFIED` | Uses Agda normalization as the correctness/performance oracle. It is not counted as NbE acceleration. |
 | Default binary, `nbe` | `FAIL-CLOSED` | Returns `CCZ-NBE-UNAVAILABLE`; it never silently falls back and publishes no stale executable artifact. |
 | Test-only adapter spike | `VERIFIED` | Fourteen baseline-equal results and nine fail-closed controls cover the narrow semantic domain. |

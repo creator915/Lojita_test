@@ -47,12 +47,13 @@ printf 'scenario\tpacket-source\truntime-result\tagda-oracle\tstatus\n' > "$summ
 
 run_case() {
   scenario=$1; module=$2; expected_term=$3; expected_type=$4
-  oracle_kind=$5; oracle_expected=$6
+  oracle_expression=$5
   source=$fixture_workspace/$module.agda
   packet=$workspace/$scenario.packet
   evidence_packet=$evidence_dir/$scenario.packet
   bridge_log=$evidence_dir/$scenario.bridge.log
   runtime_out=$evidence_dir/$scenario.runtime.out
+  runtime_observation=$evidence_dir/$scenario.runtime.observation
   oracle_out=$evidence_dir/$scenario.oracle.out
 
   Agda_datadir="$agda_datadir" "$bridge" -v0 \
@@ -62,6 +63,10 @@ run_case() {
     > "$bridge_log" 2>&1 || fail "$scenario Internal export failed"
   grep -Fq "requestTerm = Def \"$module.$scenario\"" "$packet" ||
     fail "$scenario packet was not produced from the checked definition"
+  if [ "$oracle_expression" != "$scenario" ]; then
+    grep -Fq "$oracle_expression = head $scenario , head (tail $scenario)" "$source" ||
+      fail "$scenario oracle observation is not directly applied to the exported definition"
+  fi
   context=$(sed -n '2s/.*packetContext = "\([^"]*\)".*/\1/p' "$packet")
   [ -n "$context" ] || fail "$scenario packet lacks a context identity"
   cp "$packet" "$evidence_packet"
@@ -71,40 +76,34 @@ run_case() {
   grep -Fq "$expected" "$runtime_out" || fail "$scenario runtime result mismatch"
   grep -Eq 'provider-calls=[1-9][0-9]*' "$runtime_out" ||
     fail "$scenario did not call the linked cctt provider"
+  "$runtime" --observation "$context" "$packet" > "$runtime_observation" ||
+    fail "$scenario runtime observation failed"
 
   Agda_datadir="$agda_datadir" "$bridge" -v0 \
     --library-file="$library_file" --library=runtime-nbe-differential \
-    "--cubical-run=$scenario" "$source" > "$oracle_out" 2>&1 ||
+    "--cubical-run=$oracle_expression" "$source" > "$oracle_out" 2>&1 ||
     fail "$scenario Agda oracle failed"
-  case "$oracle_kind" in
-    canonical)
-      [ "$(cat "$oracle_out")" = "$oracle_expected" ] ||
-        fail "$scenario Agda canonical result mismatch"
-      status=SAME-INPUT-MATCH ;;
-    residual)
-      grep -Fq "$oracle_expected" "$oracle_out" ||
-        fail "$scenario did not reproduce the locked Agda residual boundary"
-      status=SAME-INPUT-BOUNDARY-PASS ;;
-    *) fail "unknown oracle classification: $oracle_kind" ;;
-  esac
+  [ "$(cat "$runtime_observation")" = "$(cat "$oracle_out")" ] ||
+    fail "$scenario same-input observation mismatch: runtime=$(cat "$runtime_observation"), Agda=$(cat "$oracle_out")"
+  status=SAME-INPUT-MATCH
   printf '%s\t%s.%s\t%s\t%s\t%s\n' \
-    "$scenario" "$module" "$scenario" "$expected_term" "$oracle_kind" "$status" \
+    "$scenario" "$module" "$scenario" "$expected_term" "$(cat "$oracle_out")" "$status" \
     >> "$summary"
 }
 
 run_case t11 TransportBoundary \
   'VecLit TyBool [BoolLit False,BoolLit True]' 'TyVec TyBool 2' \
-  residual 'transpX-Vec'
+  t11-observation
 run_case t11b TransportBoundary \
   'VecLit TyBool [BoolLit True,BoolLit False]' 'TyVec TyBool 2' \
-  residual 'transpX-Vec'
+  t11b-observation
 run_case t09 TransportCoreB \
   'Pair (BoolLit False) (NatLit 3)' 'TySigma TyBool TyNat' \
-  canonical 'false , 3'
-run_case t16a TransportHigher 'BoolLit True' 'TyBool' canonical 'true'
-run_case t16b TransportHigher 'IntLit 2' 'TyInt' canonical 'pos 2'
-run_case t16c TransportHigher 'IntLit 2' 'TyInt' canonical 'pos 2'
+  t09
+run_case t16a TransportHigher 'BoolLit True' 'TyBool' t16a
+run_case t16b TransportHigher 'IntLit 2' 'TyInt' t16b
+run_case t16c TransportHigher 'IntLit 2' 'TyInt' t16c
 
 pass_count=$(awk -F '\t' 'NR > 1 && $5 ~ /PASS|MATCH/ { count++ } END { print count + 0 }' "$summary")
 [ "$pass_count" -eq 6 ] || fail "expected 6 same-input PASS/MATCH rows"
-echo "RuntimeNbeDifferential PASS ($pass_count actual Agda definitions; t11/t11b residual boundaries explicit)"
+echo "RuntimeNbeDifferential PASS ($pass_count exact same-input observations; t11/t11b canonicalized by Agda elimination)"

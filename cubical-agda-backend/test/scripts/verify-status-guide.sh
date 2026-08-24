@@ -49,7 +49,7 @@ require_text "$goals" '## 目标 1：原版编译器的本地二进制路径'
 require_text "$goals" '## 目标 2：跨进程 Term 搬运'
 require_text "$goals" '## 目标 3：最终程序进程内的 runtime NbE'
 require_text "$goals" '**状态：已实现并通过专项及 clean-clone 验收。**'
-require_text "$goals" '**状态：已实现并通过专项验收（11/11）。**'
+require_text "$goals" '**状态：输入驱动修复已实现；10/11 已有本轮证据，真实同输入差分等待 CI。**'
 require_text "$goals" '现有 compiler-process NbE candidate 不等于目标 3'
 require_text "$goals" '目标 1 使用独立的 stock MAlonzo/GHC 路径'
 
@@ -58,22 +58,23 @@ open_count=$(awk '/^- \[ \] / { count++ } END { print count + 0 }' "$checklist")
 total_count=$((done_count + open_count))
 completion_pct=$(awk -v done="$done_count" -v total="$total_count" \
   'BEGIN { printf "%.1f", 100 * done / total }')
-[ "$done_count" -eq 41 ] || fail "completed checklist count is $done_count, expected 41"
-[ "$open_count" -eq 15 ] || fail "open checklist count is $open_count, expected 15"
+[ "$done_count" -eq 40 ] || fail "completed checklist count is $done_count, expected 40"
+[ "$open_count" -eq 16 ] || fail "open checklist count is $open_count, expected 16"
 require_text "$checklist" \
   "新范围统计：$done_count/$total_count 项已完成（$completion_pct%）"
 require_text "$checklist" '目标 1 为 9/9'
 require_text "$checklist" '目标 2 为 8/9'
-require_text "$checklist" '目标 3 为 11/11'
+require_text "$checklist" '目标 3 为 10/11'
 require_text "$checklist" 'static Chez 结果未被用于本节验收'
-require_text "$checklist" '`t11/t11b/t09/t16a/t16b/t16c` 从同一 checked definition'
+require_text "$checklist" '`t11/t11b/t09/t16a/t16b/t16c` 的新门禁从同一'
+require_text "$checklist" '要求与 runtime observation 逐字相等'
 
 require_text "$readme" '| 1. stock Agda -> MAlonzo -> Haskell -> GHC 二进制 | **已实现并验收** |'
-require_text "$readme" '| 3. 最终程序进程内 runtime NbE | **已实现并验收（11/11）** |'
-require_text "$status_doc" '| Complete revised checklist | 41/56 | 73.2% by item count; not effort-weighted |'
-require_text "$status_doc" '| 3. linked NbE inside the final program process | 11/11 | IMPLEMENTED; VERIFIED for declared fragment |'
-require_text "$support_matrix" '| Goal 3 NbE linked into the final program process | `VERIFIED` |'
-require_text "$test_results" 'Goal 3 is now 11/11 for its declared fragment.'
+require_text "$readme" '| 3. 最终程序进程内 runtime NbE | **修复已实现，待真实差分 CI（10/11）** |'
+require_text "$status_doc" '| Complete revised checklist | 40/56 | 71.4% by item count; not effort-weighted |'
+require_text "$status_doc" '| 3. linked NbE inside the final program process | 10/11 | IMPLEMENTED; replacement differential awaiting locked CI |'
+require_text "$support_matrix" '| Goal 3 NbE linked into the final program process | `NOT-VERIFIED` |'
+require_text "$test_results" 'Goal 3 is currently 10/11 for its declared fragment.'
 require_text "$test_results" 'correct `App (Var 1) (Var 0)`'
 require_text "$selection_doc" 'GOAL 3 RUNTIME PROVIDER SELECTED'
 require_text "$status_doc" '`goal3-runtime-nbe` workflow'
@@ -87,7 +88,8 @@ require_text "$goal3_workflow" 'make verify-runtime-nbe-differential'
 lock_status=$(awk -F '\t' '$1 == "status" { print $2; exit }' "$runtime_lock")
 [ "$lock_status" = linked ] || fail "Goal 3 provider lock must be linked"
 lock_acceptance=$(awk -F '\t' '$1 == "goal3-acceptance" { print $2; exit }' "$runtime_lock")
-[ "$lock_acceptance" = accepted ] || fail "Goal 3 provider acceptance must be accepted"
+[ "$lock_acceptance" = pending-independent-review ] ||
+  fail "Goal 3 provider acceptance must remain pending independent review"
 require_text "$runtime_wire" 'data Ty'
 require_text "$runtime_wire" 'data Term'
 require_text "$runtime_prototype" 'data Value'
@@ -102,7 +104,7 @@ goal3_checked=$(awk '
   in_goal && /^- \[[xX]\] / { count++ }
   END { print count + 0 }
 ' "$checklist")
-[ "$goal3_checked" -eq 11 ] || fail "Goal 3 has $goal3_checked checked items, expected complete 11"
+[ "$goal3_checked" -eq 10 ] || fail "Goal 3 has $goal3_checked checked items, expected 10 before locked differential CI"
 
 require_text "$runtime_source" 'maxRuntimePacketBytes = 64 * 1024 * 1024'
 require_text "$runtime_source" 'cubicalRuntimeResultTermFile'
@@ -120,4 +122,4 @@ if grep -Fq 'make -C backend' \
   fail "pre-flattening make command remains"
 fi
 
-echo "Project status contract PASS ($done_count/$total_count; goals 1 and 3 closed)"
+echo "Project status contract PASS ($done_count/$total_count; Goal 1 closed, Goal 3 pending)"

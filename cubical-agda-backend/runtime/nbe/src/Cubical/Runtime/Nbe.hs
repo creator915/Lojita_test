@@ -15,6 +15,7 @@ module Cubical.Runtime.Nbe
   , decodePacket
   , runPacket
   , renderResponse
+  , renderObservation
   ) where
 
 import Control.Monad (unless, when)
@@ -74,6 +75,28 @@ renderResponse response = case response of
     [ "OK", show term, show ty, renderStats stats, providerIdentity ]
   RuntimeFailed failure -> intercalate "\t"
     [ "ERROR", runtimeErrorCode failure, runtimeErrorDetail failure, providerIdentity ]
+
+-- | Render the closed observable subset in the same textual form as the Agda
+-- oracle backend.  The differential harness invokes this only after the typed
+-- runtime response has succeeded; it is a structural rendering, not an
+-- expected-value table.
+renderObservation :: Term -> Ty -> Either RuntimeError String
+renderObservation term ty = case (term, ty) of
+  (BoolLit bool, TyBool) -> Right (if bool then "true" else "false")
+  (NatLit natural, TyNat) -> Right (show natural)
+  (IntLit integer, TyInt)
+    | integer >= 0 -> Right ("pos " ++ show integer)
+    | otherwise -> Right ("negsuc " ++ show ((-integer) - 1))
+  (Pair first second, TySigma firstTy secondTy) -> do
+    firstText <- renderObservation first firstTy
+    secondText <- renderObservation second secondTy
+    Right (firstText ++ " , " ++ secondText)
+  (VecLit TyBool [first, second], TyVec TyBool 2) -> do
+    firstText <- renderObservation first TyBool
+    secondText <- renderObservation second TyBool
+    Right (firstText ++ " , " ++ secondText)
+  _ -> Left (err "CCZ-RUNTIME-NBE-OBSERVATION"
+    ("no Agda observation renderer for " ++ show term ++ " at " ++ show ty))
 
 renderStats :: Stats -> String
 renderStats stats = intercalate ","
@@ -394,7 +417,6 @@ eval environment term = do
         _ -> throwNbe "CCZ-RUNTIME-NBE-TRANSP-PATH" "runtime path is not a universe path"
     Refl ty value -> VPathRefl ty <$> eval environment value
     Concat left right -> do
-      requireProvider ProviderPathComposition
       leftValue <- eval environment left
       rightValue <- eval environment right
       concatValues leftValue rightValue
@@ -402,22 +424,20 @@ eval environment term = do
     Winding path -> eval environment path >>= \value -> case value of
       VS1Path windingNumber -> pure (VInt windingNumber)
       _ -> throwNbe "CCZ-RUNTIME-NBE-HIT-PATH" "winding received a non-S1 path"
-    HComp _ face system base -> do
-      requireProvider $ case face of
-        FaceZero -> ProviderHCompZero
-        FaceOne -> ProviderHCompOne
+    HComp ty face system base -> do
+      systemValue <- eval environment system
+      baseValue <- eval environment base
+      selected <- providerSelectValue ty face systemValue baseValue
       modifyState $ \state -> state { stateHComps = stateHComps state + 1 }
-      case face of
-        FaceOne -> eval environment system
-        FaceZero -> eval environment base
+      pure selected
     Glue equivalence value -> do
-      requireProvider ProviderGlue
-      VGlue equivalence <$> eval environment value
+      inner <- eval environment value
+      VGlue equivalence <$> providerPreserveValue inner
     Unglue equivalence value -> do
-      requireProvider ProviderUnglue
       glued <- eval environment value
       case glued of
-        VGlue actual inner | actual == equivalence -> equivalenceForward equivalence inner
+        VGlue actual inner | actual == equivalence ->
+          providerEquivalence ProviderForward equivalence inner
         _ -> pure glued
     S1Base -> pure VS1Base
 
@@ -460,70 +480,34 @@ apply function argument = do
 
 concatValues :: Value -> Value -> Nbe Value
 concatValues left right = case (left, right) of
-  (VTypePath first, VTypePath second) -> pure (VTypePath (FamilyCompose first second))
-  (VS1Path first, VS1Path second) -> pure (VS1Path (first + second))
-  (VPathRefl ty _, VPathRefl ty' value') | ty == ty' -> pure (VPathRefl ty value')
+  (VTypePath first, VTypePath second) -> do
+    -- The composed family is kept symbolically.  Its eventual action is sent
+    -- to cctt with the real transported value, never authorized by a probe.
+    pure (VTypePath (FamilyCompose first second))
+  (VS1Path first, VS1Path second) ->
+    VS1Path <$> withProvider (providerAddInt first second)
+  (VPathRefl ty _, VPathRefl ty' value') | ty == ty' ->
+    VPathRefl ty <$> providerPreserveValue value'
   _ -> throwNbe "CCZ-RUNTIME-NBE-PATH-COMPOSE" "semantic paths do not compose"
 
 transportForward :: Family -> Value -> Nbe Value
 transportForward family value = do
   step
   allocate
-  requireProvider (providerTransportPrimitive family)
   modifyState $ \state -> state { stateTransports = stateTransports state + 1 }
   case family of
-    FamilyConst _ -> pure value
-    FamilyGlue equivalence -> equivalenceForward equivalence value
-    FamilyVec elementFamily size -> case value of
-      VVec _ elements | length elements == size -> do
-        (_, targetElement) <- eitherToNbe (familyEndpoints elementFamily)
-        VVec targetElement <$> mapM (transportForward elementFamily) elements
-      _ -> throwNbe "CCZ-RUNTIME-NBE-VEC-SHAPE" "Vec transport received wrong semantic spine"
     FamilyPi domainFamily codomainFamily -> pure (VTransportPi domainFamily codomainFamily value)
-    FamilySigma firstFamily secondFamily -> case value of
-      VPair first second -> VPair <$> transportForward firstFamily first <*> transportForward secondFamily second
-      _ -> throwNbe "CCZ-RUNTIME-NBE-RECORD-SHAPE" "Sigma transport received a non-pair"
-    FamilyCompose first second -> transportForward first value >>= transportForward second
+    _ -> providerTransportValue ProviderForward family value
 
 transportBackward :: Family -> Value -> Nbe Value
 transportBackward family value = do
-  requireProvider (providerTransportPrimitive family)
-  transportBackwardChecked family value
-
-transportBackwardChecked :: Family -> Value -> Nbe Value
-transportBackwardChecked family value = case family of
-  FamilyConst _ -> transportForward family value
-  FamilyGlue equivalence -> do
-    modifyState $ \state -> state { stateTransports = stateTransports state + 1 }
-    step >> allocate >> equivalenceBackward equivalence value
-  FamilyVec elementFamily size -> case value of
-    VVec _ elements | length elements == size -> do
-      (sourceElement, _) <- eitherToNbe (familyEndpoints elementFamily)
-      VVec sourceElement <$> mapM (transportBackward elementFamily) elements
-    _ -> throwNbe "CCZ-RUNTIME-NBE-VEC-SHAPE" "reverse Vec transport received wrong semantic spine"
-  FamilyPi domainFamily codomainFamily ->
-    transportForward (FamilyPi (reverseFamily domainFamily) (reverseFamily codomainFamily)) value
-  FamilySigma firstFamily secondFamily -> case value of
-    VPair first second -> VPair <$> transportBackward firstFamily first <*> transportBackward secondFamily second
-    _ -> throwNbe "CCZ-RUNTIME-NBE-RECORD-SHAPE" "reverse Sigma transport received a non-pair"
-  FamilyCompose first second -> transportBackward second value >>= transportBackward first
-
-providerTransportPrimitive :: Family -> ProviderPrimitive
-providerTransportPrimitive family = case family of
-  FamilyConst _ -> ProviderTransportConstant
-  FamilyGlue _ -> ProviderTransportGlue
-  FamilyVec element _ -> providerTransportPrimitive element
-  FamilyPi _ _ -> ProviderTransportPi
-  FamilySigma _ _ -> ProviderTransportSigma
-  FamilyCompose first _ -> providerTransportPrimitive first
-
-requireProvider :: ProviderPrimitive -> Nbe ()
-requireProvider primitive = do
-  modifyState $ \state -> state
-    { stateProviderCalls = stateProviderCalls state + 1 }
-  unless (providerAccepts primitive)
-    (throwNbe "CCZ-RUNTIME-NBE-PROVIDER-REJECTED"
-      ("cctt rejected runtime primitive " ++ show primitive))
+  step
+  allocate
+  modifyState $ \state -> state { stateTransports = stateTransports state + 1 }
+  case family of
+    FamilyPi domainFamily codomainFamily ->
+      transportForward (FamilyPi (reverseFamily domainFamily) (reverseFamily codomainFamily)) value
+    _ -> providerTransportValue ProviderBackward family value
 
 reverseFamily :: Family -> Family
 reverseFamily family = case family of
@@ -534,27 +518,75 @@ reverseFamily family = case family of
   FamilySigma first second -> FamilySigma (reverseFamily first) (reverseFamily second)
   FamilyCompose first second -> FamilyCompose (reverseFamily second) (reverseFamily first)
 
-equivalenceForward :: Equiv -> Value -> Nbe Value
-equivalenceForward equivalence value = case equivalence of
-  EquivIdentity _ -> pure value
-  EquivBoolNot -> case value of
-    VBool bool -> pure (VBool (not bool))
-    _ -> throwNbe "CCZ-RUNTIME-NBE-EQUIV-SHAPE" "Bool-not equivalence received non-Bool"
-  EquivIntSucc -> case value of
-    VInt integer -> pure (VInt (integer + 1))
-    _ -> throwNbe "CCZ-RUNTIME-NBE-EQUIV-SHAPE" "Int-succ equivalence received non-Int"
-  EquivCompose first second -> equivalenceForward first value >>= equivalenceForward second
-  EquivInverse inner -> equivalenceBackward inner value
+providerTransportValue :: ProviderDirection -> Family -> Value -> Nbe Value
+providerTransportValue direction family value = do
+  input <- eitherProvider (valueToProvider value)
+  result <- withProvider (providerTransport direction family input)
+  (sourceTy, targetTy) <- eitherToNbe (familyEndpoints family)
+  let resultTy = case direction of
+        ProviderForward -> targetTy
+        ProviderBackward -> sourceTy
+  eitherProvider (providerToValue resultTy result)
 
-equivalenceBackward :: Equiv -> Value -> Nbe Value
-equivalenceBackward equivalence value = case equivalence of
-  EquivIdentity _ -> pure value
-  EquivBoolNot -> equivalenceForward EquivBoolNot value
-  EquivIntSucc -> case value of
-    VInt integer -> pure (VInt (integer - 1))
-    _ -> throwNbe "CCZ-RUNTIME-NBE-EQUIV-SHAPE" "Int-succ inverse received non-Int"
-  EquivCompose first second -> equivalenceBackward second value >>= equivalenceBackward first
-  EquivInverse inner -> equivalenceForward inner value
+providerEquivalence :: ProviderDirection -> Equiv -> Value -> Nbe Value
+providerEquivalence direction equivalence =
+  providerTransportValue direction (FamilyGlue equivalence)
+
+providerPreserveValue :: Value -> Nbe Value
+providerPreserveValue value = do
+  input <- eitherProvider (valueToProvider value)
+  result <- withProvider (providerPreserve input)
+  eitherProvider (providerToValueLike value result)
+
+providerSelectValue :: Ty -> Face -> Value -> Value -> Nbe Value
+providerSelectValue ty face system base = do
+  systemInput <- eitherProvider (valueToProvider system)
+  baseInput <- eitherProvider (valueToProvider base)
+  result <- withProvider (providerSelect face systemInput baseInput)
+  eitherProvider (providerToValue ty result)
+
+withProvider :: Either String a -> Nbe a
+withProvider result = do
+  modifyState $ \state -> state
+    { stateProviderCalls = stateProviderCalls state + 1 }
+  eitherProvider result
+
+eitherProvider :: Either String a -> Nbe a
+eitherProvider result = case result of
+  Left detail -> throwNbe "CCZ-RUNTIME-NBE-PROVIDER-REJECTED" detail
+  Right value -> pure value
+
+valueToProvider :: Value -> Either String ProviderValue
+valueToProvider value = case value of
+  VBool bool -> Right (ProviderBool bool)
+  VNat natural -> Right (ProviderNat natural)
+  VInt integer -> Right (ProviderInt integer)
+  VVec _ elements -> ProviderVec <$> mapM valueToProvider elements
+  VPair first second -> ProviderPair <$> valueToProvider first <*> valueToProvider second
+  _ -> Left ("unsupported semantic value at cctt provider boundary: " ++ show value)
+
+providerToValue :: Ty -> ProviderValue -> Either String Value
+providerToValue ty value = case (ty, value) of
+  (TyBool, ProviderBool bool) -> Right (VBool bool)
+  (TyNat, ProviderNat natural) -> Right (VNat natural)
+  (TyInt, ProviderInt integer) -> Right (VInt integer)
+  (TyVec elementTy size, ProviderVec elements)
+    | size == length elements -> VVec elementTy <$> mapM (providerToValue elementTy) elements
+  (TySigma firstTy secondTy, ProviderPair first second) ->
+    VPair <$> providerToValue firstTy first <*> providerToValue secondTy second
+  _ -> Left ("cctt provider result " ++ show value ++ " does not inhabit " ++ show ty)
+
+providerToValueLike :: Value -> ProviderValue -> Either String Value
+providerToValueLike shape value = case (shape, value) of
+  (VBool _, ProviderBool bool) -> Right (VBool bool)
+  (VNat _, ProviderNat natural) -> Right (VNat natural)
+  (VInt _, ProviderInt integer) -> Right (VInt integer)
+  (VVec elementTy shapes, ProviderVec elements)
+    | length shapes == length elements ->
+        VVec elementTy <$> sequence (zipWith providerToValueLike shapes elements)
+  (VPair firstShape secondShape, ProviderPair first second) ->
+    VPair <$> providerToValueLike firstShape first <*> providerToValueLike secondShape second
+  _ -> Left ("cctt provider result changed semantic shape: " ++ show value)
 
 quote :: Int -> Ty -> Value -> Nbe Term
 quote level ty value = do
@@ -585,7 +617,8 @@ quote level ty value = do
             else throwNbe "CCZ-RUNTIME-NBE-READBACK-TYPE" "refl endpoints changed during evaluation"
     (_, VNeutral actualTy neutral)
       | ty == actualTy -> quoteNeutral level neutral
-    (_, VGlue equivalence inner) -> equivalenceForward equivalence inner >>= quote level ty
+    (_, VGlue equivalence inner) ->
+      providerEquivalence ProviderForward equivalence inner >>= quote level ty
     _ -> throwNbe "CCZ-RUNTIME-NBE-READBACK-SHAPE"
       ("cannot quote semantic value " ++ show value ++ " at " ++ show ty)
 
