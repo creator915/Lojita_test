@@ -32,7 +32,7 @@ grep -Fq 'RUNTIME_NBE_GHC_PKG ?= $(if $(RUNTIME_NBE_GHC_RESOLVED)' "$makefile" |
 
 [ -s "$macos_workflow" ] || fail "macOS clean-clone workflow is missing"
 for fact in \
-  'runs-on: macos-13' \
+  'runs-on: macos-15-intel' \
   'git clone --no-local' \
   'test -z "$(git -C "$RUNNER_TEMP/acceptance-clone" status --porcelain)"' \
   'make verify \' \

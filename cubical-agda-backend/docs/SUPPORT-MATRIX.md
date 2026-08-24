@@ -104,7 +104,7 @@ engine provenance.
 | Pinned Agda 2.9 snapshot, GHC 9.6.7, Chez 10.4.1 | `VERIFIED` | Full archived v2 runtime, candidate gates, formal projections/monolith, typed packets, and official test evidence. |
 | Official Agda `84497d0` (2.9.0), GHC 9.10.3, Linux x86-64 | `VERIFIED` | Goal 1 stock MAlonzo native lane, two compile/run cases, two fail-closed cases, provenance and binary audit, plus clean-clone replay. |
 | macOS Apple M4, AC Power, GHC 9.6.7 `-O2` | `VERIFIED-CANDIDATE` | Controlled three-run release performance profile with 48/48 host preflights. |
-| macOS 13 clean clone, locked GHC 9.10.3 plus matching Homebrew legacy GHC | `NOT-VERIFIED` | Automated second-clone `make verify` gate is present; it remains NOT-VERIFIED until CI reports green. |
+| macOS 15 Intel clean clone, locked GHC 9.10.3 plus matching Homebrew legacy GHC | `NOT-VERIFIED` | Automated second-clone `make verify` gate is present; it remains NOT-VERIFIED until CI reports green. |
 | Other OS/CPU/GHC/Agda combinations | `NOT-VERIFIED` | No compatibility or performance claim beyond the exact environments above. |
 
 ## Known residuals and rejection behavior
