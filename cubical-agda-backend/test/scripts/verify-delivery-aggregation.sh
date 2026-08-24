@@ -28,6 +28,8 @@ grep -Fq -- '-w "$(RUNTIME_NBE_GHC_RESOLVED)"' "$makefile" ||
   fail "Cabal is not pinned to the resolved runtime GHC"
 grep -Fq -- '$(foreach flag,$(RUNTIME_NBE_LDFLAGS),--ghc-option="$(flag)")' "$makefile" ||
   fail "Cabal does not receive the runtime linker flags on a first build"
+grep -Fq -- '-fforce-recomp -fignore-interface-pragmas' "$makefile" ||
+  fail "cctt adapter does not preserve imported eval/quotation link symbols"
 grep -Fq 'RUNTIME_NBE_GHC_PKG ?= $(if $(RUNTIME_NBE_GHC_RESOLVED)' "$makefile" ||
   fail "ghc-pkg is not derived from the resolved runtime GHC"
 
