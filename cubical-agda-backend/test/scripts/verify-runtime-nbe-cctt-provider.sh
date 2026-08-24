@@ -69,11 +69,11 @@ awk -F '\t' '
   fail "one or more input-driven cctt normalizations failed"
 ar t "$runtime_library" | grep -Fxq Cctt.o ||
   fail "runtime archive does not contain the cctt adapter object"
-nm -g "$runtime_binary" | grep -Fq '_Core_eval_info' ||
-  fail "runtime executable does not link cctt Core.eval"
-nm -g "$runtime_binary" | grep -Fq '_Quotation_quoteUnfold_info' ||
-  fail "runtime executable does not link cctt Quotation.quoteUnfold"
-nm -g "$runtime_binary" | grep -Fq '_CubicalziRuntimeziNbeziCctt_providerTransport_info' ||
-  fail "runtime executable does not link input-driven provider transport"
+if ! sh test/scripts/check-ghc-symbols.sh "$runtime_binary" \
+    _Core_eval_info \
+    _Quotation_quoteUnfold_info \
+    _CubicalziRuntimeziNbeziCctt_providerTransport_info; then
+  fail "runtime executable does not link cctt eval/quotation/provider transport"
+fi
 
 echo 'RuntimeNbeCcttProvider PASS (10 source hashes; 14 Coe/HCom/Glue normalizations; linked symbols)'

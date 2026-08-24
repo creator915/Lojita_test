@@ -14,6 +14,7 @@ fail() {
 verify_dependencies=$(sed -n 's/^verify:[[:space:]]*//p' "$makefile")
 for target in \
   verify-native-lane \
+  verify-runtime-symbol-audit-portability \
   verify-runtime-nbe \
   verify-runtime-nbe-cctt-provider \
   verify-runtime-nbe-agda-bridge \

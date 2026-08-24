@@ -125,10 +125,10 @@ nm -g "$final_binary" | grep -Fq 'CubicalziRuntimeziNbeziEmbedded_runEmbedded' |
   fail "final executable lacks the in-process runtime entry-point symbol"
 strings "$final_binary" | grep -Fq 'cctt-core-runtime-v1@ba16f3758a322e9be77ada1da2b93f45d500192e' ||
   fail "final executable lacks the locked provider marker"
-nm -g "$final_binary" | grep -Fq '_Core_eval_info' ||
-  fail "final executable lacks cctt Core.eval"
-nm -g "$final_binary" | grep -Fq '_Quotation_quoteUnfold_info' ||
-  fail "final executable lacks cctt quoteUnfold"
+if ! sh test/scripts/check-ghc-symbols.sh "$final_binary" \
+    _Core_eval_info _Quotation_quoteUnfold_info; then
+  fail "final executable lacks cctt Core.eval and quoteUnfold"
+fi
 if strings "$final_binary" | grep -Eq 'Agda\.TypeChecking|TCState|normalise|Agda\.Compiler'; then
   fail "final executable contains an Agda compiler identity"
 fi

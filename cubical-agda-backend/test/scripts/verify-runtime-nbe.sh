@@ -131,10 +131,10 @@ ar t "$runtime_library" | grep -Fq 'Nbe.o' ||
   fail "runtime archive does not contain the NbE object"
 strings "$runtime_binary" | grep -Fq 'cctt-core-runtime-v1@ba16f3758a322e9be77ada1da2b93f45d500192e' ||
   fail "final executable does not contain the locked provider marker"
-nm -g "$runtime_binary" | grep -Fq '_Core_eval_info' ||
-  fail "final executable does not contain cctt Core.eval"
-nm -g "$runtime_binary" | grep -Fq '_Quotation_quoteUnfold_info' ||
-  fail "final executable does not contain cctt quoteUnfold"
+if ! sh test/scripts/check-ghc-symbols.sh "$runtime_binary" \
+    _Core_eval_info _Quotation_quoteUnfold_info; then
+  fail "final executable does not contain cctt Core.eval and quoteUnfold"
+fi
 if strings "$runtime_binary" | grep -Eq 'Agda\.TypeChecking|TCState|normalise|Agda\.Compiler'; then
   fail "final executable contains a forbidden Agda compiler identity"
 fi
