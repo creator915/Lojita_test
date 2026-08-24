@@ -28,14 +28,17 @@ fail() {
   exit 1
 }
 
-for file in "$bridge" "$runtime" "$runtime_library" "$stock_agda" "$ghc" \
+ghc_path=$(command -v "$ghc" 2>/dev/null) ||
+  fail "GHC command is not available: $ghc"
+
+for file in "$bridge" "$runtime" "$runtime_library" "$stock_agda" \
   "$bridge_fixture" "$cubical_fixture" "$final_fixture"; do
   [ -s "$file" ] || fail "missing input: $file"
 done
 [ -d "$package_db" ] || fail "missing runtime package DB: $package_db"
 [ -x "$bridge" ] || fail "Agda Internal bridge is not executable"
 [ -x "$stock_agda" ] || fail "Stock Agda is not executable"
-[ -x "$ghc" ] || fail "GHC is not executable"
+[ -x "$ghc_path" ] || fail "GHC command is not executable: $ghc_path"
 
 printf 'case\tevidence\tstatus\n' > "$summary"
 
