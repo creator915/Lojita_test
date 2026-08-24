@@ -6,11 +6,13 @@ backend_dir=$(CDPATH= cd -- "$script_dir/../.." && pwd)
 guide="$backend_dir/docs/BENCHMARKS.md"
 readme="$backend_dir/README.md"
 makefile="$backend_dir/Makefile"
-release="$backend_dir/build/agda29/formal-transport-performance-release"
-historical="$backend_dir/build/agda29/formal-transport-performance"
+evidence_root=${BENCHMARK_EVIDENCE_ROOT:-"$backend_dir/build/agda29"}
+release="$evidence_root/formal-transport-performance-release"
+historical="$evidence_root/formal-transport-performance"
 release_profile="$backend_dir/config/nbe-performance-release-profile.tsv"
 historical_profile="$backend_dir/config/nbe-performance-profile.tsv"
 host_profile="$backend_dir/config/nbe-performance-host-profile.tsv"
+evidence_lock=${BENCHMARK_EVIDENCE_LOCK:-"$backend_dir/config/nbe-performance-evidence.lock.tsv"}
 
 fail() {
   echo "Benchmark guide contract FAIL: $*" >&2
@@ -62,6 +64,13 @@ for file in \
   "$release_profile" \
   "$historical_profile" \
   "$host_profile" \
+  "$evidence_lock"
+do
+  [ -s "$file" ] || fail "required repository contract is missing or empty: $file"
+done
+
+complete_evidence=1
+for file in \
   "$release/invocation.tsv" \
   "$release/environment.tsv" \
   "$release/summary.tsv" \
@@ -72,8 +81,9 @@ for file in \
   "$historical/invocation.tsv" \
   "$historical/summary.tsv"
 do
-  [ -s "$file" ] || fail "required evidence is missing or empty: $file"
+  [ -s "$file" ] || complete_evidence=0
 done
+[ -d "$release/raw" ] || complete_evidence=0
 
 for heading in \
   '# NbE production-candidate benchmarks' \
@@ -106,6 +116,60 @@ assert_equal historical-optimization \
   "$(value "$historical_profile" ghc-optimization)" O0
 assert_equal host-schema "$(value "$host_profile" schema)" 1
 
+assert_equal evidence-lock-schema "$(value "$evidence_lock" schema)" 1
+assert_equal evidence-lock-status \
+  "$(value "$evidence_lock" status)" external-generated-evidence-not-in-git
+
+profile_hash=$(shasum -a 256 "$release_profile" | awk '{ print $1 }')
+host_hash=$(shasum -a 256 "$host_profile" | awk '{ print $1 }')
+assert_equal locked-release-profile-sha256 \
+  "$(value "$evidence_lock" release-profile-sha256)" "$profile_hash"
+assert_equal locked-host-profile-sha256 \
+  "$(value "$evidence_lock" host-profile-sha256)" "$host_hash"
+assert_equal locked-release-result \
+  "$(value "$evidence_lock" release-result)" ENGINEERING-PERFORMANCE-PASS
+assert_equal locked-release-summary-rows \
+  "$(value "$evidence_lock" release-summary-rows)" 12
+assert_equal locked-overall-baseline \
+  "$(value "$evidence_lock" overall-baseline-seconds)" 74.180000
+assert_equal locked-overall-candidate \
+  "$(value "$evidence_lock" overall-candidate-seconds)" 74.150000
+assert_equal locked-overall-time-p95 \
+  "$(value "$evidence_lock" overall-time-p95)" 1.016723
+assert_equal locked-overall-rss-p95 \
+  "$(value "$evidence_lock" overall-rss-p95)" 1.067052
+assert_equal locked-higher-rss-p95 \
+  "$(value "$evidence_lock" higher-rss-p95)" 1.194333
+assert_equal locked-higher-rss-threshold \
+  "$(value "$evidence_lock" higher-rss-threshold)" 1.30
+assert_equal locked-overall-allocation-p95 \
+  "$(value "$evidence_lock" overall-allocation-p95)" 0.999941
+assert_equal locked-static-allocation-p95 \
+  "$(value "$evidence_lock" static-allocation-p95)" 1.000046
+assert_equal locked-residual-allocation-p95 \
+  "$(value "$evidence_lock" residual-allocation-p95)" 0.999802
+assert_equal locked-artifact-rows \
+  "$(value "$evidence_lock" artifact-rows)" 6
+assert_equal locked-stage-rows \
+  "$(value "$evidence_lock" stage-rows)" 11
+assert_equal locked-historical-result \
+  "$(value "$evidence_lock" historical-result)" ENGINEERING-PERFORMANCE-FAIL
+assert_equal locked-historical-higher-rss-p95 \
+  "$(value "$evidence_lock" historical-higher-rss-p95)" 1.303373
+assert_equal locked-historical-higher-rss-threshold \
+  "$(value "$evidence_lock" historical-higher-rss-threshold)" 1.30
+assert_equal locked-raw-files "$(value "$evidence_lock" raw-files)" 3219
+assert_equal locked-raw-summary-files \
+  "$(value "$evidence_lock" raw-summary-files)" 48
+assert_equal locked-raw-host-preflight-files \
+  "$(value "$evidence_lock" raw-host-preflight-files)" 48
+assert_equal locked-raw-background-process-files \
+  "$(value "$evidence_lock" raw-background-process-files)" 48
+assert_equal locked-raw-allocation-files \
+  "$(value "$evidence_lock" raw-allocation-files)" 48
+
+if [ "$complete_evidence" -eq 1 ]; then
+
 for key in profile status benchmark-variant result-name ghc-optimization \
   candidate-engine required-runs group-timeout-seconds case-timeout-seconds
 do
@@ -119,8 +183,6 @@ do
     "$(value "$release_profile" "$key")"
 done
 
-profile_hash=$(shasum -a 256 "$release_profile" | awk '{ print $1 }')
-host_hash=$(shasum -a 256 "$host_profile" | awk '{ print $1 }')
 assert_equal release-profile-sha256 \
   "$(value "$release/invocation.tsv" profile-sha256)" "$profile_hash"
 assert_equal host-profile-sha256 \
@@ -194,6 +256,8 @@ do
     "$expected"
 done
 
+fi
+
 for fact in \
   '74.18 s' \
   '74.15 s' \
@@ -215,4 +279,8 @@ do
   require_text "$guide" "$fact"
 done
 
-echo 'Benchmark guide contract PASS (O0/O2 profiles, 12 scopes, 3,219 raw files)'
+if [ "$complete_evidence" -eq 1 ]; then
+  echo 'Benchmark guide contract PASS (O0/O2 profiles, 12 scopes, 3,219 raw files inspected)'
+else
+  echo 'Benchmark guide contract PASS (clean clone; locked aggregate snapshot, generated raw evidence absent)'
+fi

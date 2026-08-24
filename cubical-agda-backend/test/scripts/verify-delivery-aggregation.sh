@@ -19,7 +19,8 @@ for target in \
   verify-runtime-nbe-cctt-provider \
   verify-runtime-nbe-agda-bridge \
   verify-runtime-nbe-final-malonzo \
-  verify-runtime-nbe-differential; do
+  verify-runtime-nbe-differential \
+  verify-benchmarks-guide-clean-clone; do
   printf '%s\n' "$verify_dependencies" | grep -Eq "(^|[[:space:]])$target([[:space:]]|$)" ||
     fail "make verify omits $target"
 done

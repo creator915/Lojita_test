@@ -4,6 +4,7 @@ set -eu
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 backend_dir=$(CDPATH= cd -- "$script_dir/../.." && pwd)
+repository_root=$(git -C "$backend_dir" rev-parse --show-toplevel)
 validator="$script_dir/verify-nbe-adapter-source-identity.sh"
 promotion_checker="$script_dir/check-nbe-production-promotion.sh"
 evidence_dir="$backend_dir/build/nbe-adapter-source-identity-contract"
@@ -125,6 +126,16 @@ run_current_validator() {
     sh "$validator"
 }
 
+run_fork_validator() {
+  fork_checkout="$temporary_dir/fork/checkout"
+  git clone -q "$repository_root" "$fork_checkout"
+  git -C "$fork_checkout" remote set-url origin https://example.invalid/fork/cubical-agda-backend.git
+  fork_root="$fork_checkout/${backend_dir#"$repository_root"/}"
+  NBE_ADAPTER_SOURCE_ROOT="$fork_root" \
+  NBE_ADAPTER_SOURCE_EVIDENCE_DIR="$temporary_dir/fork-evidence" \
+    sh "$validator"
+}
+
 run_current_promotion() {
   NBE_ADAPTER_SOURCE_EVIDENCE_DIR="$temporary_dir/current-promotion-evidence" \
     sh "$promotion_checker"
@@ -148,6 +159,7 @@ run_eligible_promotion() {
 }
 
 run_pass current-content-pinned run_current_validator
+run_pass blocked-source-from-fork run_fork_validator
 run_pass eligible-source run_eligible_validator
 run_pass eligible-promotion run_eligible_promotion
 run_reject current-promotion-blocked run_current_promotion
@@ -191,9 +203,9 @@ run_reject promotion-lock-mismatch run_eligible_promotion
 
 pass_count=$(awk -F '\t' 'NR > 1 && $3 == "PASS" { count++ } END { print count + 0 }' "$summary")
 reject_count=$(awk -F '\t' 'NR > 1 && $3 == "EXPECTED-REJECT" { count++ } END { print count + 0 }' "$summary")
-if [ "$pass_count" -ne 3 ] || [ "$reject_count" -ne 6 ]; then
+if [ "$pass_count" -ne 4 ] || [ "$reject_count" -ne 6 ]; then
   echo "NbE adapter source identity contract summary is incomplete" >&2
   exit 1
 fi
 
-echo "NbE adapter source identity contract PASS (3 positive, 6 negative)"
+echo "NbE adapter source identity contract PASS (4 positive, 6 negative)"
