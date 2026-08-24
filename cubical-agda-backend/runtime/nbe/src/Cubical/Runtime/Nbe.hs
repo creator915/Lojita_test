@@ -2,9 +2,10 @@
 -- fragment. A compiler-side bridge translates checked Agda Internal Term/Type
 -- into the shared wire model; this final-process module does not link Agda.
 --
--- Cubical primitive reduction is guarded by the linked cctt evaluator at the
--- pinned revision.  The Agda wire adapter supplies the datatype/literal
--- semantics which are outside cctt's small core language.
+-- Bounded Cubical primitive actions are compiled with their actual input into
+-- closed terms for the linked cctt evaluator at the pinned revision.  Runtime
+-- readback consumes cctt's quoted normal form; the Agda wire adapter supplies
+-- only datatype/literal encoding outside cctt's small core language.
 module Cubical.Runtime.Nbe
   ( module Cubical.Runtime.Nbe.Wire
   , Limits (..)

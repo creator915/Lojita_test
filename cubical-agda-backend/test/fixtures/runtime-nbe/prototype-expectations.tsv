@@ -1,5 +1,6 @@
 scenario	expected-term	expected-type	related-fixture
 t11	VecLit TyBool [BoolLit False,BoolLit True]	TyVec TyBool 2	TransportBoundary.e11
+t11-flipped	VecLit TyBool [BoolLit True,BoolLit False]	TyVec TyBool 2	input-dependence-control
 t11b	VecLit TyBool [BoolLit True,BoolLit False]	TyVec TyBool 2	TransportBoundary.t11b-e11b-proof
 t16a	BoolLit True	TyBool	TransportHigher.t16a-e16a-refl
 t16b	IntLit 2	TyInt	TransportHigher.t16b-e16b-refl

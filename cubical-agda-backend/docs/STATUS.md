@@ -81,7 +81,7 @@ The current and retained candidate evidence is:
 - root-layout local `make verify`: PASS on 2026-08-23;
 - goal 1 `make verify-native-lane`: PASS on 2026-08-23, including a separate
   clean clone from local commit `7578f56`;
-- runtime `make verify-runtime-nbe`: 26/26 PASS on 2026-08-23, including the
+- runtime `make verify-runtime-nbe`: 27/27 PASS on 2026-08-23, including the
   repaired higher-order readback and negative-index rejection;
 - `make verify-runtime-nbe-cctt-provider`: 10/10 source hashes, 11 input-driven
   eval/quotation cases, archive membership and final ELF symbols PASS locally;

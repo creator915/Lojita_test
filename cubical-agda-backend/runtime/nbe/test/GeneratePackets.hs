@@ -23,6 +23,9 @@ fixtures =
   [ ("t11.packet", packet
       (Transp (TypePath (FamilyVec (FamilyGlue EquivBoolNot) 2)) (boolVector [True, False]))
       (TyVec TyBool 2) [])
+  , ("t11-flipped.packet", packet
+      (Transp (TypePath (FamilyVec (FamilyGlue EquivBoolNot) 2)) (boolVector [False, True]))
+      (TyVec TyBool 2) [])
   , ("t11b.packet", packet
       (Transp (TypePath (FamilyConst (TyVec TyBool 2))) (boolVector [True, False]))
       (TyVec TyBool 2) [])

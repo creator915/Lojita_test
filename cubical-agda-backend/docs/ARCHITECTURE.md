@@ -322,7 +322,10 @@ Unavailable, timeout, failed, and invalid-readback outcomes remain fail-closed.
 See `ENGINE_CONTRACT.md`.
 The upstream `AndrasKovacs/cctt` executable is not a drop-in Agda library. Goal
 3 therefore vendors its unmodified Core modules behind a repository-owned
-Cabal library and an explicit Agda-wire semantic adapter; see
+Cabal library and an explicit Agda-wire semantic adapter. The bounded adapter
+compiles the actual wire value and family action to closed cctt terms and
+decodes the quoted normal form; it does not use fixed cctt probes to authorize
+a separately computed value. See
 `NBE_SELECTION.md` for the separation from the compiler-process candidate.
 
 The boundary does not trust either implementation's read-back. Before

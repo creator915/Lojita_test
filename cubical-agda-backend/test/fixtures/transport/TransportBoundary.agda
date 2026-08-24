@@ -13,6 +13,7 @@ open import Cubical.Foundations.Univalence
 open import Cubical.Data.Bool using (Bool; true; false; not)
 open import Cubical.Data.Nat using (ℕ)
 open import Cubical.Data.Nat.Properties using (+-comm; isSetℕ)
+open import Cubical.Data.Sigma using (_×_; _,_)
 open import Cubical.Foundations.Transport using (isSet-subst)
 open import Cubical.Data.Vec using (Vec; head; tail) renaming (_∷_ to _∷v_; [] to []v)
 

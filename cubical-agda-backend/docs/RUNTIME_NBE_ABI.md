@@ -16,9 +16,13 @@ upstream archive/license identities are locked in
 `config/runtime-nbe-provider.lock.tsv`. A repository-owned Cabal library target
 exposes the upstream `Core.eval` and `Quotation.quoteUnfold` implementation.
 The Agda wire language remains deliberately smaller than cctt's own language:
-each admitted Cubical primitive builds a matching cctt Core term and requires
-successful eval/quotation before the typed wire adapter executes its
-Agda-specific data operation. A provider rejection is fatal, never a fallback.
+the adapter encodes the actual bounded Bool/Nat/Int/Vec/Sigma value and its
+family action as a closed cctt lambda/Sigma term. The value returned to runtime
+readback is decoded from `quoteUnfold (eval term)`; no separate Haskell result
+is authorized by a success flag. Pi transport is represented extensionally,
+and its domain/codomain actions enter this same provider when applied. This is
+not a claim that arbitrary Agda Internal syntax is cctt syntax. A translation,
+shape, or provider rejection is fatal, never a fallback.
 
 ## Wire value
 

@@ -48,7 +48,7 @@ while IFS='	' read -r scenario expected_term expected_type related_fixture; do
     *) fail "$scenario output mismatch: $output" ;;
   esac
   case "$scenario" in
-    t11|t11b|t16a|t16b|glue|record|hcomp-one|hcomp-zero)
+    t11|t11-flipped|t11b|t16a|t16b|glue|record|hcomp-one|hcomp-zero)
       printf '%s\n' "$output" | grep -Eq 'provider-calls=[1-9][0-9]*' ||
         fail "$scenario did not execute the linked cctt provider"
       ;;
@@ -57,6 +57,9 @@ while IFS='	' read -r scenario expected_term expected_type related_fixture; do
     t11)
       [ "$($runtime_binary --observation "$context" "$packet_dir/$scenario.packet")" = 'false , true' ] ||
         fail "t11 structural observation mismatch" ;;
+    t11-flipped)
+      [ "$($runtime_binary --observation "$context" "$packet_dir/$scenario.packet")" = 'true , false' ] ||
+        fail "t11 flipped-input structural observation mismatch" ;;
     t11b)
       [ "$($runtime_binary --observation "$context" "$packet_dir/$scenario.packet")" = 'true , false' ] ||
         fail "t11b structural observation mismatch" ;;
@@ -157,6 +160,6 @@ fi
 printf 'semantic-negative-index\ttyped neutral application readback\tno negative de Bruijn index\tPASS\n' >> "$summary"
 
 positive_count=$(awk -F '\t' 'NR > 1 && $4 == "PASS" { count++ } END { print count + 0 }' "$summary")
-[ "$positive_count" -eq 26 ] || fail "expected 26 PASS rows, observed $positive_count"
+[ "$positive_count" -eq 27 ] || fail "expected 27 PASS rows, observed $positive_count"
 
 echo "RuntimeNbe PASS ($positive_count; linked cctt runtime fragment)"

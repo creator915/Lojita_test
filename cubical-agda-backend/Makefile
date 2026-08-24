@@ -118,7 +118,7 @@ build-runtime-nbe:
 		-package-db "$(RUNTIME_NBE_PACKAGE_DB)" -package cubical-runtime-nbe \
 		-o "$(RUNTIME_NBE_GENERATOR)" "$(RUNTIME_NBE_DIR)/test-exe/Main.o"
 	mkdir -p "$(RUNTIME_NBE_DIR)/provider-test-exe"
-	$(RUNTIME_NBE_GHC) -O2 -Wall -Werror -fforce-recomp \
+	$(RUNTIME_NBE_GHC) -O2 -Wall -Werror -fforce-recomp $(RUNTIME_NBE_LDFLAGS) \
 		-hide-all-packages -package base \
 		$(RUNTIME_NBE_EXTERNAL_PACKAGE_DBS) \
 		-package-db "$(RUNTIME_NBE_PACKAGE_DB)" -package cubical-runtime-nbe \
