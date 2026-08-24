@@ -12,7 +12,7 @@ Chez/compiler-process-NbE scope and is retired.
 | --- | ---: | --- |
 | 1. stock Agda -> MAlonzo -> erased Haskell -> native binary | 9/9 | IMPLEMENTED; VERIFIED |
 | 2. cross-process checked `Term + Type` | 8/9 | IMPLEMENTED; clean-clone gate open |
-| 3. linked NbE inside the final program process | 11/11 implementation items | CLEAN-CLONE FULL VERIFICATION PENDING; not accepted |
+| 3. linked NbE inside the final program process | 11/11 implementation items | CLEAN-CLONE FULL VERIFICATION PASS; independent acceptance pending |
 | Complete revised checklist | 41/56 implementation items | 73.2% by item count; release gates still open |
 
 ## What is usable now
@@ -22,10 +22,10 @@ Chez/compiler-process-NbE scope and is retired.
 - Typed residual and packet production retain checked `Term + Type`.
 - The v2 packet consumer source and tests are maintained under
   `runtime/agda-2.9/`.
-- The current change adds a macOS second-clone `make verify` workflow and folds
-  native, provider, bridge, final MAlonzo and same-input differential gates into
-  the aggregate target. That new complete run has not yet reported green, so
-  Goal 3 is not accepted.
+- The macOS second-clone workflow folds native, provider, bridge, final MAlonzo
+  and same-input differential gates into `make verify`. The latest verified baseline's PR/push
+  clean-clone runs `32738718456`/`32738709978` passed. Goal 3 nevertheless
+  remains pending independent semantic acceptance.
 - The isolated compiler-process NbE candidate passed the recorded 8-group,
   42-row differential matrix and controlled O2 provisional performance gate.
 - Default production `nbe` remains fail closed because the provider lock is
@@ -68,10 +68,10 @@ their indexed transports as `transpX-Vec`, checked equivalence-induction and
 set proofs connect each root to a canonical oracle computed from the same
 input. The harness compares those exact Bool-pair strings with a structural
 rendering of the runtime result. An unproved or residual oracle is a failure.
-Historical PR run `32701822346` and push run `32701816817` both record all six
-exact matches, but predate this cctt and macOS change. Goal 3 has code and
-specialized tests for its 11 implementation items, but remains unaccepted until
-the new full clean-clone run is green and independently reviewed. The
+The latest verified baseline's Goal 3 PR/push runs `32738718266`/`32738709953` record all six
+exact matches, and macOS clean-clone runs `32738718456`/`32738709978` pass the
+full aggregate. Goal 3 has code and specialized tests for its 11 implementation
+items, but remains unaccepted until independently reviewed. The
 `goal3-runtime-nbe` workflow executes provider, runtime, real-Internal,
 differential and final-MAlonzo gates.
 

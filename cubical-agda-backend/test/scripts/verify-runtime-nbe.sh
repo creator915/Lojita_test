@@ -138,10 +138,8 @@ fi
 if strings "$runtime_binary" | grep -Eq 'Agda\.TypeChecking|TCState|normalise|Agda\.Compiler'; then
   fail "final executable contains a forbidden Agda compiler identity"
 fi
-if rg -n 'System\.Process|createProcess|callProcess|readProcess|unsafePerformIO' \
-    runtime/nbe/src runtime/nbe/app; then
+sh test/scripts/audit-runtime-source.sh runtime/nbe/src runtime/nbe/app ||
   fail "runtime source contains a forbidden process/compiler escape"
-fi
 printf 'linked-library\tcctt-eval+quotation-symbols\tcctt-eval+quotation-symbols\tPASS\n' >> "$summary"
 printf 'compiler-symbol-audit\tno-Agda-TCState-normalise\tno-Agda-TCState-normalise\tPASS\n' >> "$summary"
 

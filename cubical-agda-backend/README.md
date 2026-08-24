@@ -9,10 +9,10 @@
 | --- | --- | --- |
 | 1. stock Agda -> MAlonzo -> Haskell -> GHC 二进制 | **已实现并验收** | 锁定 Stock Agda 2.9.0 / MAlonzo / GHC 9.10.3；独立二进制审计 |
 | 2. 跨进程 `Term + Type` packet | **已有实现** | 仍需 clean-clone overlay 构建验收 |
-| 3. 最终程序进程内 runtime NbE | **实现项 11/11；clean-clone 全量验收进行中，尚未交付** | cctt 的 Coe/HCom/Glue 对实际输入归一化；t11/t11b 使用证明关联的同输入精确差分 |
+| 3. 最终程序进程内 runtime NbE | **实现项 11/11；clean-clone 全量验证通过，独立验收待定** | cctt 的 Coe/HCom/Glue 对实际输入归一化；t11/t11b 使用证明关联的同输入精确差分 |
 
 当前可用的是候选 CubicalChez 后端、checked typed residual/packet、编译期
-NbE adapter 候选与完整的安全拒绝门禁。当前目标 1 已关闭，目标 3 的实现项已有代码与专项测试，但本轮 clean-clone 尚未全绿；
+NbE adapter 候选与完整的安全拒绝门禁。当前目标 1 已关闭，目标 3 的实现项与 clean-clone 全量验证已通过，但独立语义验收仍待完成；
 三路调度和总体发布门禁未关闭前，不得将仓库标记为完整交付。
 
 ## 目标数据流
@@ -22,7 +22,7 @@ Agda source
    |
    +-- native-safe ------> stock Agda/MAlonzo -> erased Haskell -> binary   [IMPLEMENTED]
    +-- cross-process ----> checked Term + Type packet                       [IMPLEMENTED]
-   `-- runtime-higher ---> linked in-process runtime NbE      [IMPLEMENTED; CLEAN VERIFY PENDING]
+   `-- runtime-higher ---> linked in-process runtime NbE      [IMPLEMENTED; CLEAN VERIFY PASS; REVIEW PENDING]
 ```
 
 跨进程只传输 Agda Internal `Term + Type` 协议数据。NbE 语义值、closure 和

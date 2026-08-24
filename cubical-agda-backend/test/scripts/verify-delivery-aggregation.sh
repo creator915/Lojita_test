@@ -14,6 +14,9 @@ fail() {
 verify_dependencies=$(sed -n 's/^verify:[[:space:]]*//p' "$makefile")
 for target in \
   verify-native-lane \
+  verify-v2-runtime-overlay-install \
+  verify-v2-runtime \
+  verify-runtime-source-audit \
   verify-runtime-symbol-audit-portability \
   verify-runtime-nbe \
   verify-runtime-nbe-cctt-provider \
@@ -33,11 +36,16 @@ grep -Fq -- '-fforce-recomp -fignore-interface-pragmas' "$makefile" ||
   fail "cctt adapter does not preserve imported eval/quotation link symbols"
 grep -Fq 'RUNTIME_NBE_GHC_PKG ?= $(if $(RUNTIME_NBE_GHC_RESOLVED)' "$makefile" ||
   fail "ghc-pkg is not derived from the resolved runtime GHC"
+grep -Fq -- '-DCUBICAL_RUNTIME_NBE' "$makefile" ||
+  fail "Goal 3 bridge does not enable its isolated wire adapter"
 
 [ -s "$macos_workflow" ] || fail "macOS clean-clone workflow is missing"
 for fact in \
   'runs-on: macos-15-intel' \
   'git clone --no-local' \
+  'install-v2-runtime-overlay.sh' \
+  'exe:agda-cubical-run' \
+  'AGDA29_SOURCE_DIR="$LOCKED_AGDA_V2_SOURCE"' \
   'test -z "$(git -C "$RUNNER_TEMP/acceptance-clone" status --porcelain)"' \
   'make verify \' \
   'RUNTIME_NBE_CABAL="$LOCKED_CABAL"'; do
@@ -45,4 +53,4 @@ for fact in \
     fail "macOS clean-clone workflow is missing: $fact"
 done
 
-echo 'DeliveryAggregation PASS (native/provider/bridge/MAlonzo/differential in make verify; macOS clean clone)'
+echo 'DeliveryAggregation PASS (native/packet/provider/bridge/MAlonzo/differential in make verify; macOS clean clone)'

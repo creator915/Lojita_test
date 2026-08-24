@@ -65,6 +65,33 @@ jobs:
             echo "LOCKED_DEPENDENCY_PACKAGE_DB=$dependency_package_db"
           } >> "$GITHUB_ENV"
 
+      - name: Build the Goal 2 v2 overlay with the locked GHC
+        shell: bash
+        working-directory: ${{ env.ACCEPTANCE_ROOT }}
+        run: |
+          set -euo pipefail
+          agda_origin=$(awk -F '\t' '$1 == "stock-agda-origin" { print $2 }' config/native-toolchain.lock.tsv)
+          agda_revision=$(awk -F '\t' '$1 == "stock-agda-revision" { print $2 }' config/native-toolchain.lock.tsv)
+          mkdir -p .toolchain/agda-v2
+          git -C .toolchain/agda-v2 init
+          git -C .toolchain/agda-v2 remote add origin "$agda_origin"
+          git -C .toolchain/agda-v2 fetch --depth 1 origin "$agda_revision"
+          git -C .toolchain/agda-v2 checkout --detach FETCH_HEAD
+          sh test/scripts/install-v2-runtime-overlay.sh "$PWD/.toolchain/agda-v2"
+          "$LOCKED_CABAL" build -w "$LOCKED_GHC" \
+            --project-dir=.toolchain/agda-v2 lib:Agda exe:agda exe:agda-cubical-run
+          v2_agda=$("$LOCKED_CABAL" list-bin -w "$LOCKED_GHC" \
+            --project-dir=.toolchain/agda-v2 exe:agda)
+          v2_runner=$("$LOCKED_CABAL" list-bin -w "$LOCKED_GHC" \
+            --project-dir=.toolchain/agda-v2 exe:agda-cubical-run)
+          test -x "$v2_agda"
+          test -x "$v2_runner"
+          {
+            echo "LOCKED_AGDA_V2_SOURCE=$PWD/.toolchain/agda-v2"
+            echo "LOCKED_AGDA_V2=$v2_agda"
+            echo "LOCKED_AGDA_V2_RUNNER=$v2_runner"
+          } >> "$GITHUB_ENV"
+
       - name: Fetch locked Cubical differential oracle
         shell: bash
         working-directory: ${{ env.ACCEPTANCE_ROOT }}
@@ -108,6 +135,10 @@ jobs:
             NATIVE_AGDA_SOURCE_DIR="$LOCKED_AGDA_SOURCE" \
             NATIVE_AGDA_DATA_DIR="$LOCKED_AGDA_DATA" \
             NATIVE_GHC="$LOCKED_GHC" \
+            AGDA29_SOURCE_DIR="$LOCKED_AGDA_V2_SOURCE" \
+            CUBICAL29_DIR="$LOCKED_CUBICAL" \
+            GHC29="$LOCKED_GHC" \
+            CABAL29="$LOCKED_CABAL" \
             RUNTIME_NBE_GHC="$LOCKED_GHC" \
             RUNTIME_NBE_GHC_PKG="$LOCKED_GHC_PKG" \
             RUNTIME_NBE_CABAL="$LOCKED_CABAL" \

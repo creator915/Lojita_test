@@ -49,7 +49,7 @@ require_text "$goals" '## 目标 1：原版编译器的本地二进制路径'
 require_text "$goals" '## 目标 2：跨进程 Term 搬运'
 require_text "$goals" '## 目标 3：最终程序进程内的 runtime NbE'
 require_text "$goals" '**状态：已实现并通过专项及 clean-clone 验收。**'
-require_text "$goals" '**状态：11/11 实现项已有代码与专项测试；本轮 clean-clone 全量验收尚未全绿，不认定完成。**'
+require_text "$goals" '**状态：11/11 实现项及 clean-clone 全量验证已通过；独立语义验收仍未完成。**'
 require_text "$goals" '现有 compiler-process NbE candidate 不等于目标 3'
 require_text "$goals" '目标 1 使用独立的 stock MAlonzo/GHC 路径'
 
@@ -70,11 +70,11 @@ require_text "$checklist" '`t11/t11b/t09/t16a/t16b/t16c` 的新门禁从同一'
 require_text "$checklist" '要求与 runtime observation 逐字相等'
 
 require_text "$readme" '| 1. stock Agda -> MAlonzo -> Haskell -> GHC 二进制 | **已实现并验收** |'
-require_text "$readme" '| 3. 最终程序进程内 runtime NbE | **实现项 11/11；clean-clone 全量验收进行中，尚未交付** |'
+require_text "$readme" '| 3. 最终程序进程内 runtime NbE | **实现项 11/11；clean-clone 全量验证通过，独立验收待定** |'
 require_text "$status_doc" '| Complete revised checklist | 41/56 implementation items | 73.2% by item count; release gates still open |'
-require_text "$status_doc" '| 3. linked NbE inside the final program process | 11/11 implementation items | CLEAN-CLONE FULL VERIFICATION PENDING; not accepted |'
+require_text "$status_doc" '| 3. linked NbE inside the final program process | 11/11 implementation items | CLEAN-CLONE FULL VERIFICATION PASS; independent acceptance pending |'
 require_text "$support_matrix" '| Goal 3 NbE linked into the final program process | `OWNER-BLOCKED` |'
-require_text "$test_results" 'Goal 3 has code and specialized tests for 11/11 implementation items, but the current complete clean-clone run is pending and the goal is not accepted.'
+require_text "$test_results" "Goal 3 has code and specialized tests for 11/11 implementation items, and the latest verified baseline's PR/push clean-clone runs pass the complete aggregate; independent acceptance remains pending."
 require_text "$test_results" 'correct `App (Var 1) (Var 0)`'
 require_text "$selection_doc" 'GOAL 3 RUNTIME PROVIDER SELECTED'
 require_text "$status_doc" '`goal3-runtime-nbe` workflow'
@@ -122,4 +122,4 @@ if grep -Fq 'make -C backend' \
   fail "pre-flattening make command remains"
 fi
 
-echo "Project status contract PASS ($done_count/$total_count implementation items; Goal 1 closed, Goal 3 clean-clone verification pending)"
+echo "Project status contract PASS ($done_count/$total_count implementation items; Goal 1 closed, Goal 3 clean verification passed and independent review pending)"

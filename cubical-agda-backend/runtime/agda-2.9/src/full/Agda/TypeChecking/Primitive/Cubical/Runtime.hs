@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -73,7 +74,9 @@ import Agda.TypeChecking.Telescope (shouldBePi)
 
 import Agda.Utils.Impossible (__IMPOSSIBLE__)
 import qualified Agda.Utils.Serialize as RawSerialise
+#ifdef CUBICAL_RUNTIME_NBE
 import qualified Cubical.Runtime.Nbe.Wire as Wire
+#endif
 
 data CubicalRuntimeOptions = CubicalRuntimeOptions
   { cubicalRuntimeExpression :: Maybe String
@@ -299,6 +302,7 @@ runtimeExport file expression = do
 -- narrow waist.  In particular, this path must not call 'normalise': runtime
 -- work may not be discharged by the compiler and then misreported as NbE.
 runtimeNbeExport :: FilePath -> String -> TCM ()
+#ifdef CUBICAL_RUNTIME_NBE
 runtimeNbeExport file expression = do
   (term, ty) <- runtimeInfer expression
   ensurePortableTerm term ty
@@ -965,6 +969,10 @@ isPrimitiveName name primitiveId =
 unsupportedBridge :: String -> String -> TCM a
 unsupportedBridge node detail = runtimeAbort $
   "runtime NbE bridge does not support " ++ node ++ ": " ++ detail
+#else
+runtimeNbeExport _ _ = runtimeAbort $
+  "runtime NbE export requires the separately linked Goal 3 wire adapter"
+#endif
 
 writeRuntimePacket :: FilePath -> Term -> Type -> TCM ()
 writeRuntimePacket file term ty = do

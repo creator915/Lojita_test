@@ -132,10 +132,8 @@ fi
 if strings "$final_binary" | grep -Eq 'Agda\.TypeChecking|TCState|normalise|Agda\.Compiler'; then
   fail "final executable contains an Agda compiler identity"
 fi
-if rg -n 'System\.Process|createProcess|callProcess|readProcess|unsafePerformIO' \
-    runtime/nbe/src "$final_fixture"; then
+sh test/scripts/audit-runtime-source.sh runtime/nbe/src "$final_fixture" ||
   fail "linked runtime source contains a process/compiler escape"
-fi
 printf 'linked-runtime-symbols\tarchive-and-final-native-binary\tPASS\n' >> "$summary"
 
 case $(uname -s) in
