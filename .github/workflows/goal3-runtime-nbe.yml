@@ -1,0 +1,93 @@
+name: goal3-runtime-nbe
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  real-agda-malonzo-runtime:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: cubical-agda-backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: haskell-actions/setup@v2
+        with:
+          ghc-version: 9.10.3
+          cabal-version: latest
+
+      - name: Build locked Stock Agda library and executable
+        shell: bash
+        run: |
+          set -euo pipefail
+          agda_origin=$(awk -F '\t' '$1 == "stock-agda-origin" { print $2 }' config/native-toolchain.lock.tsv)
+          agda_revision=$(awk -F '\t' '$1 == "stock-agda-revision" { print $2 }' config/native-toolchain.lock.tsv)
+          mkdir -p .toolchain/agda
+          git -C .toolchain/agda init
+          git -C .toolchain/agda remote add origin "$agda_origin"
+          git -C .toolchain/agda fetch --depth 1 origin "$agda_revision"
+          git -C .toolchain/agda checkout --detach FETCH_HEAD
+          cabal update
+          cabal build --project-dir=.toolchain/agda lib:Agda exe:agda
+          agda_exe=$(cabal list-bin --project-dir=.toolchain/agda exe:agda)
+          agda_package_db=$(find .toolchain/agda/dist-newstyle/packagedb -mindepth 1 -maxdepth 1 -type d | head -n 1)
+          dependency_package_db=$(find "$(cabal path --store-dir)" -mindepth 2 -maxdepth 2 -type d -name package.db | head -n 1)
+          {
+            echo "AGDA_EXE=$agda_exe"
+            echo "AGDA_PACKAGE_DB=$PWD/$agda_package_db"
+            echo "DEPENDENCY_PACKAGE_DB=$dependency_package_db"
+            echo "AGDA_DATADIR=$PWD/.toolchain/agda/src/data"
+          } >> "$GITHUB_ENV"
+
+      - name: Verify real Internal bridge and final MAlonzo program
+        shell: bash
+        run: |
+          set -euo pipefail
+          common=(
+            RUNTIME_NBE_GHC=ghc
+            RUNTIME_NBE_GHC_PKG=ghc-pkg
+            RUNTIME_NBE_AGDA_PACKAGE_DB="$AGDA_PACKAGE_DB"
+            RUNTIME_NBE_DEPENDENCY_PACKAGE_DB="$DEPENDENCY_PACKAGE_DB"
+            RUNTIME_NBE_AGDA_DATADIR="$AGDA_DATADIR"
+            NATIVE_AGDA="$AGDA_EXE"
+          )
+          env "${common[@]}" make verify-runtime-nbe
+          env "${common[@]}" make verify-runtime-nbe-cctt-provider
+          env "${common[@]}" make verify-runtime-nbe-agda-bridge
+          env "${common[@]}" make verify-runtime-nbe-final-malonzo
+
+      - name: Fetch locked Cubical oracle
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .toolchain/cubical
+          git -C .toolchain/cubical init
+          git -C .toolchain/cubical remote add origin https://github.com/agda/cubical.git
+          git -C .toolchain/cubical fetch --depth 1 origin b150186d2544e7efeddd31e5d14a8b9ecbb100f7
+          git -C .toolchain/cubical checkout --detach FETCH_HEAD
+
+      - name: Verify same-input Goal 3 differential
+        shell: bash
+        run: |
+          set -euo pipefail
+          env \
+            RUNTIME_NBE_GHC=ghc \
+            RUNTIME_NBE_GHC_PKG=ghc-pkg \
+            RUNTIME_NBE_AGDA_PACKAGE_DB="$AGDA_PACKAGE_DB" \
+            RUNTIME_NBE_DEPENDENCY_PACKAGE_DB="$DEPENDENCY_PACKAGE_DB" \
+            RUNTIME_NBE_AGDA_DATADIR="$AGDA_DATADIR" \
+            RUNTIME_NBE_CUBICAL_DIR="$PWD/.toolchain/cubical" \
+            make verify-runtime-nbe-differential
+
+      - name: Upload Goal 3 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: goal3-runtime-nbe-evidence
+          path: cubical-agda-backend/build/runtime-nbe/

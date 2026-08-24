@@ -13,7 +13,9 @@ selection_doc="$repo_root/docs/NBE_SELECTION.md"
 runtime_lock="$repo_root/config/runtime-nbe-provider.lock.tsv"
 runtime_prototype="$repo_root/runtime/nbe/src/Cubical/Runtime/Nbe.hs"
 workflow="$repo_root/../.github/workflows/goal1-native.yml"
+goal3_workflow="$repo_root/../.github/workflows/goal3-runtime-nbe.yml"
 runtime_source="$repo_root/runtime/agda-2.9/src/full/Agda/TypeChecking/Primitive/Cubical/Runtime.hs"
+runtime_wire="$repo_root/runtime/nbe/src/Cubical/Runtime/Nbe/Wire.hs"
 
 fail() {
   echo "Project status contract FAIL: $*" >&2
@@ -27,7 +29,8 @@ require_text() {
 }
 
 for file in "$goals" "$checklist" "$readme" "$status_doc" "$support_matrix" \
-  "$test_results" "$selection_doc" "$runtime_lock" "$runtime_prototype" "$runtime_source"
+  "$test_results" "$selection_doc" "$runtime_lock" "$runtime_prototype" "$runtime_source" \
+  "$runtime_wire" "$goal3_workflow"
 do
   [ -s "$file" ] || fail "required file is missing or empty: $file"
 done
@@ -46,7 +49,7 @@ require_text "$goals" '## 目标 1：原版编译器的本地二进制路径'
 require_text "$goals" '## 目标 2：跨进程 Term 搬运'
 require_text "$goals" '## 目标 3：最终程序进程内的 runtime NbE'
 require_text "$goals" '**状态：已实现并通过专项及 clean-clone 验收。**'
-require_text "$goals" '**状态：未完成；当前仅完成进程与数据边界定义。**'
+require_text "$goals" '**状态：已实现并通过专项验收（11/11）。**'
 require_text "$goals" '现有 compiler-process NbE candidate 不等于目标 3'
 require_text "$goals" '目标 1 使用独立的 stock MAlonzo/GHC 路径'
 
@@ -55,39 +58,40 @@ open_count=$(awk '/^- \[ \] / { count++ } END { print count + 0 }' "$checklist")
 total_count=$((done_count + open_count))
 completion_pct=$(awk -v done="$done_count" -v total="$total_count" \
   'BEGIN { printf "%.1f", 100 * done / total }')
-[ "$done_count" -eq 31 ] || fail "completed checklist count is $done_count, expected 31"
-[ "$open_count" -eq 25 ] || fail "open checklist count is $open_count, expected 25"
+[ "$done_count" -eq 41 ] || fail "completed checklist count is $done_count, expected 41"
+[ "$open_count" -eq 15 ] || fail "open checklist count is $open_count, expected 15"
 require_text "$checklist" \
   "新范围统计：$done_count/$total_count 项已完成（$completion_pct%）"
 require_text "$checklist" '目标 1 为 9/9'
 require_text "$checklist" '目标 2 为 8/9'
-require_text "$checklist" '目标 3 为 1/11'
+require_text "$checklist" '目标 3 为 11/11'
 require_text "$checklist" 'static Chez 结果未被用于本节验收'
-require_text "$checklist" '自定义 `Ty`/`Term` AST 的原型'
+require_text "$checklist" '`t11/t11b/t09/t16a/t16b/t16c` 从同一 checked definition'
 
 require_text "$readme" '| 1. stock Agda -> MAlonzo -> Haskell -> GHC 二进制 | **已实现并验收** |'
-require_text "$readme" '| 3. 最终程序进程内 runtime NbE | **未完成（1/11）** |'
-require_text "$status_doc" '| Complete revised checklist | 31/56 | 55.4% by item count; not effort-weighted |'
-require_text "$status_doc" '| 3. linked NbE inside the final program process | 1/11 | NOT IMPLEMENTED; boundary only |'
-require_text "$support_matrix" '| Goal 3 NbE linked into the final program process | `NOT-VERIFIED` |'
-require_text "$test_results" 'Goal 3 remains at 1/11.'
-require_text "$test_results" '`KNOWN-SEMANTIC-BUG`'
-require_text "$selection_doc" 'GOAL 3 PROVIDER NOT SELECTED'
-require_text "$status_doc" 'it covers Goal'
-require_text "$status_doc" '1 and provides no Goal 3 CI evidence.'
+require_text "$readme" '| 3. 最终程序进程内 runtime NbE | **已实现并验收（11/11）** |'
+require_text "$status_doc" '| Complete revised checklist | 41/56 | 73.2% by item count; not effort-weighted |'
+require_text "$status_doc" '| 3. linked NbE inside the final program process | 11/11 | IMPLEMENTED; VERIFIED for declared fragment |'
+require_text "$support_matrix" '| Goal 3 NbE linked into the final program process | `VERIFIED` |'
+require_text "$test_results" 'Goal 3 is now 11/11 for its declared fragment.'
+require_text "$test_results" 'correct `App (Var 1) (Var 0)`'
+require_text "$selection_doc" 'GOAL 3 RUNTIME PROVIDER SELECTED'
+require_text "$status_doc" '`goal3-runtime-nbe` workflow'
 [ -s "$workflow" ] || fail "Goal 1 workflow is missing"
 require_text "$workflow" 'locked-stock-native'
-if grep -Eq 'verify-runtime-nbe|verify-goal3|Goal 3|goal3' "$workflow"; then
-  fail "status documentation must be revised if Goal 3 CI coverage is added"
-fi
+require_text "$goal3_workflow" 'make verify-runtime-nbe-agda-bridge'
+require_text "$goal3_workflow" 'make verify-runtime-nbe-final-malonzo'
+require_text "$goal3_workflow" 'make verify-runtime-nbe-cctt-provider'
+require_text "$goal3_workflow" 'make verify-runtime-nbe-differential'
 
 lock_status=$(awk -F '\t' '$1 == "status" { print $2; exit }' "$runtime_lock")
-[ "$lock_status" = reference-only ] || fail "Goal 3 provider lock must remain reference-only"
+[ "$lock_status" = linked ] || fail "Goal 3 provider lock must be linked"
 lock_acceptance=$(awk -F '\t' '$1 == "goal3-acceptance" { print $2; exit }' "$runtime_lock")
-[ "$lock_acceptance" = blocked ] || fail "Goal 3 provider acceptance must remain blocked"
-require_text "$runtime_prototype" 'data Ty'
-require_text "$runtime_prototype" 'data Term'
-require_text "$runtime_prototype" 'This is not a Goal 3 runtime'
+[ "$lock_acceptance" = accepted ] || fail "Goal 3 provider acceptance must be accepted"
+require_text "$runtime_wire" 'data Ty'
+require_text "$runtime_wire" 'data Term'
+require_text "$runtime_prototype" 'data Value'
+require_text "$runtime_source" 'import qualified Agda.Syntax.Internal as Internal'
 if grep -Eq 'import[[:space:]]+Agda\.Syntax\.Internal' "$runtime_prototype"; then
   fail "status contract must be revised before claiming the prototype is Agda-connected"
 fi
@@ -98,7 +102,7 @@ goal3_checked=$(awk '
   in_goal && /^- \[[xX]\] / { count++ }
   END { print count + 0 }
 ' "$checklist")
-[ "$goal3_checked" -eq 1 ] || fail "Goal 3 has $goal3_checked checked items, expected boundary-only 1"
+[ "$goal3_checked" -eq 11 ] || fail "Goal 3 has $goal3_checked checked items, expected complete 11"
 
 require_text "$runtime_source" 'maxRuntimePacketBytes = 64 * 1024 * 1024'
 require_text "$runtime_source" 'cubicalRuntimeResultTermFile'
@@ -116,4 +120,4 @@ if grep -Fq 'make -C backend' \
   fail "pre-flattening make command remains"
 fi
 
-echo "Project status contract PASS ($done_count/$total_count; goal 1 closed, goal 3 boundary-only 1/11)"
+echo "Project status contract PASS ($done_count/$total_count; goals 1 and 3 closed)"

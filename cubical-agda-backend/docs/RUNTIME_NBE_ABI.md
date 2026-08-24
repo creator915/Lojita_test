@@ -1,37 +1,61 @@
 # Runtime NbE ABI v1
 
-`runtime-nbe-abi-v1` is a prototype wire format, not the accepted Goal 3 ABI.
-The test harness links `libcubical-runtime-nbe.a`; an Agda/MAlonzo-generated
-final user program does not. The prototype source is independent of the Agda
-compiler package precisely because it defines a different `Ty`/`Term` AST.
+`runtime-nbe-abi-v1` is the implemented compiler/runtime narrow waist for the
+currently supported Goal 3 fragment. The compiler-side producer consumes real,
+checked `Agda.Syntax.Internal.Term` and `Type`; the final runtime deliberately
+uses a compiler-independent immutable `Ty`/`Term` representation so it does not
+link `TCState` or the Agda compiler package.
 
 ## Provider identity
 
-The pinned algorithm reference is `AndrasKovacs/cctt` at commit
-`ba16f3758a322e9be77ada1da2b93f45d500192e`, MIT. cctt does not expose an Agda
-library API and has a different core language. The current backend-owned
-prototype borrows cctt's environment/closure/evaluation/quotation split, but
-does not link cctt or adapt Agda Internal syntax. It must not be described as
-an unmodified/drop-in cctt library or a selected Goal 3 provider. The reference
-and license hashes are in `config/runtime-nbe-provider.lock.tsv`.
+The selected provider is `AndrasKovacs/cctt` commit
+`ba16f3758a322e9be77ada1da2b93f45d500192e`, MIT. Ten unmodified Core modules
+are vendored under `runtime/nbe/vendor/cctt/`; their individual hashes and the
+upstream archive/license identities are locked in
+`config/runtime-nbe-cctt-sources.sha256` and
+`config/runtime-nbe-provider.lock.tsv`. A repository-owned Cabal library target
+exposes the upstream `Core.eval` and `Quotation.quoteUnfold` implementation.
+The Agda wire language remains deliberately smaller than cctt's own language:
+each admitted Cubical primitive builds a matching cctt Core term and requires
+successful eval/quotation before the typed wire adapter executes its
+Agda-specific data operation. A provider rejection is fatal, never a fallback.
 
 ## Wire value
 
-The prototype packet begins with `CCZ-RUNTIME-NBE<TAB>1<LF>` followed by one
-canonical `Packet` value. It contains:
+The packet begins with `CCZ-RUNTIME-NBE<TAB>1<LF>` followed by one canonical
+`Packet` value containing:
 
 - ABI and provider identity;
-- context/interface identity;
-- one closed typed `Request`;
+- complete interface/module context identity;
+- one closed typed `Request`; and
 - the request's closed typed definition slice.
 
-This is a repository-defined model, not `Agda.Syntax.Internal.Term/Type`. Its
-typed core has Bool, Nat, Int, S1, Vec, non-dependent Pi/Sigma, paths,
+This is a repository-defined runtime representation produced from checked
+Internal syntax, not a serialization of compiler state. Its typed core has
+Bool, Nat, Int, S1, Vec, non-dependent Pi/Sigma, paths,
 lambda/application, definitions, Glue equivalences, `transp`, `hcomp`, record
 transport and the audited S1 winding fragment. Unsupported or ill-typed shapes
 are errors; no fallback normalizer exists in the runtime.
 
-## Ownership and lifecycle
+## Implemented producer and final link
+
+`--cubical-runtime-nbe-export` checks closure/metavariables and rechecks the
+Internal pair, then translates the declared Bool/Nat/Int/Vec/Pi/Sigma/PathP/
+Glue/S¹ slice, variables, lambdas, applications, single-clause definitions and
+a checked definition slice. The Cubical slice recognizes primitives by
+`PrimitiveId` and checked library definitions by stable semantic structure.
+It covers constant, Vec, Pi, Sigma and Glue transports, ground hcomp, canonical
+`ua` equivalences and the audited path-composition/winding cases. Unsupported
+nodes fail before a packet is written, and this path does not call compiler
+`normalise`.
+
+The runtime modules are registered as the static GHC package
+`cubical-runtime-nbe-0.1.0`. `RuntimeNbeFinal.agda` is compiled by Stock Agda,
+MAlonzo and GHC and calls `Cubical.Runtime.Nbe.Embedded.runEmbedded` in the
+final process. Binary symbols, provider marker, no-exec interposition and
+compiler-symbol audits are executable acceptance checks.
+
+## Ownership, lifecycle and trust boundary
 
 Packet bytes are owned by the caller and parsed into request-local syntax.
 Semantic values, environments, closures, active-definition state and the
@@ -42,25 +66,27 @@ or one stable `CCZ-RUNTIME-NBE-*` error.
 The default caps are 1 MiB packet bytes, 200,000 evaluator steps and 200,000
 semantic allocations. The command-line test harness may lower but never raise
 these compiled caps. ABI/provider/context mismatch, malformed input, open or
-ill-typed terms, definition cycles, fuel and allocation exhaustion all fail
-closed.
-
-## Trust boundary
+ill-typed terms, negative indices, definition cycles, fuel and allocation
+exhaustion all fail closed.
 
 Evaluation first validates every definition and checks `requestTerm :
-requestType`. It evaluates into a closure/environment semantic domain, quotes
+requestType`. It reflects into a closure/environment semantic domain, quotes
 under the requested type, and infers the quoted term again. A readback whose
-type changed is rejected. The prototype harness has no Agda package, `TCState`,
+type changed is rejected. The final runtime has no Agda package, `TCState`,
 `TCM`, `normalise`, process-launch or network-provider dependency.
 
-## Acceptance gaps
+## Acceptance boundary
 
-- no producer serializes checked Agda Internal `Term + Type` into this ABI;
-- no decoder reconstructs the exact checked Agda syntax/definition closure;
-- no Agda/MAlonzo user executable calls the archive in its own process;
-- cctt code is not linked;
-- the current oracle script does not perform a same-input differential; and
-- the reduced higher-order counterexample reads back an invalid `Var (-2)`.
+The historical full-fixture correlation script remains non-differential and is
+not acceptance evidence. The maintained same-input gate instead exports the
+actual checked definitions `t11`, `t11b`, `t09`, and `t16a`-`t16c`, executes
+the linked runtime, and invokes Agda's oracle on those same names. Four
+canonical observations match exactly. For `t11/t11b`, Agda itself prints the
+locked `transpX-Vec` residual while the runtime produces the typed vector; the
+test records this as an explicit boundary rather than claiming equality.
 
-Until these gaps have executable evidence, this document and the prototype do
-not close any Goal 3 item beyond the separately specified process/data boundary.
+The formerly failing higher-order readback regression is a PASS and negative
+input indices reject. These tests close the declared Goal 3 acceptance fragment
+at 11/11. General open Kan systems, indexed data beyond the audited Vec case,
+arbitrary records/HITs, and whole-module normalization remain outside the ABI
+and fail closed.

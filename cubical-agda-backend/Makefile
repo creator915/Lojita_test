@@ -16,19 +16,38 @@ NATIVE_AGDA_SOURCE_DIR ?=
 NATIVE_AGDA_DATA_DIR ?= $(AGDA_PREFIX)/share/agda
 NATIVE_GHC ?= $(GHC)
 RUNTIME_NBE_GHC ?= $(GHC)
+RUNTIME_NBE_CABAL ?= cabal
 RUNTIME_NBE_AR ?= ar
 RUNTIME_NBE_LDFLAGS ?=
+RUNTIME_NBE_AGDA_PACKAGE_DB ?= $(AGDA_PACKAGE_DB)
+RUNTIME_NBE_DEPENDENCY_PACKAGE_DB ?=
+RUNTIME_NBE_AGDA_DATADIR ?= $(AGDA_PREFIX)/share/agda
+RUNTIME_NBE_CUBICAL_DIR ?=
+RUNTIME_NBE_GHC_PKG ?= ghc-pkg
+RUNTIME_NBE_PACKAGE_ID ?= cubical-runtime-nbe-0.1.0
+RUNTIME_NBE_BASE_ID ?= $(shell $(RUNTIME_NBE_GHC_PKG) field base id --simple-output)
+RUNTIME_NBE_GHC_VERSION ?= $(shell $(RUNTIME_NBE_GHC) --numeric-version)
+RUNTIME_NBE_CCTT_PACKAGE_ID ?= cctt-core-0.1.0.0-inplace
 
 BUILD_DIR := build
 BINARY := $(BUILD_DIR)/cubical-chez
 SOURCES := src/Main.hs src/CubicalChez/Backend.hs src/CubicalChez/Nbe/AdapterSpike.hs
 RUNTIME_NBE_DIR := $(BUILD_DIR)/runtime-nbe
 RUNTIME_NBE_LIB_DIR := $(RUNTIME_NBE_DIR)/lib
-RUNTIME_NBE_LIBRARY := $(RUNTIME_NBE_DIR)/libcubical-runtime-nbe.a
+RUNTIME_NBE_LIBRARY := $(RUNTIME_NBE_DIR)/libHS$(RUNTIME_NBE_PACKAGE_ID).a
 RUNTIME_NBE_BINARY := $(RUNTIME_NBE_DIR)/cubical-runtime-nbe
 RUNTIME_NBE_GENERATOR := $(RUNTIME_NBE_DIR)/generate-packets
+RUNTIME_NBE_PROVIDER_TEST := $(RUNTIME_NBE_DIR)/cctt-provider-tests
+RUNTIME_NBE_AGDA_BRIDGE := $(RUNTIME_NBE_DIR)/agda-runtime-nbe-bridge
+RUNTIME_NBE_PACKAGE_DB := $(RUNTIME_NBE_DIR)/package-db
+RUNTIME_NBE_CCTT_DIR := runtime/nbe/vendor/cctt
+RUNTIME_NBE_CCTT_BUILD_DIR := $(RUNTIME_NBE_DIR)/cctt-dist
+RUNTIME_NBE_CCTT_PACKAGE_DB := $(RUNTIME_NBE_CCTT_BUILD_DIR)/packagedb/ghc-$(RUNTIME_NBE_GHC_VERSION)
+RUNTIME_NBE_EXTERNAL_PACKAGE_DBS = \
+	$(if $(strip $(RUNTIME_NBE_DEPENDENCY_PACKAGE_DB)),-package-db "$(RUNTIME_NBE_DEPENDENCY_PACKAGE_DB)",) \
+	-package-db "$(abspath $(RUNTIME_NBE_CCTT_PACKAGE_DB))"
 
-.PHONY: build build-runtime-nbe build-nbe-production-candidate check-nbe-production-promotion smoke verify verify-runtime-nbe verify-runtime-nbe-oracle verify-status-guide verify-readme-guide verify-readme-quickstart verify-support-matrix verify-troubleshooting-guide verify-benchmarks-guide verify-native-lane-contract verify-native-lane verify-runtime-nbe-boundary verify-nbe-provider-selection verify-nbe-adapter-source-identity verify-nbe-adapter-spike verify-nbe-production-candidate verify-nbe-adapter-transport-base verify-nbe-adapter-transport-glue verify-nbe-adapter-transport-int verify-nbe-adapter-transport-core verify-nbe-adapter-transport-hit verify-nbe-adapter-contract verify-nbe-fallback verify-engine-result-gate verify-binding-time verify-typed-residual-contract verify-primitive-audit verify-static-closure verify-chez-core-abi verify-failure-taxonomy verify-agda29 verify-agda29-stock-baseline verify-transport-shards verify-formal-transport verify-formal-transport-production-candidate verify-formal-transport-production-performance verify-formal-transport-production-release-performance verify-formal-transport-performance-self verify-formal-transport-performance-host-self verify-formal-transport-performance-self verify-formal-transport-performance-publication-self verify-formal-transport-stage-timings-self verify-formal-transport-base verify-formal-transport-glue verify-formal-transport-int verify-formal-transport-core verify-formal-transport-boundary verify-formal-transport-hit verify-formal-transport-higher verify-formal-transport-monolithic verify-formal-transport-differential verify-formal-transport-differential-self verify-v2-runtime verify-official-targeted verify-official-compiler verify-official-suite-preflight verify-official-suite-group verify-official-native-group clean
+.PHONY: build build-runtime-nbe build-runtime-nbe-agda-bridge build-nbe-production-candidate check-nbe-production-promotion smoke verify verify-runtime-nbe verify-runtime-nbe-cctt-provider verify-runtime-nbe-differential verify-runtime-nbe-agda-bridge verify-runtime-nbe-final-malonzo verify-runtime-nbe-oracle verify-status-guide verify-readme-guide verify-readme-quickstart verify-support-matrix verify-troubleshooting-guide verify-benchmarks-guide verify-native-lane-contract verify-native-lane verify-runtime-nbe-boundary verify-nbe-provider-selection verify-nbe-adapter-source-identity verify-nbe-adapter-spike verify-nbe-production-candidate verify-nbe-adapter-transport-base verify-nbe-adapter-transport-glue verify-nbe-adapter-transport-int verify-nbe-adapter-transport-core verify-nbe-adapter-transport-hit verify-nbe-adapter-contract verify-nbe-fallback verify-engine-result-gate verify-binding-time verify-typed-residual-contract verify-primitive-audit verify-static-closure verify-chez-core-abi verify-failure-taxonomy verify-agda29 verify-agda29-stock-baseline verify-transport-shards verify-formal-transport verify-formal-transport-production-candidate verify-formal-transport-production-performance verify-formal-transport-production-release-performance verify-formal-transport-performance-self verify-formal-transport-performance-host-self verify-formal-transport-performance-self verify-formal-transport-performance-publication-self verify-formal-transport-stage-timings-self verify-formal-transport-base verify-formal-transport-glue verify-formal-transport-int verify-formal-transport-core verify-formal-transport-boundary verify-formal-transport-hit verify-formal-transport-higher verify-formal-transport-monolithic verify-formal-transport-differential verify-formal-transport-differential-self verify-v2-runtime verify-official-targeted verify-official-compiler verify-official-suite-preflight verify-official-suite-group verify-official-native-group clean
 
 build: $(BINARY)
 
@@ -39,27 +58,101 @@ $(BINARY): $(SOURCES)
 		-isrc -outputdir $(BUILD_DIR)/ghc -o $@ src/Main.hs
 
 build-runtime-nbe:
-	mkdir -p "$(RUNTIME_NBE_LIB_DIR)" "$(RUNTIME_NBE_DIR)/app" "$(RUNTIME_NBE_DIR)/test"
+	cd "$(RUNTIME_NBE_CCTT_DIR)" && \
+		$(RUNTIME_NBE_CABAL) build \
+		--builddir="$(abspath $(RUNTIME_NBE_CCTT_BUILD_DIR))" lib:cctt-core
+	mkdir -p "$(RUNTIME_NBE_LIB_DIR)" "$(RUNTIME_NBE_DIR)/app-exe" "$(RUNTIME_NBE_DIR)/test-exe"
 	$(RUNTIME_NBE_GHC) -O2 -Wall -Werror -fforce-recomp \
+		-hide-all-packages -package base $(RUNTIME_NBE_EXTERNAL_PACKAGE_DBS) -package cctt-core \
+		-this-unit-id "$(RUNTIME_NBE_PACKAGE_ID)" \
+		-iruntime/nbe/src -odir "$(RUNTIME_NBE_LIB_DIR)" -hidir "$(RUNTIME_NBE_LIB_DIR)" \
+		-c runtime/nbe/src/Cubical/Runtime/Nbe/Cctt.hs
+	$(RUNTIME_NBE_GHC) -O2 -Wall -Werror -fforce-recomp \
+		-this-unit-id "$(RUNTIME_NBE_PACKAGE_ID)" \
+		-iruntime/nbe/src -odir "$(RUNTIME_NBE_LIB_DIR)" -hidir "$(RUNTIME_NBE_LIB_DIR)" \
+		-c runtime/nbe/src/Cubical/Runtime/Nbe/Wire.hs
+	$(RUNTIME_NBE_GHC) -O2 -Wall -Werror -fforce-recomp \
+		-hide-all-packages -package base $(RUNTIME_NBE_EXTERNAL_PACKAGE_DBS) -package cctt-core \
+		-this-unit-id "$(RUNTIME_NBE_PACKAGE_ID)" \
 		-iruntime/nbe/src -odir "$(RUNTIME_NBE_LIB_DIR)" -hidir "$(RUNTIME_NBE_LIB_DIR)" \
 		-c runtime/nbe/src/Cubical/Runtime/Nbe.hs
+	$(RUNTIME_NBE_GHC) -O2 -Wall -Werror -fforce-recomp \
+		-hide-all-packages -package base $(RUNTIME_NBE_EXTERNAL_PACKAGE_DBS) -package cctt-core \
+		-this-unit-id "$(RUNTIME_NBE_PACKAGE_ID)" \
+		-iruntime/nbe/src -odir "$(RUNTIME_NBE_LIB_DIR)" -hidir "$(RUNTIME_NBE_LIB_DIR)" \
+		-c runtime/nbe/src/Cubical/Runtime/Nbe/Embedded.hs
 	$(RUNTIME_NBE_AR) rcs "$(RUNTIME_NBE_LIBRARY)" \
-		"$(RUNTIME_NBE_LIB_DIR)/Cubical/Runtime/Nbe.o"
-	mkdir -p "$(RUNTIME_NBE_DIR)/app/Cubical/Runtime" "$(RUNTIME_NBE_DIR)/test/Cubical/Runtime"
-	cp "$(RUNTIME_NBE_LIB_DIR)/Cubical/Runtime/Nbe.hi" \
-		"$(RUNTIME_NBE_DIR)/app/Cubical/Runtime/Nbe.hi"
-	cp "$(RUNTIME_NBE_LIB_DIR)/Cubical/Runtime/Nbe.hi" \
-		"$(RUNTIME_NBE_DIR)/test/Cubical/Runtime/Nbe.hi"
+		"$(RUNTIME_NBE_LIB_DIR)/Cubical/Runtime/Nbe.o" \
+		"$(RUNTIME_NBE_LIB_DIR)/Cubical/Runtime/Nbe/Wire.o" \
+		"$(RUNTIME_NBE_LIB_DIR)/Cubical/Runtime/Nbe/Cctt.o" \
+		"$(RUNTIME_NBE_LIB_DIR)/Cubical/Runtime/Nbe/Embedded.o"
+	mkdir -p "$(RUNTIME_NBE_PACKAGE_DB)" "$(RUNTIME_NBE_DIR)/app-exe" "$(RUNTIME_NBE_DIR)/test-exe"
+	sed -e 's|@RUNTIME_NBE_LIB_DIR@|$(abspath $(RUNTIME_NBE_LIB_DIR))|g' \
+		-e 's|@RUNTIME_NBE_LIBRARY_DIR@|$(abspath $(RUNTIME_NBE_DIR))|g' \
+		-e 's|@RUNTIME_NBE_BASE_ID@|$(RUNTIME_NBE_BASE_ID)|g' \
+		-e 's|@RUNTIME_NBE_CCTT_PACKAGE_ID@|$(RUNTIME_NBE_CCTT_PACKAGE_ID)|g' \
+		-e 's|@RUNTIME_NBE_PACKAGE_ID@|$(RUNTIME_NBE_PACKAGE_ID)|g' \
+		config/runtime-nbe-package.conf.in \
+		> "$(RUNTIME_NBE_PACKAGE_DB)/$(RUNTIME_NBE_PACKAGE_ID).conf"
+	$(RUNTIME_NBE_GHC_PKG) --package-db "$(RUNTIME_NBE_PACKAGE_DB)" recache
 	$(RUNTIME_NBE_GHC) -O2 -Wall -Werror -fforce-recomp \
-		-i"$(RUNTIME_NBE_DIR)/app" -odir "$(RUNTIME_NBE_DIR)/app" -hidir "$(RUNTIME_NBE_DIR)/app" \
-		-c runtime/nbe/app/Main.hs -o "$(RUNTIME_NBE_DIR)/app/Main.o"
-	$(RUNTIME_NBE_GHC) -O2 $(RUNTIME_NBE_LDFLAGS) -o "$(RUNTIME_NBE_BINARY)" \
-		"$(RUNTIME_NBE_DIR)/app/Main.o" "$(RUNTIME_NBE_LIBRARY)"
+		-hide-all-packages -package base \
+		$(RUNTIME_NBE_EXTERNAL_PACKAGE_DBS) \
+		-package-db "$(RUNTIME_NBE_PACKAGE_DB)" -package cubical-runtime-nbe \
+		-odir "$(RUNTIME_NBE_DIR)/app-exe" -hidir "$(RUNTIME_NBE_DIR)/app-exe" \
+		-c runtime/nbe/app/Main.hs -o "$(RUNTIME_NBE_DIR)/app-exe/Main.o"
+	$(RUNTIME_NBE_GHC) -O2 $(RUNTIME_NBE_LDFLAGS) \
+		-hide-all-packages -package base \
+		$(RUNTIME_NBE_EXTERNAL_PACKAGE_DBS) \
+		-package-db "$(RUNTIME_NBE_PACKAGE_DB)" -package cubical-runtime-nbe \
+		-o "$(RUNTIME_NBE_BINARY)" "$(RUNTIME_NBE_DIR)/app-exe/Main.o"
 	$(RUNTIME_NBE_GHC) -O2 -Wall -Werror -fforce-recomp \
-		-i"$(RUNTIME_NBE_DIR)/test" -odir "$(RUNTIME_NBE_DIR)/test" -hidir "$(RUNTIME_NBE_DIR)/test" \
-		-c runtime/nbe/test/GeneratePackets.hs -o "$(RUNTIME_NBE_DIR)/test/Main.o"
-	$(RUNTIME_NBE_GHC) -O2 $(RUNTIME_NBE_LDFLAGS) -o "$(RUNTIME_NBE_GENERATOR)" \
-		"$(RUNTIME_NBE_DIR)/test/Main.o" "$(RUNTIME_NBE_LIBRARY)"
+		-hide-all-packages -package base \
+		$(RUNTIME_NBE_EXTERNAL_PACKAGE_DBS) \
+		-package-db "$(RUNTIME_NBE_PACKAGE_DB)" -package cubical-runtime-nbe \
+		-odir "$(RUNTIME_NBE_DIR)/test-exe" -hidir "$(RUNTIME_NBE_DIR)/test-exe" \
+		-c runtime/nbe/test/GeneratePackets.hs -o "$(RUNTIME_NBE_DIR)/test-exe/Main.o"
+	$(RUNTIME_NBE_GHC) -O2 $(RUNTIME_NBE_LDFLAGS) \
+		-hide-all-packages -package base \
+		$(RUNTIME_NBE_EXTERNAL_PACKAGE_DBS) \
+		-package-db "$(RUNTIME_NBE_PACKAGE_DB)" -package cubical-runtime-nbe \
+		-o "$(RUNTIME_NBE_GENERATOR)" "$(RUNTIME_NBE_DIR)/test-exe/Main.o"
+	mkdir -p "$(RUNTIME_NBE_DIR)/provider-test-exe"
+	$(RUNTIME_NBE_GHC) -O2 -Wall -Werror -fforce-recomp \
+		-hide-all-packages -package base \
+		$(RUNTIME_NBE_EXTERNAL_PACKAGE_DBS) \
+		-package-db "$(RUNTIME_NBE_PACKAGE_DB)" -package cubical-runtime-nbe \
+		-odir "$(RUNTIME_NBE_DIR)/provider-test-exe" -hidir "$(RUNTIME_NBE_DIR)/provider-test-exe" \
+		-o "$(RUNTIME_NBE_PROVIDER_TEST)" runtime/nbe/test/CcttProviderTests.hs
+
+build-runtime-nbe-agda-bridge:
+	mkdir -p "$(RUNTIME_NBE_DIR)/agda-bridge-ghc"
+	$(RUNTIME_NBE_GHC) -O0 -Wall -Werror -dynamic -fforce-recomp \
+		$(if $(strip $(RUNTIME_NBE_DEPENDENCY_PACKAGE_DB)),-package-db "$(RUNTIME_NBE_DEPENDENCY_PACKAGE_DB)",) \
+		-package-db "$(RUNTIME_NBE_AGDA_PACKAGE_DB)" -package Agda \
+		-iruntime/agda-2.9/src/full -iruntime/nbe/src \
+		-outputdir "$(RUNTIME_NBE_DIR)/agda-bridge-ghc" $(RUNTIME_NBE_LDFLAGS) \
+		-o "$(RUNTIME_NBE_AGDA_BRIDGE)" runtime/agda-2.9/src/cubical-run/Main.hs
+
+verify-runtime-nbe-final-malonzo: build-runtime-nbe build-runtime-nbe-agda-bridge
+	RUNTIME_NBE_AGDA_BRIDGE="$(RUNTIME_NBE_AGDA_BRIDGE)" \
+	RUNTIME_NBE_BINARY="$(RUNTIME_NBE_BINARY)" \
+	RUNTIME_NBE_LIBRARY="$(RUNTIME_NBE_LIBRARY)" \
+	RUNTIME_NBE_PACKAGE_DB="$(abspath $(RUNTIME_NBE_PACKAGE_DB))" \
+	RUNTIME_NBE_CCTT_PACKAGE_DB="$(abspath $(RUNTIME_NBE_CCTT_PACKAGE_DB))" \
+	RUNTIME_NBE_DEPENDENCY_PACKAGE_DB="$(RUNTIME_NBE_DEPENDENCY_PACKAGE_DB)" \
+	RUNTIME_NBE_STOCK_AGDA="$(NATIVE_AGDA)" \
+	RUNTIME_NBE_GHC="$(RUNTIME_NBE_GHC)" \
+	RUNTIME_NBE_AGDA_DATADIR="$(RUNTIME_NBE_AGDA_DATADIR)" \
+	RUNTIME_NBE_LDFLAGS="$(RUNTIME_NBE_LDFLAGS)" \
+		sh test/scripts/verify-runtime-nbe-final-malonzo.sh
+
+verify-runtime-nbe-differential: build-runtime-nbe build-runtime-nbe-agda-bridge
+	RUNTIME_NBE_AGDA_BRIDGE="$(RUNTIME_NBE_AGDA_BRIDGE)" \
+	RUNTIME_NBE_BINARY="$(RUNTIME_NBE_BINARY)" \
+	RUNTIME_NBE_AGDA_DATADIR="$(RUNTIME_NBE_AGDA_DATADIR)" \
+	RUNTIME_NBE_CUBICAL_DIR="$(RUNTIME_NBE_CUBICAL_DIR)" \
+		sh test/scripts/verify-runtime-nbe-differential.sh
 
 build-nbe-production-candidate:
 	NBE_ADAPTER_SOURCE_IDENTITY="$(NBE_SOURCE_IDENTITY)" sh test/scripts/verify-nbe-adapter-source-identity.sh
@@ -136,6 +229,18 @@ verify-runtime-nbe: build-runtime-nbe
 	RUNTIME_NBE_LIBRARY="$(RUNTIME_NBE_LIBRARY)" \
 	RUNTIME_NBE_GENERATOR="$(RUNTIME_NBE_GENERATOR)" \
 		sh test/scripts/verify-runtime-nbe.sh
+
+verify-runtime-nbe-cctt-provider: build-runtime-nbe
+	RUNTIME_NBE_PROVIDER_TEST="$(RUNTIME_NBE_PROVIDER_TEST)" \
+	RUNTIME_NBE_BINARY="$(RUNTIME_NBE_BINARY)" \
+	RUNTIME_NBE_LIBRARY="$(RUNTIME_NBE_LIBRARY)" \
+		sh test/scripts/verify-runtime-nbe-cctt-provider.sh
+
+verify-runtime-nbe-agda-bridge: build-runtime-nbe build-runtime-nbe-agda-bridge
+	RUNTIME_NBE_BINARY="$(RUNTIME_NBE_BINARY)" \
+	RUNTIME_NBE_AGDA_BRIDGE="$(RUNTIME_NBE_AGDA_BRIDGE)" \
+	RUNTIME_NBE_AGDA_DATADIR="$(RUNTIME_NBE_AGDA_DATADIR)" \
+		sh test/scripts/verify-runtime-nbe-agda-bridge.sh
 
 verify-runtime-nbe-oracle: verify-runtime-nbe
 	RUNTIME_NBE_BINARY="$(RUNTIME_NBE_BINARY)" \

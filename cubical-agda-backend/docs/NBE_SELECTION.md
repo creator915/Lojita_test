@@ -4,25 +4,25 @@ Last updated: 2026-08-23 (Asia/Shanghai)
 
 ## Status
 
-`GOAL 3 PROVIDER NOT SELECTED — cctt is a reference only`
+`GOAL 3 RUNTIME PROVIDER SELECTED — cctt Core ba16f375`
 
-For Goal 3 research, the owner authorized `AndrasKovacs/cctt` commit
-`ba16f3758a322e9be77ada1da2b93f45d500192e` under MIT as the mature algorithm
-source on 2026-08-23. `config/runtime-nbe-provider.lock.tsv` records the source
-archive and license identities as `reference-only`. Because cctt has its own
-language and no library target, it does not satisfy the checklist item requiring
-a mature runtime library. `runtime/nbe/` is a backend-owned custom-AST
-prototype, not an Agda adapter and not an unmodified cctt library. Its prototype
-wire format and missing integration are documented in `RUNTIME_NBE_ABI.md`.
+For Goal 3, the owner authorized `AndrasKovacs/cctt` commit
+`ba16f3758a322e9be77ada1da2b93f45d500192e` under MIT as the mature NbE source
+on 2026-08-23. `config/runtime-nbe-provider.lock.tsv` records it as `linked`.
+Ten unmodified upstream Core modules and the MIT license are vendored with an
+exact source manifest; a repository-owned Cabal library exposes `Core.eval`
+and `Quotation.quoteUnfold`. `runtime/nbe/` supplies the smaller checked
+Agda-wire adapter and rejects any primitive whose cctt eval/quotation probe
+does not reach the required canonical form. See `RUNTIME_NBE_ABI.md`.
 
 The older `config/nbe-adapter.lock.tsv` below controls the separate
 compiler-process backend candidate. It intentionally remains unselected and
-must not be confused with a final-process runtime provider; none is selected.
+must not be confused with the selected final-process runtime provider.
 
-On 2026-08-22 the owner approved option A: productionize the existing
-Agda-specific in-process Haskell adapter, using cctt/Kovács as an algorithmic
-reference rather than importing a third-party evaluator. The default
-production `nbe` option remains fail-closed. The isolated candidate passes the
+On 2026-08-22 the owner approved option A for the compiler-process candidate.
+On 2026-08-23 the owner separately authorized the cctt Core integration for
+Goal 3's final-process runtime. The default compiler-process production `nbe`
+option remains fail-closed. The isolated compiler candidate passes the
 complete functional differential, but it cannot be accepted until it receives
 an approved immutable revision identity, approved project license, and owner
 confirmation of the final performance thresholds. Its current three-file
@@ -86,8 +86,9 @@ zero Agda Internal adapters cannot coexist with a selected provider lock.
 | Packaging | One `cctt` executable; no Cabal library target |
 | Toolchain | `nightly-2024-04-08`, two Git-pinned extra dependencies, custom GHC plugin/options |
 
-The commit is recorded for repeatable inspection only.  It is **not** an
-approved or vendored project dependency.
+The commit is the selected Goal 3 runtime dependency. The upstream source
+archive, ten vendored module hashes, license hash, zero-patch policy and final
+provider identity are all acceptance inputs.
 
 The deterministic source identity in the candidate census is computed with
 `git archive --format=tar REVISION | sha256sum`. At the inspected revision it
@@ -136,7 +137,7 @@ ordinary NbE design, not for the required Cubical semantics.
 
 ## Decision options
 
-### A. Agda-specific adapter informed by cctt — selected path
+### A. Agda-specific compiler-process adapter — separate selected research path
 
 - Keep Agda `TCState` as the source of truth.
 - Port only the semantic value/eval/quote ideas needed by the locked acceptance
@@ -242,13 +243,15 @@ self-path/singleton/bounded-Sigma-spine slices, or HIT semantic values. Its effe
 `nbe-spike-test-only`, so owner approval selects its productionization route
 without prematurely enabling the production engine.
 
-### B. Refactor and embed cctt
+### B. Refactor and embed cctt — implemented for Goal 3 runtime
 
-- Fork the candidate at the inspected commit.
-- Create a library boundary and an Agda-to-cctt semantic translation.
-- Prove or differentially test every supported Cubical primitive mapping.
+- Vendor the exact Core sources at the inspected commit with zero patches.
+- Create a Cabal library boundary and a checked Agda-wire semantic adapter.
+- Exercise every admitted Cubical primitive through cctt eval/quotation and
+  same-input Agda differentials.
 
-This has substantially higher schedule and maintenance risk.
+This bounded path is implemented under `runtime/nbe/`; it is not a claim that
+cctt directly consumes arbitrary Agda Internal syntax.
 
 ### C. Use another internal/external NbE
 
@@ -273,8 +276,8 @@ selected option:
 5. Provider output remains untrusted until Agda accepts the closed, meta-free
    readback through the existing `validateEngineResult` gate.
 
-The current census and lock satisfy this policy without vendoring or patching
-any candidate.
+The compiler-process census remains non-vendored. The independent Goal 3 lock
+vendors the exact cctt Core with zero upstream patches and a checked manifest.
 
 ## Acceptance harness readiness
 

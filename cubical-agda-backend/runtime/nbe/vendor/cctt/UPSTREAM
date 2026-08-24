@@ -1,0 +1,6 @@
+repository https://github.com/AndrasKovacs/cctt
+revision ba16f3758a322e9be77ada1da2b93f45d500192e
+license MIT
+source-modules Common Core CoreTypes Quotation Statistics Data.LvlMap Cubical Cubical.Interval Cubical.Substitution Cubical.Cofibration
+patches cabal-library-packaging-only
+

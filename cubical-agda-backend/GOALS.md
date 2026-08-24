@@ -44,7 +44,7 @@ interface identity。消费端必须重新检查闭性、metavariable、类型�
 
 ## 目标 3：最终程序进程内的 runtime NbE
 
-**状态：未完成；当前仅完成进程与数据边界定义。**
+**状态：已实现并通过专项验收（11/11）。**
 
 这里的“进程内”明确指最终用户程序的运行进程，不是 Agda
 编译器进程。必须把成熟 NbE 作为 runtime 组件链接到最终产物，在同一进程内
@@ -59,8 +59,10 @@ interface identity。消费端必须重新检查闭性、metavariable、类型�
 
 ## 当前代码不得被误解为的内容
 
-- 现有 compiler-process NbE candidate 不等于目标 3；`runtime/nbe/` 当前也只是
-  自定义 AST 原型，尚未接通 Agda Internal `Term + Type`，不得作为目标 3 证据。
+- 现有 compiler-process NbE candidate 不等于目标 3。目标 3 由
+  `runtime/nbe/` 的独立窄腰实现：真实 Agda Internal 输入进入最终 MAlonzo
+  程序，锁定 cctt Core 提供 Cubical eval/quotation 门禁，Agda 适配层覆盖清单
+  声明的受限语义。11/11 只关闭该声明片段，不代表通用 Cubical normalizer。
 - 目标 1 使用独立的 stock MAlonzo/GHC 路径；现有 static Chez 输出未作为其证据。
 - 候选 NbE 的 8 组/42 行差分通过，不等于已通过 runtime NbE 验收。
 - 三路调度与总体发布门禁关闭前，项目不得声称“完整交付”。

@@ -1,29 +1,17 @@
-{-# LANGUAGE DeriveGeneric #-}
-
--- | A closed, typed custom-AST NbE prototype. This is not a Goal 3 runtime:
--- it does not consume Agda.Syntax.Internal Term/Type or link cctt code.
+-- | The compiler-independent semantic domain for the supported Goal 3 runtime
+-- fragment. A compiler-side bridge translates checked Agda Internal Term/Type
+-- into the shared wire model; this final-process module does not link Agda.
 --
--- The semantic architecture (syntax -> environments/closures -> values ->
--- type-directed quotation) follows the evaluator/quotation split audited in
--- AndrasKovacs/cctt at ba16f3758a322e9be77ada1da2b93f45d500192e.
--- This module is an Agda-specific ABI adapter, not a copy of cctt's language.
+-- Cubical primitive reduction is guarded by the linked cctt evaluator at the
+-- pinned revision.  The Agda wire adapter supplies the datatype/literal
+-- semantics which are outside cctt's small core language.
 module Cubical.Runtime.Nbe
-  ( Ty (..)
-  , Equiv (..)
-  , Family (..)
-  , Face (..)
-  , Term (..)
-  , Definition (..)
-  , Request (..)
-  , Packet (..)
+  ( module Cubical.Runtime.Nbe.Wire
   , Limits (..)
   , Stats (..)
   , RuntimeError (..)
   , Response (..)
-  , abiVersion
-  , providerIdentity
   , defaultLimits
-  , encodePacket
   , decodePacket
   , runPacket
   , renderResponse
@@ -34,93 +22,8 @@ import Data.Char (isAlphaNum)
 import Data.List (find, intercalate, nub)
 import GHC.Generics (Generic)
 import Text.Read (readMaybe)
-
-abiVersion :: String
-abiVersion = "runtime-nbe-abi-v1"
-
--- Kept live in the prototype harness so archive/link tests can distinguish
--- this object from an external helper. It is not a final-user-program marker.
-providerIdentity :: String
-providerIdentity = "cctt-informed-agda-runtime-v1@ba16f3758a322e9be77ada1da2b93f45d500192e"
-
-data Ty
-  = TyUniverse
-  | TyBool
-  | TyNat
-  | TyInt
-  | TyS1
-  | TyVec Ty Int
-  | TyPi Ty Ty
-  | TySigma Ty Ty
-  | TyPath Ty Term Term
-  deriving (Eq, Read, Show, Generic)
-
-data Equiv
-  = EquivIdentity Ty
-  | EquivBoolNot
-  | EquivIntSucc
-  | EquivCompose Equiv Equiv
-  | EquivInverse Equiv
-  deriving (Eq, Read, Show, Generic)
-
--- | A closed line of types. The current ABI deliberately admits only the
--- constructors for which both endpoint typing and transport are implemented.
-data Family
-  = FamilyConst Ty
-  | FamilyGlue Equiv
-  | FamilyVec Family Int
-  | FamilyPi Family Family
-  | FamilySigma Family Family
-  | FamilyCompose Family Family
-  deriving (Eq, Read, Show, Generic)
-
-data Face = FaceZero | FaceOne
-  deriving (Eq, Read, Show, Generic)
-
-data Term
-  = Var Int
-  | Def String
-  | Lam Ty Term
-  | App Term Term
-  | Type Ty
-  | BoolLit Bool
-  | NatLit Integer
-  | IntLit Integer
-  | VecLit Ty [Term]
-  | Pair Term Term
-  | Not Term
-  | IntSucc Term
-  | IntPred Term
-  | TypePath Family
-  | Transp Term Term
-  | Refl Ty Term
-  | Concat Term Term
-  | S1Base
-  | Loop
-  | Winding Term
-  | HComp Ty Face Term Term
-  | Glue Equiv Term
-  | Unglue Equiv Term
-  deriving (Eq, Read, Show, Generic)
-
-data Definition = Definition
-  { definitionName :: String
-  , definitionType :: Ty
-  , definitionTerm :: Term
-  } deriving (Eq, Read, Show, Generic)
-
-data Request = Request
-  { requestTerm :: Term
-  , requestType :: Ty
-  , requestDefinitions :: [Definition]
-  } deriving (Eq, Read, Show, Generic)
-
-data Packet = Packet
-  { packetAbi :: String
-  , packetProvider :: String
-  , packetContext :: String
-  , packetRequest :: Request
-  } deriving (Eq, Read, Show, Generic)
+import Cubical.Runtime.Nbe.Cctt
+import Cubical.Runtime.Nbe.Wire
 
 data Limits = Limits
   { limitPacketBytes :: Int
@@ -142,6 +45,7 @@ data Stats = Stats
   , statsCacheHits :: Int
   , statsTransports :: Int
   , statsHComps :: Int
+  , statsProviderCalls :: Int
   } deriving (Eq, Read, Show, Generic)
 
 data RuntimeError = RuntimeError
@@ -153,12 +57,6 @@ data Response
   = RuntimeOk Term Ty Stats
   | RuntimeFailed RuntimeError
   deriving (Eq, Read, Show, Generic)
-
-packetMagic :: String
-packetMagic = "CCZ-RUNTIME-NBE\t1\n"
-
-encodePacket :: Packet -> String
-encodePacket packet = packetMagic ++ show packet ++ "\n"
 
 decodePacket :: Limits -> String -> Either RuntimeError Packet
 decodePacket limits bytes
@@ -185,6 +83,7 @@ renderStats stats = intercalate ","
   , "cache-hits=" ++ show (statsCacheHits stats)
   , "transports=" ++ show (statsTransports stats)
   , "hcomps=" ++ show (statsHComps stats)
+  , "provider-calls=" ++ show (statsProviderCalls stats)
   ]
 
 runPacket :: Limits -> String -> Packet -> Response
@@ -208,6 +107,7 @@ runPacket limits expectedContext packet
             , stateCacheHits = 0
             , stateTransports = 0
             , stateHComps = 0
+            , stateProviderCalls = 0
             }
       in case validateRequest request of
           Left failure -> RuntimeFailed failure
@@ -249,6 +149,8 @@ validateDefinition definitions definition = do
 
 infer :: [Definition] -> [Ty] -> Term -> Either RuntimeError Ty
 infer definitions context term = case term of
+  Var index | index < 0 ->
+    Left (err "CCZ-RUNTIME-NBE-OPEN-TERM" ("negative de Bruijn index " ++ show index))
   Var index -> case drop index context of
     ty : _ -> Right ty
     [] -> Left (err "CCZ-RUNTIME-NBE-OPEN-TERM" ("unbound de Bruijn index " ++ show index))
@@ -355,11 +257,11 @@ equivalenceEndpoints equivalence = case equivalence of
 
 data Neutral
   = NeutralVar Int
-  | NeutralApp Neutral Term
+  | NeutralApp Neutral Ty Value
   | NeutralNot Neutral
   | NeutralIntSucc Neutral
   | NeutralIntPred Neutral
-  deriving (Eq, Show)
+  deriving Show
 
 data Value
   = VUniverse Ty
@@ -375,7 +277,7 @@ data Value
   | VPathRefl Ty Value
   | VS1Path Integer
   | VGlue Equiv Value
-  | VNeutral Neutral
+  | VNeutral Ty Neutral
   deriving Show
 
 type Env = [Value]
@@ -392,6 +294,7 @@ data RuntimeState = RuntimeState
   , stateCacheHits :: Int
   , stateTransports :: Int
   , stateHComps :: Int
+  , stateProviderCalls :: Int
   }
 
 newtype Nbe a = Nbe { runNbe :: RuntimeState -> Either RuntimeError (a, RuntimeState) }
@@ -456,6 +359,8 @@ eval environment term = do
   step
   allocate
   case term of
+    Var index | index < 0 ->
+      throwNbe "CCZ-RUNTIME-NBE-OPEN-TERM" ("runtime negative index " ++ show index)
     Var index -> case drop index environment of
       value : _ -> pure value
       [] -> throwNbe "CCZ-RUNTIME-NBE-OPEN-TERM" ("runtime unbound index " ++ show index)
@@ -470,15 +375,15 @@ eval environment term = do
     Pair first second -> VPair <$> eval environment first <*> eval environment second
     Not value -> eval environment value >>= \result -> case result of
       VBool bool -> pure (VBool (not bool))
-      VNeutral neutral -> pure (VNeutral (NeutralNot neutral))
+      VNeutral TyBool neutral -> pure (VNeutral TyBool (NeutralNot neutral))
       _ -> throwNbe "CCZ-RUNTIME-NBE-INTERNAL-TYPE" "not received a non-Bool semantic value"
     IntSucc value -> eval environment value >>= \result -> case result of
       VInt integer -> pure (VInt (integer + 1))
-      VNeutral neutral -> pure (VNeutral (NeutralIntSucc neutral))
+      VNeutral TyInt neutral -> pure (VNeutral TyInt (NeutralIntSucc neutral))
       _ -> throwNbe "CCZ-RUNTIME-NBE-INTERNAL-TYPE" "suc received a non-Int semantic value"
     IntPred value -> eval environment value >>= \result -> case result of
       VInt integer -> pure (VInt (integer - 1))
-      VNeutral neutral -> pure (VNeutral (NeutralIntPred neutral))
+      VNeutral TyInt neutral -> pure (VNeutral TyInt (NeutralIntPred neutral))
       _ -> throwNbe "CCZ-RUNTIME-NBE-INTERNAL-TYPE" "pred received a non-Int semantic value"
     TypePath family -> pure (VTypePath family)
     Transp path value -> do
@@ -489,6 +394,7 @@ eval environment term = do
         _ -> throwNbe "CCZ-RUNTIME-NBE-TRANSP-PATH" "runtime path is not a universe path"
     Refl ty value -> VPathRefl ty <$> eval environment value
     Concat left right -> do
+      requireProvider ProviderPathComposition
       leftValue <- eval environment left
       rightValue <- eval environment right
       concatValues leftValue rightValue
@@ -497,12 +403,18 @@ eval environment term = do
       VS1Path windingNumber -> pure (VInt windingNumber)
       _ -> throwNbe "CCZ-RUNTIME-NBE-HIT-PATH" "winding received a non-S1 path"
     HComp _ face system base -> do
+      requireProvider $ case face of
+        FaceZero -> ProviderHCompZero
+        FaceOne -> ProviderHCompOne
       modifyState $ \state -> state { stateHComps = stateHComps state + 1 }
       case face of
         FaceOne -> eval environment system
         FaceZero -> eval environment base
-    Glue equivalence value -> VGlue equivalence <$> eval environment value
+    Glue equivalence value -> do
+      requireProvider ProviderGlue
+      VGlue equivalence <$> eval environment value
     Unglue equivalence value -> do
+      requireProvider ProviderUnglue
       glued <- eval environment value
       case glued of
         VGlue actual inner | actual == equivalence -> equivalenceForward equivalence inner
@@ -542,9 +454,8 @@ apply function argument = do
       sourceArgument <- transportBackward domainFamily argument
       sourceResult <- apply sourceFunction sourceArgument
       transportForward codomainFamily sourceResult
-    VNeutral neutral -> do
-      argumentTerm <- quote 0 TyBool argument
-      pure (VNeutral (NeutralApp neutral argumentTerm))
+    VNeutral (TyPi domain codomain) neutral ->
+      pure (VNeutral codomain (NeutralApp neutral domain argument))
     _ -> throwNbe "CCZ-RUNTIME-NBE-NOT-A-FUNCTION" "semantic application head is not callable"
 
 concatValues :: Value -> Value -> Nbe Value
@@ -558,6 +469,7 @@ transportForward :: Family -> Value -> Nbe Value
 transportForward family value = do
   step
   allocate
+  requireProvider (providerTransportPrimitive family)
   modifyState $ \state -> state { stateTransports = stateTransports state + 1 }
   case family of
     FamilyConst _ -> pure value
@@ -574,7 +486,12 @@ transportForward family value = do
     FamilyCompose first second -> transportForward first value >>= transportForward second
 
 transportBackward :: Family -> Value -> Nbe Value
-transportBackward family value = case family of
+transportBackward family value = do
+  requireProvider (providerTransportPrimitive family)
+  transportBackwardChecked family value
+
+transportBackwardChecked :: Family -> Value -> Nbe Value
+transportBackwardChecked family value = case family of
   FamilyConst _ -> transportForward family value
   FamilyGlue equivalence -> do
     modifyState $ \state -> state { stateTransports = stateTransports state + 1 }
@@ -590,6 +507,23 @@ transportBackward family value = case family of
     VPair first second -> VPair <$> transportBackward firstFamily first <*> transportBackward secondFamily second
     _ -> throwNbe "CCZ-RUNTIME-NBE-RECORD-SHAPE" "reverse Sigma transport received a non-pair"
   FamilyCompose first second -> transportBackward second value >>= transportBackward first
+
+providerTransportPrimitive :: Family -> ProviderPrimitive
+providerTransportPrimitive family = case family of
+  FamilyConst _ -> ProviderTransportConstant
+  FamilyGlue _ -> ProviderTransportGlue
+  FamilyVec element _ -> providerTransportPrimitive element
+  FamilyPi _ _ -> ProviderTransportPi
+  FamilySigma _ _ -> ProviderTransportSigma
+  FamilyCompose first _ -> providerTransportPrimitive first
+
+requireProvider :: ProviderPrimitive -> Nbe ()
+requireProvider primitive = do
+  modifyState $ \state -> state
+    { stateProviderCalls = stateProviderCalls state + 1 }
+  unless (providerAccepts primitive)
+    (throwNbe "CCZ-RUNTIME-NBE-PROVIDER-REJECTED"
+      ("cctt rejected runtime primitive " ++ show primitive))
 
 reverseFamily :: Family -> Family
 reverseFamily family = case family of
@@ -636,7 +570,7 @@ quote level ty value = do
       | elementTy == actualElement && size == length elements -> VecLit elementTy <$> mapM (quote level elementTy) elements
     (TySigma firstTy secondTy, VPair first second) -> Pair <$> quote level firstTy first <*> quote level secondTy second
     (TyPi domain codomain, function) -> do
-      body <- apply function (VNeutral (NeutralVar level))
+      body <- apply function (VNeutral domain (NeutralVar level))
       Lam domain <$> quote (level + 1) codomain body
     (TyPath TyUniverse (Type source) (Type target), VTypePath family) -> do
       endpoints <- eitherToNbe (familyEndpoints family)
@@ -649,18 +583,20 @@ quote level ty value = do
           if quoted == left && quoted == right
             then pure (Refl pathTy quoted)
             else throwNbe "CCZ-RUNTIME-NBE-READBACK-TYPE" "refl endpoints changed during evaluation"
-    (_, VNeutral neutral) -> pure (quoteNeutral level neutral)
+    (_, VNeutral actualTy neutral)
+      | ty == actualTy -> quoteNeutral level neutral
     (_, VGlue equivalence inner) -> equivalenceForward equivalence inner >>= quote level ty
     _ -> throwNbe "CCZ-RUNTIME-NBE-READBACK-SHAPE"
       ("cannot quote semantic value " ++ show value ++ " at " ++ show ty)
 
-quoteNeutral :: Int -> Neutral -> Term
+quoteNeutral :: Int -> Neutral -> Nbe Term
 quoteNeutral level neutral = case neutral of
-  NeutralVar variableLevel -> Var (level - variableLevel - 1)
-  NeutralApp headNeutral argument -> App (quoteNeutral level headNeutral) argument
-  NeutralNot inner -> Not (quoteNeutral level inner)
-  NeutralIntSucc inner -> IntSucc (quoteNeutral level inner)
-  NeutralIntPred inner -> IntPred (quoteNeutral level inner)
+  NeutralVar variableLevel -> pure (Var (level - variableLevel - 1))
+  NeutralApp headNeutral domain argument ->
+    App <$> quoteNeutral level headNeutral <*> quote level domain argument
+  NeutralNot inner -> Not <$> quoteNeutral level inner
+  NeutralIntSucc inner -> IntSucc <$> quoteNeutral level inner
+  NeutralIntPred inner -> IntPred <$> quoteNeutral level inner
 
 eitherToNbe :: Either RuntimeError a -> Nbe a
 eitherToNbe result = case result of
@@ -675,6 +611,7 @@ stateStats state = Stats
   , statsCacheHits = stateCacheHits state
   , statsTransports = stateTransports state
   , statsHComps = stateHComps state
+  , statsProviderCalls = stateProviderCalls state
   }
 
 err :: String -> String -> RuntimeError
@@ -686,3 +623,4 @@ stripPrefix _ [] = Nothing
 stripPrefix (x : xs) (y : ys)
   | x == y = stripPrefix xs ys
   | otherwise = Nothing
+{-# LANGUAGE DeriveGeneric #-}

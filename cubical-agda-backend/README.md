@@ -9,10 +9,10 @@
 | --- | --- | --- |
 | 1. stock Agda -> MAlonzo -> Haskell -> GHC 二进制 | **已实现并验收** | 锁定 Stock Agda 2.9.0 / MAlonzo / GHC 9.10.3；独立二进制审计 |
 | 2. 跨进程 `Term + Type` packet | **已有实现** | 仍需 clean-clone overlay 构建验收 |
-| 3. 最终程序进程内 runtime NbE | **未完成（1/11）** | 仅进程/数据边界完成；现有自定义 AST 原型不是 Agda runtime 集成 |
+| 3. 最终程序进程内 runtime NbE | **已实现并验收（11/11）** | 锁定 cctt Core、真实 Internal 桥、最终 MAlonzo 链接及同输入差分均通过 |
 
 当前可用的是候选 CubicalChez 后端、checked typed residual/packet、编译期
-NbE adapter 候选与完整的安全拒绝门禁。当前只有目标 1 关闭；
+NbE adapter 候选与完整的安全拒绝门禁。当前目标 1 和目标 3 已关闭；
 三路调度和总体发布门禁未关闭前，不得将仓库标记为完整交付。
 
 ## 目标数据流
@@ -22,7 +22,7 @@ Agda source
    |
    +-- native-safe ------> stock Agda/MAlonzo -> erased Haskell -> binary   [IMPLEMENTED]
    +-- cross-process ----> checked Term + Type packet                       [IMPLEMENTED]
-   `-- runtime-higher ---> linked in-process runtime NbE             [NOT IMPLEMENTED]
+   `-- runtime-higher ---> linked in-process runtime NbE      [IMPLEMENTED: 11/11]
 ```
 
 跨进程只传输 Agda Internal `Term + Type` 协议数据。NbE 语义值、closure 和
@@ -36,7 +36,7 @@ Agda source
 ├── DELIVERY_CHECKLIST.md        唯一验收清单
 ├── src/                         CubicalChez 编译器后端
 ├── runtime/agda-2.9/            v2 typed Term 运行时 overlay 源码
-├── runtime/nbe/                 自定义 AST runtime NbE 原型（非目标 3 验收实现）
+├── runtime/nbe/                 独立 wire AST、语义域和最终进程内 runtime 库
 ├── config/                      NbE/provider/性能锁定信息
 ├── compat/                      锁定上游的显式兼容补丁
 ├── test/fixtures/               Agda 测试输入
@@ -147,6 +147,10 @@ make verify-status-guide
 make verify-native-lane-contract
 make verify-native-lane
 make verify-runtime-nbe
+make verify-runtime-nbe-cctt-provider
+make verify-runtime-nbe-agda-bridge
+make verify-runtime-nbe-differential
+make verify-runtime-nbe-final-malonzo
 make verify-support-matrix
 make verify-nbe-adapter-spike
 make verify-nbe-production-candidate
@@ -178,8 +182,11 @@ make verify-v2-runtime
 ## 当前边界
 
 - Chez 仍是独立候选静态目标；目标 1 由 `bin/cubical-agda-native` 的原版 MAlonzo/GHC 路径验收。
-- 编译器进程内 adapter candidate 不是目标 3 证据；`runtime/nbe/` 的自定义
-  `Ty`/`Term`、静态库和命令行 harness 也未接通 Agda Internal 输入或最终用户程序。
+- 编译器进程内 adapter candidate 不是目标 3 证据。目标 3 的独立窄腰接收
+  真实 Agda Internal definition slice，覆盖验收所需 Bool/Nat/Int/Vec/Pi/
+  Sigma/Glue/S¹ 与 transport/composition，并链接进 Stock Agda/MAlonzo/GHC
+  最终程序。未声明的通用 Kan、indexed data 和任意 HIT 仍 fail closed。
 - `t11/t11b` 等已知残余不得进入无类型执行路径。
-- 编译器进程的默认 `nbe` provider lock 仍保持未选择和安全拒绝；cctt 目前仅为
-  锁定的算法参考，并未作为 runtime library 链接或完成目标 3 验收。
+- 编译器进程的默认 `nbe` provider lock 仍保持未选择和安全拒绝；它与目标 3
+  最终进程 runtime 的独立 cctt lock 不同。后者已链接 vendored Core 的
+  `eval`/`quoteUnfold`，并通过 provider、ELF 符号和同输入差分门禁。

@@ -61,6 +61,8 @@ fixtures =
   , ("semantic-negative-index.packet", packet
       (Lam (TyPi TyNat TyNat) (Lam TyNat (App (Var 1) (Var 0))))
       (TyPi (TyPi TyNat TyNat) (TyPi TyNat TyNat)) [])
+  , ("invalid-negative-index.packet", packet
+      (Var (-1)) TyBool [])
   ]
 
 main :: IO ()
