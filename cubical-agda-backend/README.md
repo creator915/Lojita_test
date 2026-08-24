@@ -13,7 +13,7 @@
 
 当前可用的是候选 CubicalChez 后端、checked typed residual/packet、编译期
 NbE adapter 候选与完整的安全拒绝门禁。当前目标 1、目标 2 已关闭，目标 3 的实现项与 clean-clone 全量验证已通过，但独立语义验收仍待完成；
-三路调度和总体发布门禁未关闭前，不得将仓库标记为完整交付。
+仓库已有最薄的三路决策/执行层，但真实生产 adapter、统一端到端和总体发布门禁未关闭前，不得将仓库标记为完整交付。
 
 ## 目标数据流
 
@@ -158,6 +158,7 @@ make verify-runtime-nbe-cctt-provider
 make verify-runtime-nbe-agda-bridge
 make verify-runtime-nbe-differential
 make verify-runtime-nbe-final-malonzo
+make verify-three-lane-dispatch
 make verify-support-matrix
 make verify-nbe-adapter-spike
 make verify-nbe-production-candidate
@@ -178,6 +179,7 @@ make verify-v2-runtime
 - [`NATIVE_LANE.md`](docs/NATIVE_LANE.md)：目标 1 分类、工具链锁与产物审计。
 - [`RUNTIME_NBE_BOUNDARY.md`](docs/RUNTIME_NBE_BOUNDARY.md)：目标 3 最终进程与数据边界。
 - [`RUNTIME_NBE_ABI.md`](docs/RUNTIME_NBE_ABI.md)：目标 3 ABI、provider 和资源边界。
+- [`THREE_LANE_DISPATCH.md`](docs/THREE_LANE_DISPATCH.md)：最薄三路决策/执行层及其未关闭边界。
 - [`ENGINE_CONTRACT.md`](docs/ENGINE_CONTRACT.md)：引擎请求/结果与 typed residual 契约。
 - [`SUPPORT-MATRIX.md`](docs/SUPPORT-MATRIX.md)：支持、候选、残余与拒绝状态。
 - [`STATUS.md`](docs/STATUS.md)：当前实现与未交付项。

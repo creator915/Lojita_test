@@ -13,6 +13,7 @@ fail() {
 
 verify_dependencies=$(sed -n 's/^verify:[[:space:]]*//p' "$makefile")
 for target in \
+  verify-three-lane-dispatch \
   verify-native-lane \
   verify-v2-runtime-overlay-install \
   verify-v2-runtime \
@@ -44,6 +45,7 @@ for fact in \
   'runs-on: macos-15-intel' \
   'git clone --no-local' \
   'install-v2-runtime-overlay.sh' \
+  'cp -cR .toolchain/agda/dist-newstyle' \
   'exe:agda-cubical-run' \
   'AGDA29_SOURCE_DIR="$LOCKED_AGDA_V2_SOURCE"' \
   'test -z "$(git -C "$RUNNER_TEMP/acceptance-clone" status --porcelain)"' \
@@ -53,4 +55,4 @@ for fact in \
     fail "macOS clean-clone workflow is missing: $fact"
 done
 
-echo 'DeliveryAggregation PASS (native/packet/provider/bridge/MAlonzo/differential in make verify; macOS clean clone)'
+echo 'DeliveryAggregation PASS (three-lane dispatch plus native/packet/provider/bridge/MAlonzo/differential in make verify; macOS clean clone)'

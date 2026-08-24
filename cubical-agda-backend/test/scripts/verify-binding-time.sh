@@ -11,6 +11,7 @@ agda_package_db=${AGDA_PACKAGE_DB:?AGDA_PACKAGE_DB is required}
 ghc=${GHC:?GHC is required}
 agda_data_dir="$agda_prefix/share/agda/prim"
 summary="$evidence_dir/summary.tsv"
+dispatcher="$backend_dir/bin/cubical-agda-dispatch"
 
 mkdir -p "$evidence_dir"
 printf 'case\tbinding_time\texpectation\tstatus\n' > "$summary"
@@ -187,4 +188,46 @@ then
   exit 1
 fi
 
-echo "Binding-time classification PASS (static, dynamic, mixed, unsupported; semantic/catalog fail-closed)"
+# Feed the three real checked staging manifests into the thin dispatcher. The
+# probe is intentionally semantics-free: each lane's real implementation is
+# exercised by its own aggregate gate, while this check proves the dispatcher
+# consumes the actual Internal/Treeless analysis format rather than only a
+# synthetic fixture.
+dispatch_probe="$evidence_dir/dispatch-probe"
+dispatch_log="$evidence_dir/dispatch.log"
+cat > "$dispatch_probe" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$CUBICAL_DISPATCH_LANE" >> "$DISPATCH_LOG"
+EOF
+chmod +x "$dispatch_probe"
+: > "$dispatch_log"
+export DISPATCH_LOG="$dispatch_log"
+
+"$dispatcher" \
+  --analysis "$static_dir/staging.txt" \
+  --source "$static_dir/StaticOrdinary.agda" \
+  --boundary none \
+  --provenance "$static_dir/dispatch.provenance.tsv" \
+  --native-exec "$dispatch_probe" > /dev/null
+"$dispatcher" \
+  --analysis "$evidence_dir/dynamic/staging.txt" \
+  --source "$evidence_dir/dynamic/PacketResidual.agda" \
+  --boundary cross-process \
+  --provenance "$evidence_dir/dynamic/dispatch.provenance.tsv" \
+  --packet-exec "$dispatch_probe" > /dev/null
+"$dispatcher" \
+  --analysis "$evidence_dir/mixed/staging.txt" \
+  --source "$evidence_dir/mixed/MixedResidual.agda" \
+  --boundary in-process \
+  --provenance "$evidence_dir/mixed/dispatch.provenance.tsv" \
+  --runtime-nbe-exec "$dispatch_probe" > /dev/null
+
+[ "$(sed -n '1p' "$dispatch_log")" = native ] && \
+[ "$(sed -n '2p' "$dispatch_log")" = packet ] && \
+[ "$(sed -n '3p' "$dispatch_log")" = runtime-nbe ] && \
+[ "$(wc -l < "$dispatch_log" | tr -d ' ')" -eq 3 ] || {
+  echo "Binding-time dispatcher did not select the expected three real-analysis lanes" >&2
+  exit 1
+}
+
+echo "Binding-time classification PASS (static, dynamic, mixed, unsupported; real-analysis three-lane dispatch; semantic/catalog fail-closed)"

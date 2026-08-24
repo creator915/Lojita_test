@@ -35,6 +35,10 @@ Chez/compiler-process-NbE scope and is retired.
 - The locked stock Agda/MAlonzo/GHC lane passes ordinary and erased-Cubical
   compile/run, stock differential, misclassification, stale-artifact, and
   binary-runtime audits from both the working tree and a clean clone.
+- `bin/cubical-agda-dispatch` deterministically maps one checked staging
+  analysis plus a process boundary to native, packet, or runtime-nbe, executes
+  only that lane, and publishes source/analysis/executor/argument-bound provenance. Production adapters and
+  unified real-program end-to-end acceptance remain open.
 - `runtime/nbe/` builds a compiler-independent runtime package. A real Agda
   Internal producer emits typed requests and definitions, and Stock
   Agda/MAlonzo/GHC links the evaluator plus pinned cctt Core into the final
@@ -111,8 +115,8 @@ The current and retained candidate evidence is:
 - formal candidate differential: 8/8 groups and 42/42 rows PASS;
 - controlled O2 provisional performance: `ENGINEERING-PERFORMANCE-PASS`.
 
-Goals 1 and 2 are closed. Goal 3 independent acceptance, three-lane
-dispatch/integration and overall release validation remain open.
+Goals 1 and 2 are closed. Goal 3 independent acceptance, production
+three-lane integration and overall release validation remain open.
 
 ## Reproduce the current root contract
 

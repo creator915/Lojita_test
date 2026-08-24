@@ -77,6 +77,14 @@ jobs:
           git -C .toolchain/agda-v2 remote add origin "$agda_origin"
           git -C .toolchain/agda-v2 fetch --depth 1 origin "$agda_revision"
           git -C .toolchain/agda-v2 checkout --detach FETCH_HEAD
+          test -z "$(git -C .toolchain/agda-v2 status --porcelain)"
+          if ! cp -cR .toolchain/agda/dist-newstyle \
+            .toolchain/agda-v2/dist-newstyle 2>/dev/null
+          then
+            mkdir -p .toolchain/agda-v2/dist-newstyle
+            cp -R .toolchain/agda/dist-newstyle/. \
+              .toolchain/agda-v2/dist-newstyle/
+          fi
           sh test/scripts/install-v2-runtime-overlay.sh "$PWD/.toolchain/agda-v2"
           "$LOCKED_CABAL" build -w "$LOCKED_GHC" \
             --project-dir=.toolchain/agda-v2 lib:Agda exe:agda exe:agda-cubical-run

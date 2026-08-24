@@ -78,6 +78,10 @@ Internal 桥覆盖验收所需的 `transp`/`hcomp`/Glue/Pi/Sigma(record)/S¹
 
 ## F. 三路调度与端到端集成
 
+`bin/cubical-agda-dispatch` 已提供最薄的单次分析决策/执行层，并有真实
+`staging.txt` 格式兼容测试；但 production final-program adapter、统一真实程序端到端、
+跨 lane 取消清理和新 head clean-clone 尚未全部验收，因此本节暂不提前勾选。
+
 - [ ] **P0** 一次类型/binding-time 分析产生稳定的 native/packet/runtime-nbe 调度决策。
 - [ ] **P0** 目标 1 程序必须绕过 packet 和 runtime NbE。
 - [ ] **P0** 跨进程边界必须只发布 Term packet，禁止序列化 semantic closure/TCState。
