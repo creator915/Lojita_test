@@ -68,7 +68,7 @@ grep -Fq 'boundary definition is complete' "$guide" ||
   fail "boundary guide omits the completed normative definition"
 grep -Fq 'implements it for the declared Goal 3 fragment' "$guide" ||
   fail "boundary guide omits the implemented narrow fragment"
-grep -Fq '目标 3 为 11/11' "$checklist" ||
+grep -Fq '目标 3 实现项为 11/11' "$checklist" ||
   fail "checklist must record the locked differential evidence"
 grep -Fq '独立复核并接受' "$checklist" ||
   fail "checklist must keep independent Goal 3 acceptance open"

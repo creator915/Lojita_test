@@ -136,14 +136,31 @@ if rg -n 'System\.Process|createProcess|callProcess|readProcess|unsafePerformIO'
     runtime/nbe/src "$final_fixture"; then
   fail "linked runtime source contains a process/compiler escape"
 fi
-printf 'linked-runtime-symbols\tarchive-and-final-ELF\tPASS\n' >> "$summary"
+printf 'linked-runtime-symbols\tarchive-and-final-native-binary\tPASS\n' >> "$summary"
 
-cc -shared -fPIC -Wall -Werror -o "$evidence_dir/noexec.so" \
-  test/fixtures/runtime-nbe/noexec.c
+case $(uname -s) in
+  Darwin)
+    noexec_library=$evidence_dir/noexec.dylib
+    cc -dynamiclib -fPIC -Wall -Werror -o "$noexec_library" \
+      test/fixtures/runtime-nbe/noexec.c
+    run_noexec() {
+      env CCZ_NOEXEC_LOG="$evidence_dir/noexec.log" \
+        DYLD_INSERT_LIBRARIES="$repo_root/$noexec_library" \
+        DYLD_FORCE_FLAT_NAMESPACE=1 "$@"
+    }
+    ;;
+  *)
+    noexec_library=$evidence_dir/noexec.so
+    cc -shared -fPIC -Wall -Werror -o "$noexec_library" \
+      test/fixtures/runtime-nbe/noexec.c
+    run_noexec() {
+      env CCZ_NOEXEC_LOG="$evidence_dir/noexec.log" \
+        LD_PRELOAD="$repo_root/$noexec_library" "$@"
+    }
+    ;;
+esac
 : > "$evidence_dir/noexec.log"
-CCZ_NOEXEC_LOG="$evidence_dir/noexec.log" \
-LD_PRELOAD="$repo_root/$evidence_dir/noexec.so" \
-  "$final_binary" "$context" "$packet" > "$evidence_dir/final.out" ||
+run_noexec "$final_binary" "$context" "$packet" > "$evidence_dir/final.out" ||
   fail "no-exec guarded MAlonzo final program failed"
 [ ! -s "$evidence_dir/noexec.log" ] || fail "final program attempted a subprocess"
 expected=$(printf 'OK\tLam TyBool (Var 0)\tTyPi TyBool TyBool\t')
@@ -153,9 +170,7 @@ printf 'in-process-no-exec\tzero-exec-attempts\tPASS\n' >> "$summary"
 
 for cubical_packet in "$transp_packet" "$hcomp_packet"; do
   cubical_context=$(sed -n '2s/.*packetContext = "\([^"]*\)".*/\1/p' "$cubical_packet")
-  CCZ_NOEXEC_LOG="$evidence_dir/noexec.log" \
-  LD_PRELOAD="$repo_root/$evidence_dir/noexec.so" \
-    "$final_binary" "$cubical_context" "$cubical_packet" \
+  run_noexec "$final_binary" "$cubical_context" "$cubical_packet" \
     > "$cubical_packet.final.out" ||
     fail "MAlonzo final program rejected a real Cubical packet"
   cubical_expected=$(printf 'OK\tBoolLit True\tTyBool\t')

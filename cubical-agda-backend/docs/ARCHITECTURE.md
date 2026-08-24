@@ -323,8 +323,10 @@ See `ENGINE_CONTRACT.md`.
 The upstream `AndrasKovacs/cctt` executable is not a drop-in Agda library. Goal
 3 therefore vendors its unmodified Core modules behind a repository-owned
 Cabal library and an explicit Agda-wire semantic adapter. The bounded adapter
-compiles the actual wire value and family action to closed cctt terms and
-decodes the quoted normal form; it does not use fixed cctt probes to authorize
+encodes the actual bounded wire value as a closed term and constructs cctt's
+own `Coe`, `HCom`, `GlueTy`, `Glue`, and `Unglue` syntax for the Cubical action.
+It decodes the quoted normal form; Church terms are data encodings, not a
+selector or host-side transport replacement, and no fixed cctt probe authorizes
 a separately computed value. See
 `NBE_SELECTION.md` for the separation from the compiler-process candidate.
 

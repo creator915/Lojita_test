@@ -10,6 +10,8 @@ upstream-license-file	runtime/nbe/vendor/cctt/LICENSE
 upstream-license-sha256	6d1af462b683165c1b10ed36a0d3c1e1b09f50924b30f16d85918402523210f9
 vendored-source-manifest	config/runtime-nbe-cctt-sources.sha256
 integration	linked-core-input-normalization
+cubical-semantics	cctt-Coe-HCom-Glue
+data-encoding	bounded-Church-only
 runtime-library	build/runtime-nbe/libHScubical-runtime-nbe-0.1.0.a
 runtime-abi	runtime-nbe-abi-v1
 provider-identity	cctt-core-runtime-v1@ba16f3758a322e9be77ada1da2b93f45d500192e

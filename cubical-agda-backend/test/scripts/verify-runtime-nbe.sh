@@ -19,6 +19,14 @@ fail() {
   exit 1
 }
 
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{ print $1 }'
+  else
+    shasum -a 256 "$1" | awk '{ print $1 }'
+  fi
+}
+
 mkdir -p "$packet_dir"
 
 awk -F '\t' '
@@ -28,9 +36,11 @@ awk -F '\t' '
   $1 == "upstream-source-archive-sha256" && $2 == "8d83adcb45ea827583f02fb6fb5c7d023ae97fdf6dd7816e9069ee45c67b6b5d" { source++ }
   $1 == "upstream-license-spdx" && $2 == "MIT" { license++ }
   $1 == "integration" && $2 == "linked-core-input-normalization" { integration++ }
-  END { exit !(status == 1 && provider == 1 && revision == 1 && source == 1 && license == 1 && integration == 1) }
+  $1 == "cubical-semantics" && $2 == "cctt-Coe-HCom-Glue" { cubical++ }
+  $1 == "data-encoding" && $2 == "bounded-Church-only" { encoding++ }
+  END { exit !(status == 1 && provider == 1 && revision == 1 && source == 1 && license == 1 && integration == 1 && cubical == 1 && encoding == 1) }
 ' "$provider_lock" || fail "linked runtime provider lock is incomplete"
-[ "$(sha256sum "$provider_license" | awk '{ print $1 }')" = \
+[ "$(sha256_file "$provider_license")" = \
   6d1af462b683165c1b10ed36a0d3c1e1b09f50924b30f16d85918402523210f9 ] ||
   fail "cctt MIT license hash drifted"
 
@@ -135,12 +145,31 @@ fi
 printf 'linked-library\tcctt-eval+quotation-symbols\tcctt-eval+quotation-symbols\tPASS\n' >> "$summary"
 printf 'compiler-symbol-audit\tno-Agda-TCState-normalise\tno-Agda-TCState-normalise\tPASS\n' >> "$summary"
 
-cc -shared -fPIC -Wall -Werror -o "$evidence_dir/noexec.so" \
-  test/fixtures/runtime-nbe/noexec.c
+case $(uname -s) in
+  Darwin)
+    noexec_library=$evidence_dir/noexec.dylib
+    cc -dynamiclib -fPIC -Wall -Werror -o "$noexec_library" \
+      test/fixtures/runtime-nbe/noexec.c
+    run_noexec() {
+      env CCZ_NOEXEC_LOG="$noexec_log" \
+        DYLD_INSERT_LIBRARIES="$repo_root/$noexec_library" \
+        DYLD_FORCE_FLAT_NAMESPACE=1 "$@"
+    }
+    ;;
+  *)
+    noexec_library=$evidence_dir/noexec.so
+    cc -shared -fPIC -Wall -Werror -o "$noexec_library" \
+      test/fixtures/runtime-nbe/noexec.c
+    run_noexec() {
+      env CCZ_NOEXEC_LOG="$noexec_log" \
+        LD_PRELOAD="$repo_root/$noexec_library" "$@"
+    }
+    ;;
+esac
 noexec_log=$evidence_dir/noexec.log
 : > "$noexec_log"
-CCZ_NOEXEC_LOG="$noexec_log" LD_PRELOAD="$repo_root/$evidence_dir/noexec.so" \
-  "$runtime_binary" "$context" "$packet_dir/t16c.packet" > "$evidence_dir/noexec.out"
+run_noexec "$runtime_binary" "$context" "$packet_dir/t16c.packet" \
+  > "$evidence_dir/noexec.out"
 [ ! -s "$noexec_log" ] || fail "runtime attempted to start a subprocess"
 noexec_expected=$(printf 'OK\tIntLit 2\tTyInt\t')
 grep -Fq "$noexec_expected" "$evidence_dir/noexec.out" ||

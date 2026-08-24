@@ -12,8 +12,8 @@ Chez/compiler-process-NbE scope and is retired.
 | --- | ---: | --- |
 | 1. stock Agda -> MAlonzo -> erased Haskell -> native binary | 9/9 | IMPLEMENTED; VERIFIED |
 | 2. cross-process checked `Term + Type` | 8/9 | IMPLEMENTED; clean-clone gate open |
-| 3. linked NbE inside the final program process | 11/11 | TECHNICAL EVIDENCE COMPLETE; independent acceptance pending |
-| Complete revised checklist | 41/56 | 73.2% by item count; not effort-weighted |
+| 3. linked NbE inside the final program process | 11/11 implementation items | CLEAN-CLONE FULL VERIFICATION PENDING; not accepted |
+| Complete revised checklist | 41/56 implementation items | 73.2% by item count; release gates still open |
 
 ## What is usable now
 
@@ -22,10 +22,10 @@ Chez/compiler-process-NbE scope and is retired.
 - Typed residual and packet production retain checked `Term + Type`.
 - The v2 packet consumer source and tests are maintained under
   `runtime/agda-2.9/`.
-- The complete root-layout local `make verify` contract is not green in the
-  current workspace: after runtime 27/27 and the status gate pass, the README
-  gate cannot start the old dynamically linked `build/cubical-chez` because
-  its pruned Agda Cabal store no longer contains `libHSzstd...so`.
+- The current change adds a macOS second-clone `make verify` workflow and folds
+  native, provider, bridge, final MAlonzo and same-input differential gates into
+  the aggregate target. That new complete run has not yet reported green, so
+  Goal 3 is not accepted.
 - The isolated compiler-process NbE candidate passed the recorded 8-group,
   42-row differential matrix and controlled O2 provisional performance gate.
 - Default production `nbe` remains fail closed because the provider lock is
@@ -56,7 +56,9 @@ Bool/Nat/Int/Vec/Pi/Sigma/Glue/PathP/S¹ fragment and its definition slice. The
 shared runtime performs typed reflection, closures, definition lookup,
 quotation and result rechecking. Pinned cctt commit `ba16f375...` (MIT) is
 vendored without patches and its `Core.eval`/`Quotation.quoteUnfold` symbols
-are linked into the final ELF. A Stock Agda/MAlonzo/GHC fixture plus no-exec
+are linked into the final native binary. The adapter constructs cctt `Coe`,
+`HCom`, `GlueTy`, `Glue`, and `Unglue` terms for the bounded Cubical actions;
+Church terms remain only the wire data encoding. A Stock Agda/MAlonzo/GHC fixture plus no-exec
 audit proves final-process execution. The former negative-index reproducer
 returns `App (Var 1) (Var 0)`, and explicit negative indices reject.
 
@@ -66,10 +68,12 @@ their indexed transports as `transpX-Vec`, checked equivalence-induction and
 set proofs connect each root to a canonical oracle computed from the same
 input. The harness compares those exact Bool-pair strings with a structural
 rendering of the runtime result. An unproved or residual oracle is a failure.
-PR run `32701822346` and push run `32701816817` both record all six exact
-matches. Goal 3 therefore has 11/11 technical evidence but is not independently
-accepted. The `goal3-runtime-nbe` workflow executes provider, runtime,
-real-Internal, differential and final-MAlonzo gates.
+Historical PR run `32701822346` and push run `32701816817` both record all six
+exact matches, but predate this cctt and macOS change. Goal 3 has code and
+specialized tests for its 11 implementation items, but remains unaccepted until
+the new full clean-clone run is green and independently reviewed. The
+`goal3-runtime-nbe` workflow executes provider, runtime, real-Internal,
+differential and final-MAlonzo gates.
 
 ## Repository state
 
@@ -90,8 +94,9 @@ The current and retained candidate evidence is:
   clean clone from local commit `7578f56`;
 - runtime `make verify-runtime-nbe`: 27/27 PASS on 2026-08-23, including the
   repaired higher-order readback and negative-index rejection;
-- `make verify-runtime-nbe-cctt-provider`: 10/10 source hashes, 11 input-driven
-  eval/quotation cases, archive membership and final ELF symbols PASS locally;
+- `make verify-runtime-nbe-cctt-provider`: 10/10 source hashes, 14 input-driven
+  cctt Coe/HCom/Glue eval/quotation cases, archive membership and final native
+  symbols PASS locally in the current change;
 - `make verify-runtime-nbe-agda-bridge`: 7/7 PASS for real Internal values,
   definitions, same-expression Agda oracle checks and fail-closed patterns;
 - `make verify-runtime-nbe-final-malonzo`: 9/9 PASS for Stock MAlonzo/GHC,

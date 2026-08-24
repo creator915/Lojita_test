@@ -38,6 +38,10 @@ main = do
     (ProviderPair (ProviderBool True) (ProviderNat 3)))
   assertEqual "Sigma" (ProviderPair (ProviderBool False) (ProviderNat 3)) sigma
 
+  identityGlue <- expectRight "identity Glue Coe" (providerTransport ProviderForward
+    (FamilyGlue (EquivIdentity TyNat)) (ProviderNat 7))
+  assertEqual "identity Glue Coe" (ProviderNat 7) identityGlue
+
   integer <- expectRight "composed Int transport" (providerTransport ProviderForward
     (FamilyCompose (FamilyGlue EquivIntSucc) (FamilyGlue EquivIntSucc))
     (ProviderInt (-2)))
@@ -51,9 +55,21 @@ main = do
     (ProviderBool True) (ProviderBool False))
   assertEqual "hcomp face one" (ProviderBool True) selectedOne
 
+  selectedOneFlipped <- expectRight "hcomp face one flipped input" (providerSelect FaceOne
+    (ProviderBool False) (ProviderBool True))
+  assertEqual "hcomp face one flipped input" (ProviderBool False) selectedOneFlipped
+  unless (selectedOne /= selectedOneFlipped)
+    (die "cctt HCom is not input-driven: distinct systems produced the same result")
+
   selectedZero <- expectRight "hcomp face zero" (providerSelect FaceZero
     (ProviderBool True) (ProviderBool False))
   assertEqual "hcomp face zero" (ProviderBool False) selectedZero
+
+  selectedPair <- expectRight "hcomp Sigma face one" (providerSelect FaceOne
+    (ProviderPair (ProviderBool True) (ProviderNat 2))
+    (ProviderPair (ProviderBool False) (ProviderNat 9)))
+  assertEqual "hcomp Sigma face one"
+    (ProviderPair (ProviderBool True) (ProviderNat 2)) selectedPair
 
   preserved <- expectRight "Glue payload" (providerPreserve
     (ProviderPair (ProviderBool False) (ProviderNat 8)))
@@ -66,4 +82,4 @@ main = do
     Left _ -> pure ()
     Right value -> die ("wrong Vec spine was accepted: " ++ show value)
 
-  putStrLn "CcttProvider PASS (11 input-driven cases)"
+  putStrLn "CcttProvider PASS (14 Coe/HCom/Glue input-driven cases)"

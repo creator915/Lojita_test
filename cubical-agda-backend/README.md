@@ -9,10 +9,10 @@
 | --- | --- | --- |
 | 1. stock Agda -> MAlonzo -> Haskell -> GHC 二进制 | **已实现并验收** | 锁定 Stock Agda 2.9.0 / MAlonzo / GHC 9.10.3；独立二进制审计 |
 | 2. 跨进程 `Term + Type` packet | **已有实现** | 仍需 clean-clone overlay 构建验收 |
-| 3. 最终程序进程内 runtime NbE | **技术证据完成（11/11），待独立验收** | cctt 对实际输入归一化；t11/t11b 使用证明关联的同输入精确差分 |
+| 3. 最终程序进程内 runtime NbE | **实现项 11/11；clean-clone 全量验收进行中，尚未交付** | cctt 的 Coe/HCom/Glue 对实际输入归一化；t11/t11b 使用证明关联的同输入精确差分 |
 
 当前可用的是候选 CubicalChez 后端、checked typed residual/packet、编译期
-NbE adapter 候选与完整的安全拒绝门禁。当前目标 1 已关闭，目标 3 技术证据完成但未独立验收；
+NbE adapter 候选与完整的安全拒绝门禁。当前目标 1 已关闭，目标 3 的实现项已有代码与专项测试，但本轮 clean-clone 尚未全绿；
 三路调度和总体发布门禁未关闭前，不得将仓库标记为完整交付。
 
 ## 目标数据流
@@ -22,7 +22,7 @@ Agda source
    |
    +-- native-safe ------> stock Agda/MAlonzo -> erased Haskell -> binary   [IMPLEMENTED]
    +-- cross-process ----> checked Term + Type packet                       [IMPLEMENTED]
-   `-- runtime-higher ---> linked in-process runtime NbE      [IMPLEMENTED; EVIDENCE: 11/11]
+   `-- runtime-higher ---> linked in-process runtime NbE      [IMPLEMENTED; CLEAN VERIFY PENDING]
 ```
 
 跨进程只传输 Agda Internal `Term + Type` 协议数据。NbE 语义值、closure 和
@@ -75,6 +75,12 @@ Homebrew 布局可以直接使用 Make 默认值。其他布局可传入：
 - `NATIVE_AGDA_SOURCE_DIR`
 - `NATIVE_AGDA_DATA_DIR`
 - `NATIVE_GHC`
+
+目标 3 的锁定 runtime 通道还显式使用同一套：
+
+- `RUNTIME_NBE_GHC`
+- `RUNTIME_NBE_GHC_PKG`
+- `RUNTIME_NBE_CABAL`
 
 版本与官方源码 revision 固定在
 [`config/native-toolchain.lock.tsv`](config/native-toolchain.lock.tsv)。
@@ -144,6 +150,7 @@ make verify-formal-transport-production-candidate
 
 ```sh
 make verify-status-guide
+make verify-delivery-aggregation
 make verify-native-lane-contract
 make verify-native-lane
 make verify-runtime-nbe
@@ -185,8 +192,9 @@ make verify-v2-runtime
 - 编译器进程内 adapter candidate 不是目标 3 证据。目标 3 的独立窄腰接收
   真实 Agda Internal definition slice，覆盖验收所需 Bool/Nat/Int/Vec/Pi/
   Sigma/Glue/S¹ 与 transport/composition，并链接进 Stock Agda/MAlonzo/GHC
-  最终程序。cctt provider 的输出现在由实际 Bool/Int/Vec/Sigma 输入的 Core
-  归一形解码得到，不再以固定 probe 授权本地结果。未声明的通用 Kan、indexed
+  最终程序。cctt provider 为实际 Bool/Int/Vec/Sigma 输入构造并求值 cctt
+  `Coe`、`HCom`、`GlueTy`、`Glue` 和 `Unglue`；Church 项只承担受限 wire
+  数据编码，不再承担 transport/composition 语义，也不再以固定 probe 授权本地结果。未声明的通用 Kan、indexed
   data 和任意 HIT 仍 fail closed。
 - `t11/t11b` 等已知残余不得进入无类型执行路径。
 - 编译器进程的默认 `nbe` provider lock 仍保持未选择和安全拒绝；它与目标 3

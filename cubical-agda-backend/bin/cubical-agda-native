@@ -33,7 +33,10 @@ ghc=
 classification=
 source_file=
 output_file=
-declare -a include_dirs=()
+# Bash 3.2 treats an empty array expansion as an unbound variable under
+# `set -u`.  Keep a harmless sentinel so clean macOS runners can invoke the
+# driver without any optional --include arguments.
+declare -a include_dirs=('')
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -177,6 +180,7 @@ source_dir=$(CDPATH= cd -- "$(dirname -- "$source_file")" && pwd -P)
 source_file=$source_dir/$(basename -- "$source_file")
 declare -a include_args=(-i "$source_dir")
 for include_dir in "${include_dirs[@]}"; do
+  [[ -n $include_dir ]] || continue
   [[ -d $include_dir ]] || fail "include directory does not exist: $include_dir"
   include_args+=(-i "$include_dir")
 done

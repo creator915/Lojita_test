@@ -50,8 +50,9 @@ jobs:
         run: |
           set -euo pipefail
           common=(
-            RUNTIME_NBE_GHC=ghc
-            RUNTIME_NBE_GHC_PKG=ghc-pkg
+            RUNTIME_NBE_GHC="$(command -v ghc)"
+            RUNTIME_NBE_GHC_PKG="$(dirname "$(command -v ghc)")/ghc-pkg"
+            RUNTIME_NBE_CABAL="$(command -v cabal)"
             RUNTIME_NBE_AGDA_PACKAGE_DB="$AGDA_PACKAGE_DB"
             RUNTIME_NBE_DEPENDENCY_PACKAGE_DB="$DEPENDENCY_PACKAGE_DB"
             RUNTIME_NBE_AGDA_DATADIR="$AGDA_DATADIR"
@@ -77,8 +78,9 @@ jobs:
         run: |
           set -euo pipefail
           env \
-            RUNTIME_NBE_GHC=ghc \
-            RUNTIME_NBE_GHC_PKG=ghc-pkg \
+            RUNTIME_NBE_GHC="$(command -v ghc)" \
+            RUNTIME_NBE_GHC_PKG="$(dirname "$(command -v ghc)")/ghc-pkg" \
+            RUNTIME_NBE_CABAL="$(command -v cabal)" \
             RUNTIME_NBE_AGDA_PACKAGE_DB="$AGDA_PACKAGE_DB" \
             RUNTIME_NBE_DEPENDENCY_PACKAGE_DB="$DEPENDENCY_PACKAGE_DB" \
             RUNTIME_NBE_AGDA_DATADIR="$AGDA_DATADIR" \

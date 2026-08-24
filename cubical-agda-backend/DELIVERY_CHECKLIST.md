@@ -1,8 +1,8 @@
 # 交付验收清单
 
 > 范围基准：[`GOALS.md`](GOALS.md) 定义的三路架构。
-> 当前结论：目标 1 **已实现并通过 clean-clone 验收**；目标 2 **已有实现，待 clean-clone 验收**；目标 3 **技术证据为 11/11，独立验收仍待完成**。
-> 新范围统计：41/56 项已完成（73.2%）；目标 1 为 9/9，目标 2 为 8/9，目标 3 为 11/11。
+> 当前结论：目标 1 **已实现并通过 clean-clone 验收**；目标 2 **已有实现，待 clean-clone 验收**；目标 3 **11/11 实现项已有代码与专项测试，但本轮 clean-clone 全量验收尚未全绿，不认定完成**。
+> 新范围统计：41/56 项已有实现证据（73.2%）；目标 1 为 9/9，目标 2 为 8/9，目标 3 实现项为 11/11；总体交付仍受未勾选门禁阻塞。
 > 旧的 `224/321` 统计针对 Chez/编译期 NbE 旧范围，不再代表当前三路目标的完成度。
 
 ## 勾选规则
@@ -98,12 +98,15 @@ Internal 桥覆盖验收所需的 `transp`/`hcomp`/Glue/Pi/Sigma(record)/S¹
 
 ## 验收结论
 
-目标 1 可以认定完成。目标 3 技术证据当前为 11/11：cctt revision、MIT 许可证和十个
+目标 1 可以认定完成。目标 3 的 11/11 实现项已有仓库内代码与专项测试，但本轮
+clean-clone `make verify` 未全绿前不得认定目标 3 完成。cctt revision、MIT 许可证和十个
 vendored Core 模块由内容哈希锁定，`Core.eval` 与 `Quotation.quoteUnfold`
-链接进最终 ELF；provider 已对实际 Bool/Int/Vec/Sigma 输入归一化并以结果驱动
-readback，不再使用固定 probe。`t11/t11b/t09/t16a/t16b/t16c` 的新门禁从同一
+链接进最终本地二进制；provider 为实际 Bool/Int/Vec/Sigma 输入构造 cctt 的
+`Coe`/`HCom`/`GlueTy`/`Glue`/`Unglue` 并以求值结果驱动 readback，不再使用固定
+probe、Church selector 或宿主侧 vector transport。`t11/t11b/t09/t16a/t16b/t16c` 的新门禁从同一
 checked definition 导出 runtime 输入；Agda 对 t11/t11b 的 indexed transport
 会保留 `transpX-Vec`，因此门禁改用已类型检查的等价性证明把同一输入的实际定义
 连接到可计算 canonical oracle，要求与 runtime observation 逐字相等。锁定 CI
-PR run `32701822346` 与 push run `32701816817` 均为 6/6 PASS；但 CI 全绿本身
-不自动构成独立或最终用户验收，相关发布门禁保持未勾选。
+历史 PR run `32701822346` 与 push run `32701816817` 均为 6/6 PASS；这些运行早于
+本轮真实 cctt Cubical 语义与 macOS clean-clone 修复，不能代替本轮完整验收。
+CI 全绿本身也不自动构成独立或最终用户验收，相关发布门禁保持未勾选。
