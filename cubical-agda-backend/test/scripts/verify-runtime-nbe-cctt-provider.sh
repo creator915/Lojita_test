@@ -34,7 +34,7 @@ for required_constructor in \
   'Coe I0 I1' \
   'HCom I0 I1' \
   'GlueTy valueType' \
-  'Unglue (Glue'; do
+  'Glue (encode input) equivalenceSystem fiberSystem'; do
   grep -Fq "$required_constructor" runtime/nbe/src/Cubical/Runtime/Nbe/Cctt.hs ||
     fail "provider does not construct cctt $required_constructor syntax"
 done
@@ -65,7 +65,7 @@ awk -F '\t' '
   6d1af462b683165c1b10ed36a0d3c1e1b09f50924b30f16d85918402523210f9 ] ||
   fail "vendored MIT license hash mismatch"
 
-[ "$($provider_test)" = 'CcttProvider PASS (14 Coe/HCom/Glue input-driven cases)' ] ||
+[ "$($provider_test)" = 'CcttProvider PASS (15 Coe/HCom/Glue input-driven cases)' ] ||
   fail "one or more input-driven cctt normalizations failed"
 ar t "$runtime_library" | grep -Fxq Cctt.o ||
   fail "runtime archive does not contain the cctt adapter object"
@@ -76,4 +76,4 @@ if ! sh test/scripts/check-ghc-symbols.sh "$runtime_binary" \
   fail "runtime executable does not link cctt eval/quotation/provider transport"
 fi
 
-echo 'RuntimeNbeCcttProvider PASS (10 source hashes; 14 Coe/HCom/Glue normalizations; linked symbols)'
+echo 'RuntimeNbeCcttProvider PASS (10 source hashes; 15 Coe/HCom/Glue normalizations; linked symbols)'

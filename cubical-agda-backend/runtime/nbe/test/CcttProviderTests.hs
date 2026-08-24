@@ -75,6 +75,12 @@ main = do
     (ProviderPair (ProviderBool False) (ProviderNat 8)))
   assertEqual "Glue payload" (ProviderPair (ProviderBool False) (ProviderNat 8)) preserved
 
+  preservedFlipped <- expectRight "Glue flipped payload" (providerPreserve
+    (ProviderPair (ProviderBool True) (ProviderNat 1)))
+  assertEqual "Glue flipped payload" (ProviderPair (ProviderBool True) (ProviderNat 1)) preservedFlipped
+  unless (preserved /= preservedFlipped)
+    (die "cctt Glue/Unglue is not input-driven: distinct fibers produced the same result")
+
   winding <- expectRight "path winding" (providerAddInt (-3) 5)
   assertEqual "path winding" 2 winding
 
@@ -82,4 +88,4 @@ main = do
     Left _ -> pure ()
     Right value -> die ("wrong Vec spine was accepted: " ++ show value)
 
-  putStrLn "CcttProvider PASS (14 Coe/HCom/Glue input-driven cases)"
+  putStrLn "CcttProvider PASS (15 Coe/HCom/Glue input-driven cases)"

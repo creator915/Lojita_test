@@ -97,9 +97,17 @@ providerSelect face system base = do
 
 {-# NOINLINE providerPreserve #-}
 providerPreserve :: ProviderValue -> Either String ProviderValue
-providerPreserve input =
+providerPreserve input = do
+  valueType <- providerType input
+  let totalFace = CEq I0 I0
+      identityEquivalence = Pair N_ valueType
+        (equivalencePackage identityFunction identityFunction)
+      equivalenceSystem = SCons totalFace identityEquivalence SEmpty
+      fiberSystem = SCons totalFace (encode input) SEmpty
   decodeLike input (normalize
-    (Unglue (Glue (encode input) SEmpty SEmpty) SEmpty))
+    (Unglue
+      (Glue (encode input) equivalenceSystem fiberSystem)
+      equivalenceSystem))
 
 {-# NOINLINE providerAddInt #-}
 providerAddInt :: Integer -> Integer -> Either String Integer

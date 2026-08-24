@@ -34,7 +34,7 @@ runtime symbols, no compiler symbols, zero exec attempts and preserved
 `PrimTrans`/`PrimHComp` packets whose outputs agree with the Agda oracle.
 The maintained `semantic-negative-index.packet` regression now returns the
 correct `App (Var 1) (Var 0)`, and a malicious negative-index packet rejects.
-cctt linkage passes ten source hashes, fourteen actual-input Coe/HCom/Glue
+cctt linkage passes ten source hashes, fifteen actual-input Coe/HCom/Glue
 eval/quotation cases and final native symbol checks. The replacement same-input gate covers
 `t11/t11b/t09/t16a/t16b/t16c`; checked proofs now connect the residual indexed
 `t11/t11b` definitions to canonical oracles computed from their shared inputs,
@@ -62,7 +62,7 @@ the maintained source/input hashes and awaits an independent upstream match.
 | Target | Scope | Result | Time / peak RSS |
 | --- | --- | --- | --- |
 | `make verify-runtime-nbe` | runtime semantic domain, typed requests, input-dependence control, cache, limits, archive/harness link, no-exec and higher-order readback regression | 27/27 PASS | not measured |
-| `make verify-runtime-nbe-cctt-provider` | exact cctt Core source/license identity, real cctt Coe/HCom/Glue construction, input-driven eval/quotation, runtime archive and native linkage | 10 source hashes + 14 actual-input cases + symbol audits PASS | current local Linux run |
+| `make verify-runtime-nbe-cctt-provider` | exact cctt Core source/license identity, real cctt Coe/HCom/Glue construction, input-driven eval/quotation, runtime archive and native linkage | 10 source hashes + 15 actual-input cases + symbol audits PASS | current local Linux run |
 | `make verify-runtime-nbe-agda-bridge` | real checked Agda Internal Bool/Nat/Pi and single-clause definition slice, same-expression Agda oracle, unsupported-pattern rejection | 7/7 PASS | local Linux run |
 | `make verify-runtime-nbe-differential` | same checked Agda definitions exported to the linked runtime and observed by Agda: `t11/t11b/t09/t16a/t16b/t16c` | 6/6 PASS; t11/t11b `PROOF-LINKED-SAME-INPUT-MATCH`, remaining rows `SAME-INPUT-MATCH` | PR `32701822346`; push `32701816817` |
 | `make verify-runtime-nbe-final-malonzo` | Stock Agda -> MAlonzo -> GHC user program with linked runtime; real `PrimTrans`/`PrimHComp`, unsupported-face rejection, oracle, symbol and no-exec audits | 9/9 PASS | local Linux run |
