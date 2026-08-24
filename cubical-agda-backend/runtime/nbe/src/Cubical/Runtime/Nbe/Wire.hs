@@ -24,7 +24,7 @@ abiVersion :: String
 abiVersion = "runtime-nbe-abi-v1"
 
 providerIdentity :: String
-providerIdentity = "cctt-informed-agda-runtime-v1@ba16f3758a322e9be77ada1da2b93f45d500192e"
+providerIdentity = "cctt-core-runtime-v1@ba16f3758a322e9be77ada1da2b93f45d500192e"
 
 packetMagic :: String
 packetMagic = "CCZ-RUNTIME-NBE\t1\n"

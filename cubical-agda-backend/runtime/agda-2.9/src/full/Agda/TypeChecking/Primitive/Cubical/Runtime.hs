@@ -3,20 +3,19 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PatternSynonyms #-}
 
--- | A small execution backend for full Cubical Agda.
+-- | Checked runtime bridges for full Cubical Agda.
 --
--- The ordinary compiler backends erase types before generated code runs.  This
--- backend deliberately stays inside the type-checking process instead: after
--- the input module has been checked, it evaluates a user-supplied expression
--- while the current 'TCState' (and hence the signature and all internal types)
--- is still available.  Evaluation therefore goes through the ordinary Agda
--- reducer, including the implementations in
--- "Agda.TypeChecking.Primitive.Cubical".
+-- The @cubical-run@ oracle deliberately stays inside the type-checking process
+-- and uses Agda's ordinary reducer.  The distinct
+-- @cubical-runtime-nbe-export@ path does not normalize the term: after checking
+-- it, that path structurally translates the actual 'Term', 'Type', and required
+-- definitions into the compiler-independent Goal 3 wire ABI.  The linked final
+-- runtime performs evaluation and quotation outside the compiler process.
 --
 -- Version 2 can also serialise closed Internal Terms and their types, then
 -- recheck and consume them in a second Agda process whose complete interface
--- hash matches the producer.  It remains an interpreter-style backend and
--- does not interpret Agda's IO type.
+-- hash matches the producer.  These three modes share checking infrastructure
+-- but are separate execution boundaries.
 module Agda.TypeChecking.Primitive.Cubical.Runtime
   ( cubicalRuntimeBackend
   ) where
@@ -342,12 +341,25 @@ bridgeType :: Type -> TCM Wire.Ty
 bridgeType ty0 = do
   ty <- reduce ty0
   case Internal.unEl ty of
-    Internal.Def name [] -> do
+    Internal.Def name eliminations -> do
       isBool <- isBuiltinName name Builtin.builtinBool
       isNat <- isBuiltinName name Builtin.builtinNat
+      isPathP <- isBuiltinName name Builtin.builtinPathP
       case () of
-        _ | isBool -> pure Wire.TyBool
-          | isNat -> pure Wire.TyNat
+        _ | isBool && null eliminations -> pure Wire.TyBool
+          | isNat && null eliminations -> pure Wire.TyNat
+          | prettyShow name == "Cubical.Data.Int.Base.ℤ"
+          , null eliminations -> pure Wire.TyInt
+          | prettyShow name == "Cubical.HITs.S1.Base.S¹"
+          , null eliminations -> pure Wire.TyS1
+          | prettyShow name == "Agda.Builtin.Sigma.Σ" ->
+              bridgeSigmaType eliminations
+          | prettyShow name == "Cubical.Data.Sigma.Base._×_" ->
+              bridgeProductType eliminations
+          | prettyShow name == "Cubical.Data.Vec.Base.Vec"
+          , Just [_level, element, size] <- mapM applyArgument eliminations ->
+              Wire.TyVec <$> bridgeTypeTerm element <*> bridgeNatural size
+          | isPathP -> bridgePathType eliminations
           | otherwise -> unsupportedBridge "type" $ prettyShow name
     Internal.Pi domain codomain -> do
       domainTy <- bridgeType $ Internal.unDom domain
@@ -355,6 +367,45 @@ bridgeType ty0 = do
       pure $ Wire.TyPi domainTy codomainTy
     Internal.Sort{} -> pure Wire.TyUniverse
     other -> unsupportedBridge "type node" $ prettyShow other
+
+bridgePathType :: Internal.Elims -> TCM Wire.Ty
+bridgePathType eliminations = case mapM applyArgument eliminations of
+  Just arguments
+    | right : left : _family : _ <- reverse arguments -> do
+        (pathTy, wireLeft) <- bridgePathEndpoint left
+        (pathTy', wireRight) <- bridgePathEndpoint right
+        unless (pathTy == pathTy') $
+          unsupportedBridge "path endpoint types" $ show (pathTy, pathTy')
+        pure (Wire.TyPath pathTy wireLeft wireRight)
+  _ -> unsupportedBridge "PathP eliminations" $ prettyShow eliminations
+
+bridgeSigmaType :: Internal.Elims -> TCM Wire.Ty
+bridgeSigmaType eliminations = case mapM applyArgument eliminations of
+  Just arguments
+    | codomain : domain : _ <- reverse arguments ->
+        Wire.TySigma <$> bridgeTypeTerm domain <*> bridgeConstantType codomain
+  _ -> unsupportedBridge "Sigma eliminations" $ prettyShow eliminations
+
+bridgeProductType :: Internal.Elims -> TCM Wire.Ty
+bridgeProductType eliminations = case mapM applyArgument eliminations of
+  Just arguments
+    | second : first : _ <- reverse arguments ->
+        Wire.TySigma <$> bridgeTypeTerm first <*> bridgeTypeTerm second
+  _ -> unsupportedBridge "product eliminations" $ prettyShow eliminations
+
+bridgeConstantType :: Term -> TCM Wire.Ty
+bridgeConstantType term = case term of
+  Internal.Lam _ abstraction -> bridgeTypeTerm $ Internal.unAbs abstraction
+  _ -> unsupportedBridge "constant type abstraction" $ prettyShow term
+
+bridgePathEndpoint :: Term -> TCM (Wire.Ty, Wire.Term)
+bridgePathEndpoint term = case term of
+  Internal.Con constructor _ []
+    | prettyShow (Internal.conName constructor) ==
+        "Cubical.HITs.S1.Base.S¹.base" -> pure (Wire.TyS1, Wire.S1Base)
+  _ -> do
+    ty <- bridgeTypeTerm term
+    pure (Wire.TyUniverse, Wire.Type ty)
 
 bridgeTerm
   :: [QName]
@@ -381,6 +432,58 @@ bridgeTerm active context expected term = case term of
     _ -> unsupportedBridge "lambda type" $ show expected
   Internal.Lit (LitNat natural)
     | expected == Wire.TyNat && natural >= 0 -> pure (Wire.NatLit natural, [])
+  Internal.Con constructor _ []
+    | expected == Wire.TyPath Wire.TyS1 Wire.S1Base Wire.S1Base
+    , prettyShow (Internal.conName constructor) ==
+        "Cubical.HITs.S1.Base.S¹.loop" -> pure (Wire.Loop, [])
+  Internal.Con constructor _ eliminations
+    | Wire.TyVec element size <- expected
+    , prettyShow (Internal.conName constructor) ==
+        "Cubical.Data.Vec.Base.Vec.[]"
+    , null eliminations
+    , size == 0 -> pure (Wire.VecLit element [], [])
+  Internal.Con constructor _ eliminations
+    | Wire.TyVec element size <- expected
+    , prettyShow (Internal.conName constructor) ==
+        "Cubical.Data.Vec.Base.Vec._∷_"
+    , size > 0
+    , Just arguments <- mapM applyArgument eliminations
+    , tailTerm : headTerm : _ <- reverse arguments -> do
+        (wireHead, headDefinitions) <- bridgeTerm active context element headTerm
+        (wireTail, tailDefinitions) <- bridgeTerm active context
+          (Wire.TyVec element (size - 1)) tailTerm
+        case wireTail of
+          Wire.VecLit actualElement elements
+            | actualElement == element -> pure
+                ( Wire.VecLit element (wireHead : elements)
+                , headDefinitions ++ tailDefinitions
+                )
+          _ -> unsupportedBridge "Vec tail" $ show wireTail
+  Internal.Con constructor _ eliminations
+    | Wire.TySigma firstTy secondTy <- expected
+    , prettyShow (Internal.conName constructor) == "Agda.Builtin.Sigma._,_"
+    , Just arguments <- mapM applyArgument eliminations
+    , second : first : _ <- reverse arguments -> do
+        (wireFirst, firstDefinitions) <- bridgeTerm active context firstTy first
+        (wireSecond, secondDefinitions) <- bridgeTerm active context secondTy second
+        pure
+          ( Wire.Pair wireFirst wireSecond
+          , firstDefinitions ++ secondDefinitions
+          )
+  Internal.Con constructor _ eliminations
+    | expected == Wire.TyInt
+    , prettyShow (Internal.conName constructor) ==
+        "Cubical.Data.Int.Base.ℤ.pos"
+    , Just [natural] <- mapM applyArgument eliminations -> do
+        value <- bridgeNatural natural
+        pure (Wire.IntLit (fromIntegral value), [])
+  Internal.Con constructor _ eliminations
+    | expected == Wire.TyInt
+    , prettyShow (Internal.conName constructor) ==
+        "Cubical.Data.Int.Base.ℤ.negsuc"
+    , Just [natural] <- mapM applyArgument eliminations -> do
+        magnitude <- bridgeNatural natural
+        pure (Wire.IntLit (negate (fromIntegral magnitude + 1)), [])
   Internal.Con constructor _ [] | expected == Wire.TyBool -> do
     let name = Internal.conName constructor
     isTrue <- isBuiltinName name Builtin.builtinTrue
@@ -392,7 +495,21 @@ bridgeTerm active context expected term = case term of
   Internal.Def name eliminations -> do
     isTransp <- isPrimitiveName name Builtin.builtinTrans
     isHComp <- isPrimitiveName name Builtin.builtinHComp
-    if isTransp
+    if prettyShow name == "Cubical.HITs.S1.Base.S¹.loop"
+      && null eliminations
+      && expected == Wire.TyPath Wire.TyS1 Wire.S1Base Wire.S1Base
+      then pure (Wire.Loop, [])
+      else if prettyShow name == "Cubical.Foundations.Prelude.transport"
+      then bridgeLibraryTransport active context expected eliminations
+      else if prettyShow name == "Cubical.Foundations.Prelude.subst"
+        then bridgeLibrarySubst active context expected eliminations
+      else if prettyShow name == "Cubical.Foundations.Prelude._∙_"
+        then bridgePathComposition active context expected eliminations
+      else if prettyShow name == "Cubical.Foundations.Univalence.ua"
+        then bridgeUaTerm expected (Internal.Def name eliminations)
+      else if prettyShow name == "Cubical.HITs.S1.Base.winding"
+        then bridgeWindingTerm expected eliminations
+      else if isTransp
       then bridgeTransp active context expected eliminations
       else if isHComp
         then bridgeHComp active context expected eliminations
@@ -442,9 +559,11 @@ bridgeDefinition active name = do
       , all isVariablePattern patterns -> do
           domains <- mapM (bridgeType . snd . Internal.unDom) $
             Internal.telToList $ Internal.clauseTel clause
-          let (typeDomains, resultType) = splitPiType wireType
-          unless (domains == typeDomains) $
-            unsupportedBridge "definition telescope" $ prettyShow name
+          resultType <- case consumeDefinitionType domains wireType of
+            Just result -> pure result
+            Nothing -> unsupportedBridge "definition telescope" $
+              prettyShow name ++ ": " ++ show domains ++ " not a prefix of " ++
+              show wireType
           (wireBody, nestedDefinitions) <- bridgeTerm active
             (reverse domains) resultType body
           let wireBodyWithBinders = foldr Wire.Lam wireBody domains
@@ -459,12 +578,12 @@ bridgeDefinition active name = do
       Internal.VarP{} -> True
       _ -> False
 
-splitPiType :: Wire.Ty -> ([Wire.Ty], Wire.Ty)
-splitPiType ty = case ty of
-  Wire.TyPi domain codomain ->
-    let (domains, result) = splitPiType codomain
-    in (domain : domains, result)
-  _ -> ([], ty)
+consumeDefinitionType :: [Wire.Ty] -> Wire.Ty -> Maybe Wire.Ty
+consumeDefinitionType domains ty = case (domains, ty) of
+  ([], result) -> Just result
+  (domain : rest, Wire.TyPi actual codomain)
+    | domain == actual -> consumeDefinitionType rest codomain
+  _ -> Nothing
 
 bridgeTransp
   :: [QName]
@@ -487,6 +606,267 @@ bridgeTransp active context expected eliminations =
         , definitions
         )
     _ -> unsupportedBridge "transp eliminations" $ prettyShow eliminations
+
+bridgeLibraryTransport
+  :: [QName]
+  -> [Wire.Ty]
+  -> Wire.Ty
+  -> Internal.Elims
+  -> TCM (Wire.Term, [Wire.Definition])
+bridgeLibraryTransport active context expected eliminations =
+  case mapM applyArgument eliminations of
+    Just [_level, source, target, pathTerm, base] -> case pathTerm of
+      Internal.Lam{} -> do
+        family <- bridgeTypeFamily pathTerm
+        (sourceTy, targetTy) <- wireFamilyEndpoints family
+        unless (targetTy == expected) $
+          unsupportedBridge "library transport target" $
+            show targetTy ++ " /= " ++ show expected
+        (wireBase, definitions) <- bridgeTerm active context sourceTy base
+        pure (Wire.Transp (Wire.TypePath family) wireBase, definitions)
+      _ -> do
+        sourceTy <- bridgeTypeTerm source
+        targetTy <- bridgeTypeTerm target
+        unless (targetTy == expected) $
+          unsupportedBridge "library transport target" $
+            show targetTy ++ " /= " ++ show expected
+        let pathTy = Wire.TyPath Wire.TyUniverse
+              (Wire.Type sourceTy) (Wire.Type targetTy)
+        (wirePath, pathDefinitions) <- bridgeTerm active context pathTy pathTerm
+        (wireBase, baseDefinitions) <- bridgeTerm active context sourceTy base
+        pure
+          ( Wire.Transp wirePath wireBase
+          , pathDefinitions ++ baseDefinitions
+          )
+    _ -> unsupportedBridge "library transport eliminations" $ prettyShow eliminations
+
+bridgeLibrarySubst
+  :: [QName]
+  -> [Wire.Ty]
+  -> Wire.Ty
+  -> Internal.Elims
+  -> TCM (Wire.Term, [Wire.Definition])
+bridgeLibrarySubst active context expected eliminations =
+  case mapM applyArgument eliminations of
+    Just arguments
+      | base : _path : motive : _ <- reverse arguments -> do
+          validateSubstMotive motive expected
+          (wireBase, definitions) <- bridgeTerm active context expected base
+          pure
+            ( Wire.Transp
+                (Wire.TypePath (Wire.FamilyConst expected))
+                wireBase
+            , definitions
+            )
+    _ -> unsupportedBridge "library subst eliminations" $ prettyShow eliminations
+
+bridgePathComposition
+  :: [QName]
+  -> [Wire.Ty]
+  -> Wire.Ty
+  -> Internal.Elims
+  -> TCM (Wire.Term, [Wire.Definition])
+bridgePathComposition active context expected eliminations =
+  case (expected, mapM applyArgument eliminations) of
+    (Wire.TyPath pathTy left right, Just arguments)
+      | rightPath : leftPath : _target : middle : _source : _ <-
+          reverse arguments -> do
+          wireMiddle <- bridgeEndpointAt pathTy middle
+          (wireLeft, leftDefinitions) <- bridgeTerm active context
+            (Wire.TyPath pathTy left wireMiddle) leftPath
+          (wireRight, rightDefinitions) <- bridgeTerm active context
+            (Wire.TyPath pathTy wireMiddle right) rightPath
+          pure
+            ( Wire.Concat wireLeft wireRight
+            , leftDefinitions ++ rightDefinitions
+            )
+    _ -> unsupportedBridge "path composition eliminations" $ prettyShow eliminations
+
+bridgeUaTerm :: Wire.Ty -> Term -> TCM (Wire.Term, [Wire.Definition])
+bridgeUaTerm expected term = case expected of
+  Wire.TyPath Wire.TyUniverse (Wire.Type source) (Wire.Type target) -> do
+    family <- bridgeUniversePath term
+    endpoints <- wireFamilyEndpoints family
+    unless (endpoints == (source, target)) $
+      unsupportedBridge "ua term endpoints" $ show (endpoints, (source, target))
+    pure (Wire.TypePath family, [])
+  _ -> unsupportedBridge "ua term type" $ show expected
+
+bridgeWindingTerm
+  :: Wire.Ty
+  -> Internal.Elims
+  -> TCM (Wire.Term, [Wire.Definition])
+bridgeWindingTerm expected eliminations
+  | null eliminations
+  , pathTy <- Wire.TyPath Wire.TyS1 Wire.S1Base Wire.S1Base
+  , expected == Wire.TyPi pathTy Wire.TyInt =
+      pure (Wire.Lam pathTy (Wire.Winding (Wire.Var 0)), [])
+  | otherwise = unsupportedBridge "winding use" $
+      show expected ++ " / " ++ prettyShow eliminations
+
+bridgeEndpointAt :: Wire.Ty -> Term -> TCM Wire.Term
+bridgeEndpointAt pathTy term = case pathTy of
+  Wire.TyUniverse -> Wire.Type <$> bridgeTypeTerm term
+  Wire.TyS1
+    | isS1BaseTerm term -> pure Wire.S1Base
+  _ -> unsupportedBridge "path endpoint" $ prettyShow term
+
+isS1BaseTerm :: Term -> Bool
+isS1BaseTerm term = case term of
+  Internal.Con constructor _ [] ->
+    prettyShow (Internal.conName constructor) ==
+      "Cubical.HITs.S1.Base.S¹.base"
+  Internal.Def name [] ->
+    prettyShow name == "Cubical.HITs.S1.Base.S¹.base"
+  _ -> False
+
+validateSubstMotive :: Term -> Wire.Ty -> TCM ()
+validateSubstMotive motive expected = case (motive, expected) of
+  (Internal.Def name eliminations, Wire.TyVec expectedElement _)
+    | prettyShow name == "Cubical.Data.Vec.Base.Vec"
+    , Just [_level, element] <- mapM applyArgument eliminations -> do
+        actualElement <- bridgeTypeTerm element
+        unless (actualElement == expectedElement) $
+          unsupportedBridge "subst Vec element" $
+            show (actualElement, expectedElement)
+  _ -> unsupportedBridge "subst motive" $ prettyShow motive
+
+bridgeTypeFamily :: Term -> TCM Wire.Family
+bridgeTypeFamily term = case term of
+  Internal.Lam _ abstraction -> bridgeTypeFamilyBody $ Internal.unAbs abstraction
+  _ -> unsupportedBridge "type family" $ prettyShow term
+
+bridgeTypeFamilyBody :: Term -> TCM Wire.Family
+bridgeTypeFamilyBody term = case term of
+  Internal.Pi domain codomain ->
+    Wire.FamilyPi
+      <$> bridgeTypeLine (Internal.unEl $ Internal.unDom domain)
+      <*> bridgeTypeLine (Internal.unEl $ Internal.unAbs codomain)
+  Internal.Def name eliminations
+    | prettyShow name == "Cubical.Data.Vec.Base.Vec"
+    , Just [_level, element, size] <- mapM applyArgument eliminations ->
+        Wire.FamilyVec <$> bridgeTypeLine element <*> bridgeNatural size
+    | prettyShow name == "Agda.Builtin.Sigma.Σ"
+    , Just arguments <- mapM applyArgument eliminations
+    , codomain : domain : _ <- reverse arguments ->
+        Wire.FamilySigma
+          <$> bridgeTypeLine domain
+          <*> bridgeConstantTypeFamilyLine codomain
+    | prettyShow name == "Cubical.Data.Sigma.Base._×_"
+    , Just arguments <- mapM applyArgument eliminations
+    , second : first : _ <- reverse arguments ->
+        Wire.FamilySigma <$> bridgeTypeLine first <*> bridgeTypeLine second
+  _ -> Wire.FamilyConst <$> bridgeTypeTerm term
+
+bridgeConstantTypeFamilyLine :: Term -> TCM Wire.Family
+bridgeConstantTypeFamilyLine term = case term of
+  Internal.Lam _ abstraction -> bridgeTypeLine $ Internal.unAbs abstraction
+  _ -> unsupportedBridge "constant family abstraction" $ prettyShow term
+
+bridgeTypeLine :: Term -> TCM Wire.Family
+bridgeTypeLine term = case term of
+  Internal.Def name [_intervalApplication] -> do
+    definition <- getConstInfo name
+    case theDef definition of
+      Function {funClauses = [clause]}
+        | Just body <- Internal.clauseBody clause ->
+            bridgeUniversePath body
+      _ -> unsupportedBridge "type-line definition" $ prettyShow name
+  _ -> Wire.FamilyConst <$> bridgeTypeTerm term
+
+bridgeUniversePath :: Term -> TCM Wire.Family
+bridgeUniversePath term = case term of
+  Internal.Def name eliminations
+    | prettyShow name == "Cubical.Foundations.Univalence.ua"
+    , Just [_level, source, target, equivalence] <- mapM applyArgument eliminations -> do
+        sourceTy <- bridgeTypeTerm source
+        targetTy <- bridgeTypeTerm target
+        wireEquivalence <- bridgeEquivalence equivalence
+        unless (wireEquivalenceEndpoints wireEquivalence == (sourceTy, targetTy)) $
+          unsupportedBridge "univalence equivalence endpoints" $
+            show (wireEquivalenceEndpoints wireEquivalence, (sourceTy, targetTy))
+        pure (Wire.FamilyGlue wireEquivalence)
+  Internal.Def name [] -> do
+    definition <- getConstInfo name
+    case theDef definition of
+      Function {funClauses = [clause]}
+        | Just body <- Internal.clauseBody clause -> bridgeUniversePath body
+      _ -> unsupportedBridge "universe-path definition" $ prettyShow name
+  _ -> unsupportedBridge "universe path" $ prettyShow term
+
+bridgeEquivalence :: Term -> TCM Wire.Equiv
+bridgeEquivalence term = case term of
+  Internal.Def name eliminations
+    | prettyShow name == "Cubical.Foundations.Isomorphism.isoToEquiv"
+    , Just arguments <- mapM applyArgument eliminations
+    , isoTerm : _ <- reverse arguments -> bridgeIsoTerm isoTerm
+  Internal.Def name [] -> do
+    definition <- getConstInfo name
+    case theDef definition of
+      Function {funClauses = [clause]}
+        | Just body <- Internal.clauseBody clause ->
+            bridgeEquivalence body
+      _ -> unsupportedBridge "equivalence definition" $ prettyShow name
+  _ -> unsupportedBridge "equivalence" $ prettyShow term
+
+bridgeIsoTerm :: Term -> TCM Wire.Equiv
+bridgeIsoTerm term = case term of
+  Internal.Con constructor _ eliminations
+    | prettyShow (Internal.conName constructor) ==
+        "Cubical.Foundations.Isomorphism.iso"
+    , Just arguments <- mapM applyArgument eliminations
+    , _proof2 : _proof1 : backward : forward : _ <- reverse arguments ->
+        bridgeIsoEquivalence forward backward
+  _ -> unsupportedBridge "iso term" $ prettyShow term
+
+bridgeIsoEquivalence :: Term -> Term -> TCM Wire.Equiv
+bridgeIsoEquivalence forward backward
+  | prettyShow forward == "Cubical.Data.Bool.Base.not"
+  , prettyShow backward == "Cubical.Data.Bool.Base.not" =
+      pure Wire.EquivBoolNot
+  | prettyShow forward == "Cubical.Data.Int.Base.sucℤ"
+  , prettyShow backward == "Cubical.Data.Int.Base.predℤ" =
+      pure Wire.EquivIntSucc
+  | otherwise = unsupportedBridge "iso equivalence functions" $
+      prettyShow forward ++ " / " ++ prettyShow backward
+
+wireFamilyEndpoints :: Wire.Family -> TCM (Wire.Ty, Wire.Ty)
+wireFamilyEndpoints family = case family of
+  Wire.FamilyConst ty -> pure (ty, ty)
+  Wire.FamilyGlue equivalence -> pure $ wireEquivalenceEndpoints equivalence
+  Wire.FamilyVec element size -> do
+    (source, target) <- wireFamilyEndpoints element
+    pure (Wire.TyVec source size, Wire.TyVec target size)
+  Wire.FamilyPi domain codomain -> do
+    (domainSource, domainTarget) <- wireFamilyEndpoints domain
+    (codomainSource, codomainTarget) <- wireFamilyEndpoints codomain
+    pure
+      ( Wire.TyPi domainSource codomainSource
+      , Wire.TyPi domainTarget codomainTarget
+      )
+  Wire.FamilySigma first second -> do
+    (firstSource, firstTarget) <- wireFamilyEndpoints first
+    (secondSource, secondTarget) <- wireFamilyEndpoints second
+    pure
+      ( Wire.TySigma firstSource secondSource
+      , Wire.TySigma firstTarget secondTarget
+      )
+  Wire.FamilyCompose first second -> do
+    (source, middle) <- wireFamilyEndpoints first
+    (middle', target) <- wireFamilyEndpoints second
+    unless (middle == middle') $
+      unsupportedBridge "composed family endpoints" $ show (middle, middle')
+    pure (source, target)
+
+wireEquivalenceEndpoints :: Wire.Equiv -> (Wire.Ty, Wire.Ty)
+wireEquivalenceEndpoints equivalence = case equivalence of
+  Wire.EquivIdentity ty -> (ty, ty)
+  Wire.EquivBoolNot -> (Wire.TyBool, Wire.TyBool)
+  Wire.EquivIntSucc -> (Wire.TyInt, Wire.TyInt)
+  Wire.EquivCompose first second ->
+    (fst (wireEquivalenceEndpoints first), snd (wireEquivalenceEndpoints second))
+  Wire.EquivInverse inner ->
+    let (source, target) = wireEquivalenceEndpoints inner in (target, source)
 
 bridgeHComp
   :: [QName]
@@ -533,15 +913,33 @@ bridgeConstantTypeFamily family = case family of
 
 bridgeTypeTerm :: Term -> TCM Wire.Ty
 bridgeTypeTerm term = case term of
-  Internal.Def name [] -> do
+  Internal.Def name eliminations -> do
     isBool <- isBuiltinName name Builtin.builtinBool
     isNat <- isBuiltinName name Builtin.builtinNat
     case () of
-      _ | isBool -> pure Wire.TyBool
-        | isNat -> pure Wire.TyNat
+      _ | isBool && null eliminations -> pure Wire.TyBool
+        | isNat && null eliminations -> pure Wire.TyNat
+        | prettyShow name == "Cubical.Data.Int.Base.ℤ"
+        , null eliminations -> pure Wire.TyInt
+        | prettyShow name == "Cubical.HITs.S1.Base.S¹"
+        , null eliminations -> pure Wire.TyS1
+        | prettyShow name == "Agda.Builtin.Sigma.Σ" ->
+            bridgeSigmaType eliminations
+        | prettyShow name == "Cubical.Data.Sigma.Base._×_" ->
+            bridgeProductType eliminations
+        | prettyShow name == "Cubical.Data.Vec.Base.Vec"
+        , Just [_level, element, size] <- mapM applyArgument eliminations ->
+            Wire.TyVec <$> bridgeTypeTerm element <*> bridgeNatural size
         | otherwise -> unsupportedBridge "type term" $ prettyShow name
   Internal.Sort{} -> pure Wire.TyUniverse
   _ -> unsupportedBridge "type term" $ prettyShow term
+
+bridgeNatural :: Term -> TCM Int
+bridgeNatural term = case term of
+  Internal.Lit (LitNat natural)
+    | natural >= 0
+    , natural <= fromIntegral (maxBound :: Int) -> pure (fromIntegral natural)
+  _ -> unsupportedBridge "natural index" $ prettyShow term
 
 bridgeFace :: Term -> TCM Wire.Face
 bridgeFace face = case face of

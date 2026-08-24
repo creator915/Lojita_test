@@ -5,9 +5,10 @@ key: cubical-runtime-nbe-0.1.0
 exposed: True
 exposed-modules:
     Cubical.Runtime.Nbe
+    Cubical.Runtime.Nbe.Cctt
     Cubical.Runtime.Nbe.Wire
     Cubical.Runtime.Nbe.Embedded
-depends: @RUNTIME_NBE_BASE_ID@
+depends: @RUNTIME_NBE_BASE_ID@, @RUNTIME_NBE_CCTT_PACKAGE_ID@
 import-dirs: @RUNTIME_NBE_LIB_DIR@
 library-dirs: @RUNTIME_NBE_LIBRARY_DIR@
 hs-libraries: HS@RUNTIME_NBE_PACKAGE_ID@

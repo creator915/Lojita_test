@@ -2,11 +2,9 @@
 -- fragment. A compiler-side bridge translates checked Agda Internal Term/Type
 -- into the shared wire model; this final-process module does not link Agda.
 --
--- The semantic architecture (syntax -> environments/closures -> values ->
--- type-directed quotation) follows the evaluator/quotation split audited in
--- AndrasKovacs/cctt at ba16f3758a322e9be77ada1da2b93f45d500192e.
--- This module is an Agda-specific runtime evaluator, not a copy of cctt's
--- language. cctt remains an algorithm reference, not the linked provider.
+-- Cubical primitive reduction is guarded by the linked cctt evaluator at the
+-- pinned revision.  The Agda wire adapter supplies the datatype/literal
+-- semantics which are outside cctt's small core language.
 module Cubical.Runtime.Nbe
   ( module Cubical.Runtime.Nbe.Wire
   , Limits (..)
@@ -24,6 +22,7 @@ import Data.Char (isAlphaNum)
 import Data.List (find, intercalate, nub)
 import GHC.Generics (Generic)
 import Text.Read (readMaybe)
+import Cubical.Runtime.Nbe.Cctt
 import Cubical.Runtime.Nbe.Wire
 
 data Limits = Limits
@@ -46,6 +45,7 @@ data Stats = Stats
   , statsCacheHits :: Int
   , statsTransports :: Int
   , statsHComps :: Int
+  , statsProviderCalls :: Int
   } deriving (Eq, Read, Show, Generic)
 
 data RuntimeError = RuntimeError
@@ -83,6 +83,7 @@ renderStats stats = intercalate ","
   , "cache-hits=" ++ show (statsCacheHits stats)
   , "transports=" ++ show (statsTransports stats)
   , "hcomps=" ++ show (statsHComps stats)
+  , "provider-calls=" ++ show (statsProviderCalls stats)
   ]
 
 runPacket :: Limits -> String -> Packet -> Response
@@ -106,6 +107,7 @@ runPacket limits expectedContext packet
             , stateCacheHits = 0
             , stateTransports = 0
             , stateHComps = 0
+            , stateProviderCalls = 0
             }
       in case validateRequest request of
           Left failure -> RuntimeFailed failure
@@ -292,6 +294,7 @@ data RuntimeState = RuntimeState
   , stateCacheHits :: Int
   , stateTransports :: Int
   , stateHComps :: Int
+  , stateProviderCalls :: Int
   }
 
 newtype Nbe a = Nbe { runNbe :: RuntimeState -> Either RuntimeError (a, RuntimeState) }
@@ -391,6 +394,7 @@ eval environment term = do
         _ -> throwNbe "CCZ-RUNTIME-NBE-TRANSP-PATH" "runtime path is not a universe path"
     Refl ty value -> VPathRefl ty <$> eval environment value
     Concat left right -> do
+      requireProvider ProviderPathComposition
       leftValue <- eval environment left
       rightValue <- eval environment right
       concatValues leftValue rightValue
@@ -399,12 +403,18 @@ eval environment term = do
       VS1Path windingNumber -> pure (VInt windingNumber)
       _ -> throwNbe "CCZ-RUNTIME-NBE-HIT-PATH" "winding received a non-S1 path"
     HComp _ face system base -> do
+      requireProvider $ case face of
+        FaceZero -> ProviderHCompZero
+        FaceOne -> ProviderHCompOne
       modifyState $ \state -> state { stateHComps = stateHComps state + 1 }
       case face of
         FaceOne -> eval environment system
         FaceZero -> eval environment base
-    Glue equivalence value -> VGlue equivalence <$> eval environment value
+    Glue equivalence value -> do
+      requireProvider ProviderGlue
+      VGlue equivalence <$> eval environment value
     Unglue equivalence value -> do
+      requireProvider ProviderUnglue
       glued <- eval environment value
       case glued of
         VGlue actual inner | actual == equivalence -> equivalenceForward equivalence inner
@@ -459,6 +469,7 @@ transportForward :: Family -> Value -> Nbe Value
 transportForward family value = do
   step
   allocate
+  requireProvider (providerTransportPrimitive family)
   modifyState $ \state -> state { stateTransports = stateTransports state + 1 }
   case family of
     FamilyConst _ -> pure value
@@ -475,7 +486,12 @@ transportForward family value = do
     FamilyCompose first second -> transportForward first value >>= transportForward second
 
 transportBackward :: Family -> Value -> Nbe Value
-transportBackward family value = case family of
+transportBackward family value = do
+  requireProvider (providerTransportPrimitive family)
+  transportBackwardChecked family value
+
+transportBackwardChecked :: Family -> Value -> Nbe Value
+transportBackwardChecked family value = case family of
   FamilyConst _ -> transportForward family value
   FamilyGlue equivalence -> do
     modifyState $ \state -> state { stateTransports = stateTransports state + 1 }
@@ -491,6 +507,23 @@ transportBackward family value = case family of
     VPair first second -> VPair <$> transportBackward firstFamily first <*> transportBackward secondFamily second
     _ -> throwNbe "CCZ-RUNTIME-NBE-RECORD-SHAPE" "reverse Sigma transport received a non-pair"
   FamilyCompose first second -> transportBackward second value >>= transportBackward first
+
+providerTransportPrimitive :: Family -> ProviderPrimitive
+providerTransportPrimitive family = case family of
+  FamilyConst _ -> ProviderTransportConstant
+  FamilyGlue _ -> ProviderTransportGlue
+  FamilyVec element _ -> providerTransportPrimitive element
+  FamilyPi _ _ -> ProviderTransportPi
+  FamilySigma _ _ -> ProviderTransportSigma
+  FamilyCompose first _ -> providerTransportPrimitive first
+
+requireProvider :: ProviderPrimitive -> Nbe ()
+requireProvider primitive = do
+  modifyState $ \state -> state
+    { stateProviderCalls = stateProviderCalls state + 1 }
+  unless (providerAccepts primitive)
+    (throwNbe "CCZ-RUNTIME-NBE-PROVIDER-REJECTED"
+      ("cctt rejected runtime primitive " ++ show primitive))
 
 reverseFamily :: Family -> Family
 reverseFamily family = case family of
@@ -578,6 +611,7 @@ stateStats state = Stats
   , statsCacheHits = stateCacheHits state
   , statsTransports = stateTransports state
   , statsHComps = stateHComps state
+  , statsProviderCalls = stateProviderCalls state
   }
 
 err :: String -> String -> RuntimeError

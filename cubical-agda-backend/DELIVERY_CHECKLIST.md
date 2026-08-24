@@ -1,8 +1,8 @@
 # 交付验收清单
 
 > 范围基准：[`GOALS.md`](GOALS.md) 定义的三路架构。
-> 当前结论：目标 1 **已实现并通过 clean-clone 验收**；目标 2 **已有实现，待 clean-clone 验收**；目标 3 **部分实现，尚未完成**。
-> 新范围统计：38/56 项已完成（67.9%）；目标 1 为 9/9，目标 2 为 8/9，目标 3 为 8/11。
+> 当前结论：目标 1 **已实现并通过 clean-clone 验收**；目标 2 **已有实现，待 clean-clone 验收**；目标 3 **已实现并通过专项验收**。
+> 新范围统计：41/56 项已完成（73.2%）；目标 1 为 9/9，目标 2 为 8/9，目标 3 为 11/11。
 > 旧的 `224/321` 统计针对 Chez/编译期 NbE 旧范围，不再代表当前三路目标的完成度。
 
 ## 勾选规则
@@ -59,21 +59,21 @@
 
 ## E. 目标 3：最终程序进程内 runtime NbE
 
-**本节仍未完成。真实 Agda Internal 桥、运行时 ABI、最终 MAlonzo 链接和基础
-`transp`/`hcomp` 差分已落地，但 cctt 尚未作为 provider 接入，且
-`t11/t11b/t16`、Glue/record/HIT 的真实 Agda 片段尚未通过。**
+**本节已完成。锁定的 cctt Core 已作为静态 provider 接入；真实 Agda
+Internal 桥覆盖验收所需的 `transp`/`hcomp`/Glue/Pi/Sigma(record)/S¹
+片段，并由同一 checked definition 驱动 runtime 与 Agda oracle。**
 
 - [x] **P0** 固定“进程内”指最终用户程序进程，并固定运行时数据边界。
-- [ ] **P0** 选定可作为 runtime library 的成熟 NbE 源码、revision 和许可证。
+- [x] **P0** 选定可作为 runtime library 的成熟 NbE 源码、revision 和许可证。
 - [x] **P0** 定义 runtime NbE ABI，包括输入 Term/Type、上下文和结果/错误。
 - [x] **P0** 将 runtime NbE 库链接进最终程序产物。
 - [x] **P1** 实现运行时 `Term + Type -> semantic domain` reflect。
 - [x] **P1** 实现运行时 environment/closure 语义和必要的 definition lookup。
-- [ ] **P1** 实现验收片段需要的 `transp` / `hcomp` / Glue / Pi / record / HIT 语义。
+- [x] **P1** 实现验收片段需要的 `transp` / `hcomp` / Glue / Pi / record / HIT 语义。
 - [x] **P1** 实现类型导向 reify/readback 和结果重检。
 - [x] **P1** 实现 fuel、内存/包大小限额、缓存生命周期和 fail-closed 错误。
 - [x] **P1** 验收证明运行时不启动 Agda 子进程、不调用编译期 `normalise`。
-- [ ] **P1** 对 `t11/t11b/t16` 及新增进程内用例执行 Agda oracle 差分验收。
+- [x] **P1** 对 `t11/t11b/t16` 及新增进程内用例执行 Agda oracle 差分验收。
 
 ## F. 三路调度与端到端集成
 
@@ -97,7 +97,10 @@
 
 ## 验收结论
 
-当前只能认定目标 1 完成。目标 3 为 8/11：真实 Agda `Term + Type` 的受限桥、
-definition slice、进程内静态链接、语义域/readback、安全限额以及 Stock
-Agda/MAlonzo/GHC 最终程序证据已完成。成熟 provider 接入、完整验收语义片段和
-`t11/t11b/t16` 同输入差分仍开放，因此不得认定目标 3 完成。
+目标 1 与目标 3 可以分别认定完成。目标 3 为 11/11：cctt revision、MIT
+许可证和十个 vendored Core 模块由内容哈希锁定，`Core.eval` 与
+`Quotation.quoteUnfold` 链接进最终 ELF；真实 Agda `Term + Type` 桥覆盖验收
+片段；`t11/t11b/t09/t16a/t16b/t16c` 从同一 checked definition 进入 runtime
+和 Agda oracle。`t09/t16a/t16b/t16c` 精确匹配，`t11/t11b` 如实重现 Agda
+自身的 `transpX-Vec` residual boundary，同时 runtime 结果和 provider 调用均
+受测试约束。目标 2、三路自动调度和总体发布门禁仍开放，项目整体尚未完整交付。

@@ -25,14 +25,14 @@ Last updated: 2026-08-23 (Asia/Shanghai)
 ```
 
 This document describes the implemented compiler/backend slice. Goal 1 has an
-independent locked stock Agda/MAlonzo/GHC lane. Goal 3 is partially implemented:
-the compiler-side bridge translates a fail-closed subset of checked Internal
-`Term + Type` plus definitions into the shared wire model, and a registered
-static Haskell package is linked into an Agda/MAlonzo-generated final program.
-That path covers ordinary closures and canonical constant-family `PrimTrans` /
-ground-face `PrimHComp`; it does not yet link cctt or cover the full acceptance
-fragment. The existing compiler-process adapter is not Goal 3 evidence. Static
-Chez publication is not used as Goal 1 evidence.
+independent locked stock Agda/MAlonzo/GHC lane. Goal 3 is implemented for its
+declared acceptance fragment: the compiler-side bridge translates a fail-closed
+subset of checked Internal `Term + Type` plus definitions into the shared wire
+model, and a registered static Haskell package containing the vendored cctt
+Core is linked into an Agda/MAlonzo-generated final program. That path covers
+the required transport/hcomp/Glue/Pi/Sigma/Vec/S¹ cases and same-input oracle
+gate. The existing compiler-process adapter is not Goal 3 evidence. Static Chez
+publication is not used as Goal 1 evidence.
 
 The dependency direction is one-way: `src` depends on Agda APIs but never on
 tests, compatibility patches, generated evidence, or documentation.  Test
@@ -91,7 +91,7 @@ compiler-process diagram. Its normative process and data boundary is
 definition slice and context identity may enter that linked runtime. Semantic
 closures and `TCState` never cross; an Agda subprocess or compiler callback is
 forbidden. `docs/RUNTIME_NBE_ABI.md` records the implemented narrow-waist ABI
-and its remaining semantic/provider limits.
+and its explicit fail-closed semantic limits.
 
 ```text
 Agda elaboration and type checking
@@ -320,8 +320,10 @@ forces dynamic whole-entry residual handling, retains effective engine `nbe`,
 and does not invoke the baseline normalizer.
 Unavailable, timeout, failed, and invalid-readback outcomes remain fail-closed.
 See `ENGINE_CONTRACT.md`.
-The inspected `AndrasKovacs/cctt` candidate is not a drop-in Agda library; see
-`NBE_SELECTION.md` for the semantic and packaging gap.
+The upstream `AndrasKovacs/cctt` executable is not a drop-in Agda library. Goal
+3 therefore vendors its unmodified Core modules behind a repository-owned
+Cabal library and an explicit Agda-wire semantic adapter; see
+`NBE_SELECTION.md` for the separation from the compiler-process candidate.
 
 The boundary does not trust either implementation's read-back. Before
 Treeless conversion, `validateEngineResult` requires the returned term/type

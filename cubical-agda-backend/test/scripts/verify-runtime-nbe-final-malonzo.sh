@@ -9,6 +9,8 @@ bridge=${RUNTIME_NBE_AGDA_BRIDGE:?set RUNTIME_NBE_AGDA_BRIDGE}
 runtime=${RUNTIME_NBE_BINARY:?set RUNTIME_NBE_BINARY}
 runtime_library=${RUNTIME_NBE_LIBRARY:?set RUNTIME_NBE_LIBRARY}
 package_db=${RUNTIME_NBE_PACKAGE_DB:?set RUNTIME_NBE_PACKAGE_DB}
+cctt_package_db=${RUNTIME_NBE_CCTT_PACKAGE_DB:?set RUNTIME_NBE_CCTT_PACKAGE_DB}
+dependency_package_db=${RUNTIME_NBE_DEPENDENCY_PACKAGE_DB:-}
 stock_agda=${RUNTIME_NBE_STOCK_AGDA:?set RUNTIME_NBE_STOCK_AGDA}
 ghc=${RUNTIME_NBE_GHC:?set RUNTIME_NBE_GHC}
 agda_datadir=${RUNTIME_NBE_AGDA_DATADIR:?set RUNTIME_NBE_AGDA_DATADIR}
@@ -36,6 +38,7 @@ for file in "$bridge" "$runtime" "$runtime_library" "$stock_agda" \
   [ -s "$file" ] || fail "missing input: $file"
 done
 [ -d "$package_db" ] || fail "missing runtime package DB: $package_db"
+[ -d "$cctt_package_db" ] || fail "missing cctt package DB: $cctt_package_db"
 [ -x "$bridge" ] || fail "Agda Internal bridge is not executable"
 [ -x "$stock_agda" ] || fail "Stock Agda is not executable"
 [ -x "$ghc_path" ] || fail "GHC command is not executable: $ghc_path"
@@ -92,7 +95,11 @@ printf 'cubical-unsupported-face\tfail-closed-no-packet\tPASS\n' >> "$summary"
 
 set -- --ghc-flag=-hide-all-packages --ghc-flag=-package=base \
   --ghc-flag=-package=text --ghc-flag=-package-db \
-  "--ghc-flag=$package_db" --ghc-flag=-package=cubical-runtime-nbe
+  "--ghc-flag=$package_db" --ghc-flag=-package-db \
+  "--ghc-flag=$cctt_package_db" --ghc-flag=-package=cubical-runtime-nbe
+if [ -n "$dependency_package_db" ]; then
+  set -- "$@" --ghc-flag=-package-db "--ghc-flag=$dependency_package_db"
+fi
 for flag in $ldflags; do
   set -- "$@" "--ghc-flag=$flag"
 done
@@ -116,8 +123,12 @@ ar t "$runtime_library" | grep -Fxq 'Wire.o' ||
   fail "static runtime package lacks the shared wire implementation"
 nm -g "$final_binary" | grep -Fq 'CubicalziRuntimeziNbeziEmbedded_runEmbedded' ||
   fail "final executable lacks the in-process runtime entry-point symbol"
-strings "$final_binary" | grep -Fq 'cctt-informed-agda-runtime-v1@ba16f3758a322e9be77ada1da2b93f45d500192e' ||
+strings "$final_binary" | grep -Fq 'cctt-core-runtime-v1@ba16f3758a322e9be77ada1da2b93f45d500192e' ||
   fail "final executable lacks the locked provider marker"
+nm -g "$final_binary" | grep -Fq '_Core_eval_info' ||
+  fail "final executable lacks cctt Core.eval"
+nm -g "$final_binary" | grep -Fq '_Quotation_quoteUnfold_info' ||
+  fail "final executable lacks cctt quoteUnfold"
 if strings "$final_binary" | grep -Eq 'Agda\.TypeChecking|TCState|normalise|Agda\.Compiler'; then
   fail "final executable contains an Agda compiler identity"
 fi
@@ -150,6 +161,8 @@ for cubical_packet in "$transp_packet" "$hcomp_packet"; do
   cubical_expected=$(printf 'OK\tBoolLit True\tTyBool\t')
   grep -Fq "$cubical_expected" "$cubical_packet.final.out" ||
     fail "MAlonzo final program produced the wrong Cubical result"
+  grep -Eq 'provider-calls=[1-9][0-9]*' "$cubical_packet.final.out" ||
+    fail "MAlonzo final program did not call the linked cctt provider"
 done
 [ ! -s "$evidence_dir/noexec.log" ] ||
   fail "final Cubical evaluation attempted a subprocess"

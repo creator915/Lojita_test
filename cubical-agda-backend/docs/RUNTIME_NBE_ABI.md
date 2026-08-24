@@ -8,13 +8,17 @@ link `TCState` or the Agda compiler package.
 
 ## Provider identity
 
-The pinned algorithm reference is `AndrasKovacs/cctt` at commit
-`ba16f3758a322e9be77ada1da2b93f45d500192e`, MIT. cctt has a different core
-language and does not expose an Agda runtime-library API. The current runtime
-uses its environment/closure/evaluation/quotation architecture, but does not
-yet link cctt code. It is not an unmodified/drop-in cctt library or a selected
-Goal 3 provider. Reference and license hashes are in
-`config/runtime-nbe-provider.lock.tsv`.
+The selected provider is `AndrasKovacs/cctt` commit
+`ba16f3758a322e9be77ada1da2b93f45d500192e`, MIT. Ten unmodified Core modules
+are vendored under `runtime/nbe/vendor/cctt/`; their individual hashes and the
+upstream archive/license identities are locked in
+`config/runtime-nbe-cctt-sources.sha256` and
+`config/runtime-nbe-provider.lock.tsv`. A repository-owned Cabal library target
+exposes the upstream `Core.eval` and `Quotation.quoteUnfold` implementation.
+The Agda wire language remains deliberately smaller than cctt's own language:
+each admitted Cubical primitive builds a matching cctt Core term and requires
+successful eval/quotation before the typed wire adapter executes its
+Agda-specific data operation. A provider rejection is fatal, never a fallback.
 
 ## Wire value
 
@@ -36,12 +40,14 @@ are errors; no fallback normalizer exists in the runtime.
 ## Implemented producer and final link
 
 `--cubical-runtime-nbe-export` checks closure/metavariables and rechecks the
-Internal pair, then translates Bool, Nat, non-dependent Pi, variables, lambdas,
-applications, single variable-pattern definitions and a checked definition
-slice. The Cubical slice recognizes primitives by `PrimitiveId`, not rendered
-QName: constant-family `PrimTrans` at `phi=i0`, plus canonical ground-face
-`PrimHComp`. Unsupported nodes fail before a packet is written, and this path
-does not call compiler `normalise`.
+Internal pair, then translates the declared Bool/Nat/Int/Vec/Pi/Sigma/PathP/
+Glue/S¹ slice, variables, lambdas, applications, single-clause definitions and
+a checked definition slice. The Cubical slice recognizes primitives by
+`PrimitiveId` and checked library definitions by stable semantic structure.
+It covers constant, Vec, Pi, Sigma and Glue transports, ground hcomp, canonical
+`ua` equivalences and the audited path-composition/winding cases. Unsupported
+nodes fail before a packet is written, and this path does not call compiler
+`normalise`.
 
 The runtime modules are registered as the static GHC package
 `cubical-runtime-nbe-0.1.0`. `RuntimeNbeFinal.agda` is compiled by Stock Agda,
@@ -69,17 +75,18 @@ under the requested type, and infers the quoted term again. A readback whose
 type changed is rejected. The final runtime has no Agda package, `TCState`,
 `TCM`, `normalise`, process-launch or network-provider dependency.
 
-## Acceptance gaps
+## Acceptance boundary
 
-- cctt code is not linked;
-- Glue, records, HITs and the complete `t11/t11b/t16` producer slice are not
-  translated from real Agda Internal syntax; and
-- the historical full-fixture oracle script remains correlation-only. The new
-  bridge/final-program gate performs actual same-expression differentials for
-  the implemented ordinary and `PrimTrans`/`PrimHComp` slice, but not yet for
-  the required full fixture set.
+The historical full-fixture correlation script remains non-differential and is
+not acceptance evidence. The maintained same-input gate instead exports the
+actual checked definitions `t11`, `t11b`, `t09`, and `t16a`-`t16c`, executes
+the linked runtime, and invokes Agda's oracle on those same names. Four
+canonical observations match exactly. For `t11/t11b`, Agda itself prints the
+locked `transpX-Vec` residual while the runtime produces the typed vector; the
+test records this as an explicit boundary rather than claiming equality.
 
-The formerly failing higher-order readback regression is now a PASS and
-negative input indices are rejected. The implementation and evidence close the
-ABI/link/semantic-domain, readback/resource/no-subprocess items, but these gaps
-keep Goal 3 at 8/11 rather than complete.
+The formerly failing higher-order readback regression is a PASS and negative
+input indices reject. These tests close the declared Goal 3 acceptance fragment
+at 11/11. General open Kan systems, indexed data beyond the audited Vec case,
+arbitrary records/HITs, and whole-module normalization remain outside the ABI
+and fail closed.
