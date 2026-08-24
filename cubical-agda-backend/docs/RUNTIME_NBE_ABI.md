@@ -93,8 +93,9 @@ byte-for-byte equality. A missing proof or residual oracle is a failure, not an
 accepted boundary.
 
 The formerly failing higher-order readback regression is a PASS and negative
-input indices reject. The replacement differential awaits locked-CI evidence;
-the declared Goal 3 fragment therefore remains 10/11 and unaccepted. General
+input indices reject. The replacement differential has 6/6 locked-CI evidence;
+the declared Goal 3 fragment therefore has 11/11 technical evidence but remains
+unaccepted pending independent review. General
 open Kan systems, indexed data beyond the audited Vec case,
 arbitrary records/HITs, and whole-module normalization remain outside the ABI
 and fail closed.

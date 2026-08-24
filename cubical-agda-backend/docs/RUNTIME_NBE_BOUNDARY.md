@@ -3,8 +3,8 @@
 This document fixes the required process and data boundary for goal 3. The
 boundary definition is complete. The checked narrow-waist/final-MAlonzo path
 implements it for the declared Goal 3 fragment. The replacement exact
-differential is still awaiting locked-CI evidence and independent acceptance;
-broader semantics remain fail closed.
+differential has locked-CI evidence; independent acceptance is still pending,
+and broader semantics remain fail closed.
 
 ## Process identity
 

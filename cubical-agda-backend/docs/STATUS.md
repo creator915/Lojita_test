@@ -1,6 +1,6 @@
 # Project status
 
-Last updated: 2026-08-23 (Asia/Shanghai)
+Last updated: 2026-08-24 (Asia/Shanghai)
 
 ## Executive status
 
@@ -12,8 +12,8 @@ Chez/compiler-process-NbE scope and is retired.
 | --- | ---: | --- |
 | 1. stock Agda -> MAlonzo -> erased Haskell -> native binary | 9/9 | IMPLEMENTED; VERIFIED |
 | 2. cross-process checked `Term + Type` | 8/9 | IMPLEMENTED; clean-clone gate open |
-| 3. linked NbE inside the final program process | 10/11 | IMPLEMENTED; replacement differential awaiting locked CI |
-| Complete revised checklist | 40/56 | 71.4% by item count; not effort-weighted |
+| 3. linked NbE inside the final program process | 11/11 | TECHNICAL EVIDENCE COMPLETE; independent acceptance pending |
+| Complete revised checklist | 41/56 | 73.2% by item count; not effort-weighted |
 
 ## What is usable now
 
@@ -22,8 +22,10 @@ Chez/compiler-process-NbE scope and is retired.
 - Typed residual and packet production retain checked `Term + Type`.
 - The v2 packet consumer source and tests are maintained under
   `runtime/agda-2.9/`.
-- The complete root-layout local `make verify` contract is not green in the current workspace:
-  the uploaded tree omits the 3,219-file historical benchmark evidence archive.
+- The complete root-layout local `make verify` contract is not green in the
+  current workspace: after runtime 27/27 and the status gate pass, the README
+  gate cannot start the old dynamically linked `build/cubical-chez` because
+  its pruned Agda Cabal store no longer contains `libHSzstd...so`.
 - The isolated compiler-process NbE candidate passed the recorded 8-group,
   42-row differential matrix and controlled O2 provisional performance gate.
 - Default production `nbe` remains fail closed because the provider lock is
@@ -34,7 +36,8 @@ Chez/compiler-process-NbE scope and is retired.
 - `runtime/nbe/` builds a compiler-independent runtime package. A real Agda
   Internal producer emits typed requests and definitions, and Stock
   Agda/MAlonzo/GHC links the evaluator plus pinned cctt Core into the final
-  user program. The replacement exact differential is pending locked-CI evidence.
+  user program. The replacement exact differential has locked-CI evidence;
+  independent acceptance remains pending.
 
 ## What is not yet delivered
 
@@ -63,7 +66,8 @@ their indexed transports as `transpX-Vec`, checked equivalence-induction and
 set proofs connect each root to a canonical oracle computed from the same
 input. The harness compares those exact Bool-pair strings with a structural
 rendering of the runtime result. An unproved or residual oracle is a failure.
-This gate is awaiting locked-CI evidence, so Goal 3 remains 10/11 and is not
+PR run `32701822346` and push run `32701816817` both record all six exact
+matches. Goal 3 therefore has 11/11 technical evidence but is not independently
 accepted. The `goal3-runtime-nbe` workflow executes provider, runtime,
 real-Internal, differential and final-MAlonzo gates.
 
@@ -80,7 +84,8 @@ Generated files live under `build/` and are not build inputs.
 
 The current and retained candidate evidence is:
 
-- root-layout local `make verify`: PASS on 2026-08-23;
+- historical root-layout local `make verify`: PASS on 2026-08-23 before the
+  associated dynamic package store was pruned;
 - goal 1 `make verify-native-lane`: PASS on 2026-08-23, including a separate
   clean clone from local commit `7578f56`;
 - runtime `make verify-runtime-nbe`: 27/27 PASS on 2026-08-23, including the
@@ -91,16 +96,16 @@ The current and retained candidate evidence is:
   definitions, same-expression Agda oracle checks and fail-closed patterns;
 - `make verify-runtime-nbe-final-malonzo`: 9/9 PASS for Stock MAlonzo/GHC,
   linked symbols, real `PrimTrans`/`PrimHComp`, oracle and no-exec evidence;
-- `make verify-runtime-nbe-differential`: replacement six-definition exact
-  observation gate implemented; locked-CI result pending;
+- `make verify-runtime-nbe-differential`: 6/6 exact observations PASS in PR
+  run `32701822346` and push run `32701816817`; t11/t11b are proof-linked;
 - prototype `make verify-runtime-nbe-oracle`: 2 Agda modules typecheck and 5
   hand-authored runtime expectations PASS; explicitly not differential evidence;
 - Agda 2.9: 155 positive executions and 146 expected rejections PASS;
 - formal candidate differential: 8/8 groups and 42/42 rows PASS;
 - controlled O2 provisional performance: `ENGINEERING-PERFORMANCE-PASS`.
 
-Goal 1 is closed. Goal 3 exact differential, Goal 2 clean-clone validation, three-lane
-dispatch/integration and overall release validation remain open.
+Goal 1 is closed. Goal 3 independent acceptance, Goal 2 clean-clone validation,
+three-lane dispatch/integration and overall release validation remain open.
 
 ## Reproduce the current root contract
 

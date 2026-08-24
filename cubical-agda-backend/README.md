@@ -9,10 +9,10 @@
 | --- | --- | --- |
 | 1. stock Agda -> MAlonzo -> Haskell -> GHC 二进制 | **已实现并验收** | 锁定 Stock Agda 2.9.0 / MAlonzo / GHC 9.10.3；独立二进制审计 |
 | 2. 跨进程 `Term + Type` packet | **已有实现** | 仍需 clean-clone overlay 构建验收 |
-| 3. 最终程序进程内 runtime NbE | **修复已实现，待真实差分 CI（10/11）** | cctt 已改为实际输入归一化；t11/t11b 不再接受 residual，等待锁定 CI 证据 |
+| 3. 最终程序进程内 runtime NbE | **技术证据完成（11/11），待独立验收** | cctt 对实际输入归一化；t11/t11b 使用证明关联的同输入精确差分 |
 
 当前可用的是候选 CubicalChez 后端、checked typed residual/packet、编译期
-NbE adapter 候选与完整的安全拒绝门禁。当前目标 1 已关闭，目标 3 待新差分证据；
+NbE adapter 候选与完整的安全拒绝门禁。当前目标 1 已关闭，目标 3 技术证据完成但未独立验收；
 三路调度和总体发布门禁未关闭前，不得将仓库标记为完整交付。
 
 ## 目标数据流
@@ -22,7 +22,7 @@ Agda source
    |
    +-- native-safe ------> stock Agda/MAlonzo -> erased Haskell -> binary   [IMPLEMENTED]
    +-- cross-process ----> checked Term + Type packet                       [IMPLEMENTED]
-   `-- runtime-higher ---> linked in-process runtime NbE      [IMPLEMENTED; VERIFYING: 10/11]
+   `-- runtime-higher ---> linked in-process runtime NbE      [IMPLEMENTED; EVIDENCE: 11/11]
 ```
 
 跨进程只传输 Agda Internal `Term + Type` 协议数据。NbE 语义值、closure 和

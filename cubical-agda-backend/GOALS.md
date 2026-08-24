@@ -44,7 +44,7 @@ interface identity。消费端必须重新检查闭性、metavariable、类型�
 
 ## 目标 3：最终程序进程内的 runtime NbE
 
-**状态：输入驱动修复已实现；10/11 已有本轮证据，真实同输入差分等待 CI。**
+**状态：11/11 技术证据已完成；独立验收与发布门禁仍待完成。**
 
 这里的“进程内”明确指最终用户程序的运行进程，不是 Agda
 编译器进程。必须把成熟 NbE 作为 runtime 组件链接到最终产物，在同一进程内
@@ -62,7 +62,7 @@ interface identity。消费端必须重新检查闭性、metavariable、类型�
 - 现有 compiler-process NbE candidate 不等于目标 3。目标 3 由
   `runtime/nbe/` 的独立窄腰实现：真实 Agda Internal 输入进入最终 MAlonzo
   程序，锁定 cctt Core 对实际 wire 值执行 eval/quotation，Agda 适配层覆盖清单
-  声明的受限语义。在新的真实同输入差分通过并经独立确认前，不认定目标 3 完成。
+  声明的受限语义。真实同输入差分已有锁定 CI 证据，但在独立确认前不认定目标 3 验收完成。
 - 目标 1 使用独立的 stock MAlonzo/GHC 路径；现有 static Chez 输出未作为其证据。
 - 候选 NbE 的 8 组/42 行差分通过，不等于已通过 runtime NbE 验收。
 - 三路调度与总体发布门禁关闭前，项目不得声称“完整交付”。

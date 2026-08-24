@@ -1,8 +1,8 @@
 # 交付验收清单
 
 > 范围基准：[`GOALS.md`](GOALS.md) 定义的三路架构。
-> 当前结论：目标 1 **已实现并通过 clean-clone 验收**；目标 2 **已有实现，待 clean-clone 验收**；目标 3 **输入驱动修复已实现，真实同输入差分等待 CI**。
-> 新范围统计：40/56 项已完成（71.4%）；目标 1 为 9/9，目标 2 为 8/9，目标 3 为 10/11。
+> 当前结论：目标 1 **已实现并通过 clean-clone 验收**；目标 2 **已有实现，待 clean-clone 验收**；目标 3 **技术证据为 11/11，独立验收仍待完成**。
+> 新范围统计：41/56 项已完成（73.2%）；目标 1 为 9/9，目标 2 为 8/9，目标 3 为 11/11。
 > 旧的 `224/321` 统计针对 Chez/编译期 NbE 旧范围，不再代表当前三路目标的完成度。
 
 ## 勾选规则
@@ -62,7 +62,7 @@
 **本节尚未验收。锁定的 cctt Core 已作为静态 provider 接入；真实 Agda
 Internal 桥覆盖验收所需的 `transp`/`hcomp`/Glue/Pi/Sigma(record)/S¹
 片段。固定 probe 已替换为实际输入归一化；新的 checked-definition 精确差分
-尚待锁定 CI 产生证据。**
+已在锁定 CI 产生 6/6 证据，但全绿不自动构成独立验收。**
 
 - [x] **P0** 固定“进程内”指最终用户程序进程，并固定运行时数据边界。
 - [x] **P0** 选定可作为 runtime library 的成熟 NbE 源码、revision 和许可证。
@@ -74,7 +74,7 @@ Internal 桥覆盖验收所需的 `transp`/`hcomp`/Glue/Pi/Sigma(record)/S¹
 - [x] **P1** 实现类型导向 reify/readback 和结果重检。
 - [x] **P1** 实现 fuel、内存/包大小限额、缓存生命周期和 fail-closed 错误。
 - [x] **P1** 验收证明运行时不启动 Agda 子进程、不调用编译期 `normalise`。
-- [ ] **P1** 对 `t11/t11b/t16` 及新增进程内用例执行 Agda oracle 差分验收。
+- [x] **P1** 对 `t11/t11b/t16` 及新增进程内用例执行 Agda oracle 差分验收。
 
 ## F. 三路调度与端到端集成
 
@@ -90,7 +90,7 @@ Internal 桥覆盖验收所需的 `transp`/`hcomp`/Glue/Pi/Sigma(record)/S¹
 ## G. 发布门禁
 
 - [x] **P0** 目标 1 全部 P0/P1 勾选。
-- [ ] **P0** 目标 3 全部 P0/P1 勾选。
+- [ ] **P0** 目标 3 的 11/11 技术证据经独立复核并接受。
 - [ ] **P0** NbE provider 仓库、revision、内容身份和许可证获得批准。
 - [ ] **P1** 官方回归、三路端到端、安全负例和性能门禁全部 PASS。
 - [ ] **P1** `README.md`、`GOALS.md`、本清单与测试证据状态一致。
@@ -98,11 +98,12 @@ Internal 桥覆盖验收所需的 `transp`/`hcomp`/Glue/Pi/Sigma(record)/S¹
 
 ## 验收结论
 
-目标 1 可以认定完成。目标 3 当前为 10/11：cctt revision、MIT 许可证和十个
+目标 1 可以认定完成。目标 3 技术证据当前为 11/11：cctt revision、MIT 许可证和十个
 vendored Core 模块由内容哈希锁定，`Core.eval` 与 `Quotation.quoteUnfold`
 链接进最终 ELF；provider 已对实际 Bool/Int/Vec/Sigma 输入归一化并以结果驱动
 readback，不再使用固定 probe。`t11/t11b/t09/t16a/t16b/t16c` 的新门禁从同一
 checked definition 导出 runtime 输入；Agda 对 t11/t11b 的 indexed transport
 会保留 `transpX-Vec`，因此门禁改用已类型检查的等价性证明把同一输入的实际定义
-连接到可计算 canonical oracle，要求与 runtime observation 逐字相等。该门禁
-尚需锁定 CI 成功后才能勾选，CI 全绿本身也不自动构成最终用户验收。
+连接到可计算 canonical oracle，要求与 runtime observation 逐字相等。锁定 CI
+PR run `32701822346` 与 push run `32701816817` 均为 6/6 PASS；但 CI 全绿本身
+不自动构成独立或最终用户验收，相关发布门禁保持未勾选。
