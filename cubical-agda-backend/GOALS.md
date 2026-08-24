@@ -35,7 +35,7 @@ MAlonzo 路径编译为类型擦除的 Haskell，再由 GHC 生成单个本地�
 
 ## 目标 2：跨进程 Term 搬运
 
-**状态：已有实现，仍需完成 clean-clone 集成验收。**
+**状态：已实现并通过专项及 clean-clone 验收。**
 
 跨进程边界传输 Agda 已检查的 Internal `Term + Type`，并携带模块与
 interface identity。消费端必须重新检查闭性、metavariable、类型与依赖身份。

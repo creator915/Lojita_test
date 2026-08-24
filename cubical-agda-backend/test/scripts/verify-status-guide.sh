@@ -58,23 +58,24 @@ open_count=$(awk '/^- \[ \] / { count++ } END { print count + 0 }' "$checklist")
 total_count=$((done_count + open_count))
 completion_pct=$(awk -v done="$done_count" -v total="$total_count" \
   'BEGIN { printf "%.1f", 100 * done / total }')
-[ "$done_count" -eq 41 ] || fail "completed checklist count is $done_count, expected 41"
-[ "$open_count" -eq 15 ] || fail "open checklist count is $open_count, expected 15"
+[ "$done_count" -eq 42 ] || fail "completed checklist count is $done_count, expected 42"
+[ "$open_count" -eq 14 ] || fail "open checklist count is $open_count, expected 14"
 require_text "$checklist" \
   "新范围统计：$done_count/$total_count 项已有实现证据（$completion_pct%）"
 require_text "$checklist" '目标 1 为 9/9'
-require_text "$checklist" '目标 2 为 8/9'
+require_text "$checklist" '目标 2 为 9/9'
 require_text "$checklist" '目标 3 实现项为 11/11'
 require_text "$checklist" 'static Chez 结果未被用于本节验收'
 require_text "$checklist" '`t11/t11b/t09/t16a/t16b/t16c` 的新门禁从同一'
 require_text "$checklist" '要求与 runtime observation 逐字相等'
 
 require_text "$readme" '| 1. stock Agda -> MAlonzo -> Haskell -> GHC 二进制 | **已实现并验收** |'
+require_text "$readme" '| 2. 跨进程 `Term + Type` packet | **已实现并验收** |'
 require_text "$readme" '| 3. 最终程序进程内 runtime NbE | **实现项 11/11；clean-clone 全量验证通过，独立验收待定** |'
-require_text "$status_doc" '| Complete revised checklist | 41/56 implementation items | 73.2% by item count; release gates still open |'
+require_text "$status_doc" '| Complete revised checklist | 42/56 implementation items | 75.0% by item count; release gates still open |'
 require_text "$status_doc" '| 3. linked NbE inside the final program process | 11/11 implementation items | CLEAN-CLONE FULL VERIFICATION PASS; independent acceptance pending |'
 require_text "$support_matrix" '| Goal 3 NbE linked into the final program process | `OWNER-BLOCKED` |'
-require_text "$test_results" "Goal 3 has code and specialized tests for 11/11 implementation items, and the latest verified baseline's PR/push clean-clone runs pass the complete aggregate; independent acceptance remains pending."
+require_text "$test_results" 'Goal 2 is 9/9: macOS clean-clone run `32753401570`'
 require_text "$test_results" 'correct `App (Var 1) (Var 0)`'
 require_text "$selection_doc" 'GOAL 3 RUNTIME PROVIDER SELECTED'
 require_text "$status_doc" '`goal3-runtime-nbe` workflow'
@@ -122,4 +123,4 @@ if grep -Fq 'make -C backend' \
   fail "pre-flattening make command remains"
 fi
 
-echo "Project status contract PASS ($done_count/$total_count implementation items; Goal 1 closed, Goal 3 clean verification passed and independent review pending)"
+echo "Project status contract PASS ($done_count/$total_count implementation items; Goals 1 and 2 closed, Goal 3 clean verification passed and independent review pending)"

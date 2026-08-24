@@ -11,9 +11,9 @@ Chez/compiler-process-NbE scope and is retired.
 | Goal | Checklist | Status |
 | --- | ---: | --- |
 | 1. stock Agda -> MAlonzo -> erased Haskell -> native binary | 9/9 | IMPLEMENTED; VERIFIED |
-| 2. cross-process checked `Term + Type` | 8/9 | IMPLEMENTED; clean-clone gate open |
+| 2. cross-process checked `Term + Type` | 9/9 | IMPLEMENTED; VERIFIED |
 | 3. linked NbE inside the final program process | 11/11 implementation items | CLEAN-CLONE FULL VERIFICATION PASS; independent acceptance pending |
-| Complete revised checklist | 41/56 implementation items | 73.2% by item count; release gates still open |
+| Complete revised checklist | 42/56 implementation items | 75.0% by item count; release gates still open |
 
 ## What is usable now
 
@@ -21,10 +21,12 @@ Chez/compiler-process-NbE scope and is retired.
 - Static Chez publication is guarded by Internal and Treeless audits.
 - Typed residual and packet production retain checked `Term + Type`.
 - The v2 packet consumer source and tests are maintained under
-  `runtime/agda-2.9/`.
+  `runtime/agda-2.9/`; macOS clean-clone run `32753401570` installs the overlay
+  into an independent locked Agda source tree and passes file, pipe and
+  negative-consumer tests through the aggregate `make verify`.
 - The macOS second-clone workflow folds native, provider, bridge, final MAlonzo
-  and same-input differential gates into `make verify`. The latest verified baseline's PR/push
-  clean-clone runs `32738718456`/`32738709978` passed. Goal 3 nevertheless
+  and same-input differential gates into `make verify`. The latest verified
+  baseline's clean-clone run `32753401570` passed. Goal 3 nevertheless
   remains pending independent semantic acceptance.
 - The isolated compiler-process NbE candidate passed the recorded 8-group,
   42-row differential matrix and controlled O2 provisional performance gate.
@@ -68,8 +70,8 @@ their indexed transports as `transpX-Vec`, checked equivalence-induction and
 set proofs connect each root to a canonical oracle computed from the same
 input. The harness compares those exact Bool-pair strings with a structural
 rendering of the runtime result. An unproved or residual oracle is a failure.
-The latest verified baseline's Goal 3 PR/push runs `32738718266`/`32738709953` record all six
-exact matches, and macOS clean-clone runs `32738718456`/`32738709978` pass the
+The latest verified baseline's Goal 3 run `32753401530` records all six exact
+matches, and macOS clean-clone run `32753401570` passes the
 full aggregate. Goal 3 has code and specialized tests for its 11 implementation
 items, but remains unaccepted until independently reviewed. The
 `goal3-runtime-nbe` workflow executes provider, runtime, real-Internal,
@@ -109,8 +111,8 @@ The current and retained candidate evidence is:
 - formal candidate differential: 8/8 groups and 42/42 rows PASS;
 - controlled O2 provisional performance: `ENGINEERING-PERFORMANCE-PASS`.
 
-Goal 1 is closed. Goal 3 independent acceptance, Goal 2 clean-clone validation,
-three-lane dispatch/integration and overall release validation remain open.
+Goals 1 and 2 are closed. Goal 3 independent acceptance, three-lane
+dispatch/integration and overall release validation remain open.
 
 ## Reproduce the current root contract
 

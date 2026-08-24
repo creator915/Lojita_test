@@ -96,10 +96,10 @@ byte-for-byte equality. A missing proof or residual oracle is a failure, not an
 accepted boundary.
 
 The formerly failing higher-order readback regression is a PASS and negative
-input indices reject. The earlier replacement differential has 6/6 locked-CI
-evidence, but that run predates the current cctt Cubical and macOS clean-clone
-changes. The 11/11 implementation items therefore remain unaccepted until the
-new complete clean-clone run is green and independently reviewed. General
+input indices reject. The replacement differential has 6/6 locked-CI evidence,
+and latest-baseline Goal 3 run `32753401530` plus macOS clean-clone run
+`32753401570` are green. The 11/11 implementation items nevertheless remain
+unaccepted until independently reviewed. General
 open Kan systems, indexed data beyond the audited Vec case,
 arbitrary records/HITs, and whole-module normalization remain outside the ABI
 and fail closed.

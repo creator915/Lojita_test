@@ -23,7 +23,8 @@ released.
 | Surface | Status | Current behavior and evidence |
 | --- | --- | --- |
 | Goal 1 stock Agda/MAlonzo/GHC native lane | `VERIFIED` | Locked official Agda `84497d0` emits audited MAlonzo `AgdaAny` Haskell; locked GHC 9.10.3 builds the audited ELF. Ordinary and erased-Cubical compile/run, direct-stock differential, type-error, misclassification, stale-artifact, and clean-clone gates pass. Static Chez output is not used as evidence. |
-| Goal 3 NbE linked into the final program process | `OWNER-BLOCKED` | 11/11 implementation items have code and specialized tests. The adapter constructs cctt Coe/HCom/Glue terms for actual Bool/Int/Vec/Sigma inputs and the proof-linked same-input gate exists, but the new full clean-clone run and independent acceptance are pending; general Cubical normalization remains outside the claim. |
+| Goal 2 checked cross-process packet lane | `VERIFIED` | An independent locked Agda source checkout receives the maintained overlay, builds `agda-cubical-run` with the locked GHC/Cabal pair, and passes self-contained, file, pipe, wrong-consumer and residual tests in macOS clean-clone run `32753401570`. |
+| Goal 3 NbE linked into the final program process | `OWNER-BLOCKED` | 11/11 implementation items and the full clean-clone gate pass. The adapter constructs cctt Coe/HCom/Glue terms for actual Bool/Int/Vec/Sigma inputs and the proof-linked same-input gate passes; independent acceptance remains pending and general Cubical normalization remains outside the claim. |
 | Default binary, `agda-baseline` | `VERIFIED` | Uses Agda normalization as the correctness/performance oracle. It is not counted as NbE acceleration. |
 | Default binary, `nbe` | `FAIL-CLOSED` | Returns `CCZ-NBE-UNAVAILABLE`; it never silently falls back and publishes no stale executable artifact. |
 | Test-only adapter spike | `VERIFIED` | Fourteen baseline-equal results and nine fail-closed controls cover the narrow semantic domain. |
@@ -88,7 +89,7 @@ engine provenance.
 | Capability | Status | Boundary |
 | --- | --- | --- |
 | Whole-entry v2 packet | `VERIFIED` | Agda 2.9 only; carries checked `Term + Type`, exact interface identity, and a checked type/body dependency slice rather than the whole signature. |
-| Final-process runtime NbE | `VERIFIED-CANDIDATE` | For the declared fragment, checked Internal Bool/Nat/Int/Vec/Pi/Sigma/Glue/PathP/S¹ definitions translate without compiler normalization and execute through cctt Coe/HCom/Glue in a Stock Agda/MAlonzo/GHC final program under a no-exec guard. The current full clean-clone gate is pending, and this row does not imply general Cubical semantic coverage. |
+| Final-process runtime NbE | `VERIFIED-CANDIDATE` | For the declared fragment, checked Internal Bool/Nat/Int/Vec/Pi/Sigma/Glue/PathP/S¹ definitions translate without compiler normalization and execute through cctt Coe/HCom/Glue in a Stock Agda/MAlonzo/GHC final program under a no-exec guard. The full clean-clone gate passes; this row does not imply independent acceptance or general Cubical semantic coverage. |
 | File and stdin/stdout packet transport | `VERIFIED` | Higher cases pass across independent processes; incompatible consumers reject before evaluation. |
 | Mixed closed/open typed holes | `VERIFIED` | Stable hole IDs, unique Internal `Term : Type` matching, lambda lifting, and `opaque-import-v1` static shells are checked before publication. |
 | Ground codecs | `VERIFIED` | Bool, bounded Nat, Word64, Unicode-scalar Char, and signed-64 Int across unary, single-slot lexical, ordered, and 2-64-slot dependent replay. |
@@ -104,7 +105,7 @@ engine provenance.
 | Pinned Agda 2.9 snapshot, GHC 9.6.7, Chez 10.4.1 | `VERIFIED` | Full archived v2 runtime, candidate gates, formal projections/monolith, typed packets, and official test evidence. |
 | Official Agda `84497d0` (2.9.0), GHC 9.10.3, Linux x86-64 | `VERIFIED` | Goal 1 stock MAlonzo native lane, two compile/run cases, two fail-closed cases, provenance and binary audit, plus clean-clone replay. |
 | macOS Apple M4, AC Power, GHC 9.6.7 `-O2` | `VERIFIED-CANDIDATE` | Controlled three-run release performance profile with 48/48 host preflights. |
-| macOS 15 Intel clean clone, locked GHC 9.10.3 plus matching Homebrew legacy GHC | `NOT-VERIFIED` | Automated second-clone `make verify` gate is present; it remains NOT-VERIFIED until CI reports green. |
+| macOS 15 Intel clean clone, locked GHC 9.10.3 plus matching Homebrew legacy GHC | `VERIFIED` | Second-clone aggregate `make verify`, including the independent Goal 2 overlay build and all three path suites, passes in run `32753401570`. |
 | Other OS/CPU/GHC/Agda combinations | `NOT-VERIFIED` | No compatibility or performance claim beyond the exact environments above. |
 
 ## Known residuals and rejection behavior
@@ -125,7 +126,7 @@ Stable error-code meanings are defined in `FAILURE_CODES.md`.
 The following remain open even though the compiler candidate's engineering
 gates pass:
 
-- implement goal 3 as NbE linked into the final user-program process;
+- independently accept the implemented Goal 3 final-process runtime fragment;
 - approve the final three-lane routing policy and official-test scope;
 - approve an immutable provider revision and the license/NOTICE identity;
 - approve final acceleration, RSS, allocation, and timeout thresholds;

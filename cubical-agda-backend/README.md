@@ -8,11 +8,11 @@
 | 目标 | 状态 | 当前边界 |
 | --- | --- | --- |
 | 1. stock Agda -> MAlonzo -> Haskell -> GHC 二进制 | **已实现并验收** | 锁定 Stock Agda 2.9.0 / MAlonzo / GHC 9.10.3；独立二进制审计 |
-| 2. 跨进程 `Term + Type` packet | **已有实现** | 仍需 clean-clone overlay 构建验收 |
+| 2. 跨进程 `Term + Type` packet | **已实现并验收** | 锁定源码 overlay、runner、file/pipe/负例均通过 clean-clone |
 | 3. 最终程序进程内 runtime NbE | **实现项 11/11；clean-clone 全量验证通过，独立验收待定** | cctt 的 Coe/HCom/Glue 对实际输入归一化；t11/t11b 使用证明关联的同输入精确差分 |
 
 当前可用的是候选 CubicalChez 后端、checked typed residual/packet、编译期
-NbE adapter 候选与完整的安全拒绝门禁。当前目标 1 已关闭，目标 3 的实现项与 clean-clone 全量验证已通过，但独立语义验收仍待完成；
+NbE adapter 候选与完整的安全拒绝门禁。当前目标 1、目标 2 已关闭，目标 3 的实现项与 clean-clone 全量验证已通过，但独立语义验收仍待完成；
 三路调度和总体发布门禁未关闭前，不得将仓库标记为完整交付。
 
 ## 目标数据流
@@ -167,8 +167,8 @@ make verify-formal-transport-production-candidate
 make verify-v2-runtime
 ```
 
-`verify-v2-runtime` 当前还要求 `AGDA29_SOURCE_DIR` 中安装了仓库
-`runtime/agda-2.9/` overlay。将这一步变成 clean-clone 自动化仍是目标 2 的最后开放项。
+`verify-v2-runtime` 要求 `AGDA29_SOURCE_DIR` 中安装了仓库
+`runtime/agda-2.9/` overlay；macOS clean-clone 会从锁定上游源码自动安装、构建并验证该 overlay。
 
 ## 文档
 
