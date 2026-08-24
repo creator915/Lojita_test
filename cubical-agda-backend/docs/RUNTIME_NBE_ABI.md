@@ -97,7 +97,7 @@ accepted boundary.
 
 The formerly failing higher-order readback regression is a PASS and negative
 input indices reject. The replacement differential has 6/6 locked-CI evidence,
-and latest-baseline Goal 3 run `32753401530` plus macOS clean-clone run
+and Goal 2 closing-baseline Goal 3 run `32753401530` plus macOS clean-clone run
 `32753401570` are green. The 11/11 implementation items nevertheless remain
 unaccepted until independently reviewed. General
 open Kan systems, indexed data beyond the audited Vec case,

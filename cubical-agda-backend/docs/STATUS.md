@@ -25,7 +25,7 @@ Chez/compiler-process-NbE scope and is retired.
   into an independent locked Agda source tree and passes file, pipe and
   negative-consumer tests through the aggregate `make verify`.
 - The macOS second-clone workflow folds native, provider, bridge, final MAlonzo
-  and same-input differential gates into `make verify`. The latest verified
+  and same-input differential gates into `make verify`. The Goal 2 closing
   baseline's clean-clone run `32753401570` passed. Goal 3 nevertheless
   remains pending independent semantic acceptance.
 - The isolated compiler-process NbE candidate passed the recorded 8-group,
@@ -74,7 +74,7 @@ their indexed transports as `transpX-Vec`, checked equivalence-induction and
 set proofs connect each root to a canonical oracle computed from the same
 input. The harness compares those exact Bool-pair strings with a structural
 rendering of the runtime result. An unproved or residual oracle is a failure.
-The latest verified baseline's Goal 3 run `32753401530` records all six exact
+The Goal 2 closing baseline's Goal 3 run `32753401530` records all six exact
 matches, and macOS clean-clone run `32753401570` passes the
 full aggregate. Goal 3 has code and specialized tests for its 11 implementation
 items, but remains unaccepted until independently reviewed. The
