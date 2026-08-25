@@ -73,7 +73,7 @@ if [ "$(find "$cubical_source_dir" -type f -name '*.agdai' | wc -l | tr -d ' ')"
   exit 2
 fi
 
-pending_host_dir=$(mktemp -d /private/tmp/formal-transport-host.XXXXXX)
+pending_host_dir=$(mktemp -d "${TMPDIR:-/tmp}/formal-transport-host.XXXXXX")
 caffeinate_pid=
 staging_result=
 cleanup() {

@@ -43,8 +43,9 @@ do
 done
 
 for fact in \
-  'stock Agda -> MAlonzo -> Haskell -> GHC 二进制 | **未实现**' \
-  '最终程序进程内 runtime NbE | **未实现**' \
+  'stock Agda -> MAlonzo -> Haskell -> GHC 二进制 | **已实现并验收**' \
+  '跨进程 `Term + Type` packet | **已实现并验收**' \
+  '最终程序进程内 runtime NbE | **实现项 11/11；clean-clone 全量验证通过，独立验收待定**' \
   'runtime/agda-2.9/' \
   '不在 Git' \
   '`CCZ-NBE-UNAVAILABLE`' \
@@ -53,7 +54,7 @@ do
   require_text "$readme" "$fact"
 done
 
-for command in 'make build' 'make verify-readme-quickstart' 'make verify'
+for command in 'make build' 'make verify-readme-quickstart' 'make verify-three-lane-e2e' 'make verify'
 do
   require_text "$readme" "$command"
 done
@@ -77,7 +78,7 @@ do
   require_text "$readme" "$variable=/path/to/"
 done
 
-cli_specs=$(mktemp /private/tmp/cubical-chez-readme-cli.XXXXXX)
+cli_specs=$(mktemp "${TMPDIR:-/tmp}/cubical-chez-readme-cli.XXXXXX")
 cleanup() {
   rm -f "$cli_specs"
 }
@@ -122,6 +123,7 @@ for link in \
   '(docs/TEST-RESULTS.md)' \
   '(docs/BENCHMARKS.md)' \
   '(docs/NBE_SELECTION.md)' \
+  '(docs/RUNTIME_NBE_ABI.md)' \
   '(docs/TROUBLESHOOTING.md)'
 do
   require_text "$readme" "$link"

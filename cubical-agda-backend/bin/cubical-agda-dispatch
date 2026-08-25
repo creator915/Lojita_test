@@ -1,0 +1,309 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: cubical-agda-dispatch \
+  --analysis FILE --source FILE \
+  --boundary none|cross-process|in-process \
+  --provenance FILE \
+  [--native-exec FILE] [--native-arg ARG ...] \
+  [--packet-exec FILE] [--packet-arg ARG ...] \
+  [--runtime-nbe-exec FILE] [--runtime-nbe-arg ARG ...]
+
+Consume one checked CubicalChez staging analysis, select exactly one of the
+native, packet, or runtime-nbe lanes, execute only that lane, and publish a
+deterministic provenance record after success. Lane arguments are passed
+literally; command strings are never evaluated by a shell.
+EOF
+}
+
+fail() {
+  printf 'CCZ-DISPATCH-REJECT: %s\n' "$*" >&2
+  exit 65
+}
+
+need_value() {
+  [[ $# -ge 2 ]] || fail "missing value for $1"
+}
+
+analysis=
+source_file=
+boundary=
+provenance=
+native_exec=
+packet_exec=
+runtime_nbe_exec=
+
+# Bash 3.2 and `set -u` do not safely expand an empty array. Each array keeps a
+# sentinel which is discarded by the lane-specific expansion below.
+declare -a native_args=('')
+declare -a packet_args=('')
+declare -a runtime_nbe_args=('')
+
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --analysis)
+      need_value "$@"; analysis=$2; shift 2 ;;
+    --source)
+      need_value "$@"; source_file=$2; shift 2 ;;
+    --boundary)
+      need_value "$@"; boundary=$2; shift 2 ;;
+    --provenance)
+      need_value "$@"; provenance=$2; shift 2 ;;
+    --native-exec)
+      need_value "$@"; native_exec=$2; shift 2 ;;
+    --native-arg)
+      need_value "$@"; native_args+=("$2"); shift 2 ;;
+    --packet-exec)
+      need_value "$@"; packet_exec=$2; shift 2 ;;
+    --packet-arg)
+      need_value "$@"; packet_args+=("$2"); shift 2 ;;
+    --runtime-nbe-exec)
+      need_value "$@"; runtime_nbe_exec=$2; shift 2 ;;
+    --runtime-nbe-arg)
+      need_value "$@"; runtime_nbe_args+=("$2"); shift 2 ;;
+    -h|--help)
+      usage; exit 0 ;;
+    *)
+      fail "unknown argument: $1" ;;
+  esac
+done
+
+for required in analysis source_file boundary provenance; do
+  [[ -n ${!required} ]] || fail "missing required option for $required"
+done
+[[ -f $analysis ]] || fail "analysis is not a file: $analysis"
+[[ -f $source_file ]] || fail "source is not a file: $source_file"
+case $boundary in
+  none|cross-process|in-process) ;;
+  *) fail "boundary must be none, cross-process, or in-process" ;;
+esac
+
+provenance_parent=$(dirname -- "$provenance")
+[[ -d $provenance_parent ]] ||
+  fail "provenance parent directory does not exist: $provenance_parent"
+rm -f -- "$provenance"
+
+manifest_value() {
+  local key=$1
+  awk -v key="$key" '
+    index($0, key ": ") == 1 {
+      count++
+      value = substr($0, length(key) + 3)
+    }
+    END {
+      if (count != 1 || value == "") exit 1
+      print value
+    }
+  ' "$analysis"
+}
+
+binding_time=$(manifest_value binding-time) ||
+  fail "analysis must contain exactly one non-empty binding-time"
+binding_reason=$(manifest_value binding-time-reason) ||
+  fail "analysis must contain exactly one non-empty binding-time-reason"
+binding_action=$(manifest_value binding-time-action) ||
+  fail "analysis must contain exactly one non-empty binding-time-action"
+analysis_decision=$(manifest_value decision) ||
+  fail "analysis must contain exactly one non-empty decision"
+type_erasure_authorized=$(manifest_value type-erasure-authorized) ||
+  fail "analysis must contain exactly one type-erasure-authorized decision"
+analysis_source_sha256=$(manifest_value source-sha256) ||
+  fail "analysis must contain exactly one non-empty source-sha256"
+[[ $analysis_source_sha256 =~ ^[0-9a-f]{64}$ ]] ||
+  fail "analysis source-sha256 must be 64 lowercase hexadecimal characters"
+analysis_input_tree_sha256=$(manifest_value input-tree-sha256) ||
+  fail "analysis must contain exactly one non-empty input-tree-sha256"
+[[ $analysis_input_tree_sha256 =~ ^[0-9a-f]{64}$ ]] ||
+  fail "analysis input-tree-sha256 must be 64 lowercase hexadecimal characters"
+interface_identity=$(manifest_value interface-identity) ||
+  fail "analysis must contain exactly one non-empty interface-identity"
+[[ $interface_identity == top-level-module+full-interface-hash ]] ||
+  fail "analysis has an unsupported interface identity contract: $interface_identity"
+interface_top_level_module=$(manifest_value interface-top-level-module) ||
+  fail "analysis must contain exactly one non-empty interface-top-level-module"
+interface_full_hash=$(manifest_value interface-full-hash) ||
+  fail "analysis must contain exactly one non-empty interface-full-hash"
+
+case $binding_time:$boundary in
+  static:none)
+    [[ $binding_action == erase-types-and-emit ]] ||
+      fail "static analysis has an unexpected action: $binding_action"
+    [[ $analysis_decision == static-closed ]] ||
+      fail "static analysis is not closed: $analysis_decision"
+    [[ $type_erasure_authorized == true ]] ||
+      fail "static analysis did not authorize type erasure"
+    lane=native
+    selected_exec=$native_exec
+    ;;
+  dynamic:cross-process)
+    [[ $binding_action == typed-residual-whole-entry ]] ||
+      fail "dynamic analysis has an unexpected action: $binding_action"
+    [[ $analysis_decision == typed-residual ]] ||
+      fail "dynamic analysis is not a checked typed residual"
+    [[ $type_erasure_authorized == false ]] ||
+      fail "dynamic analysis unexpectedly authorized type erasure"
+    lane=packet
+    selected_exec=$packet_exec
+    ;;
+  mixed:cross-process)
+    [[ $binding_action == typed-residual-split-shell-ground-observation-by-id-whole-entry-reference ]] ||
+      fail "mixed analysis has an unexpected action: $binding_action"
+    [[ $analysis_decision == typed-residual ]] ||
+      fail "mixed analysis is not a checked typed residual"
+    [[ $type_erasure_authorized == false ]] ||
+      fail "mixed analysis unexpectedly authorized type erasure"
+    lane=packet
+    selected_exec=$packet_exec
+    ;;
+  dynamic:in-process)
+    [[ $binding_action == typed-residual-whole-entry ]] ||
+      fail "dynamic analysis has an unexpected action: $binding_action"
+    [[ $analysis_decision == typed-residual ]] ||
+      fail "dynamic analysis is not a checked typed residual"
+    [[ $type_erasure_authorized == false ]] ||
+      fail "dynamic analysis unexpectedly authorized type erasure"
+    lane=runtime-nbe
+    selected_exec=$runtime_nbe_exec
+    ;;
+  mixed:in-process)
+    [[ $binding_action == typed-residual-split-shell-ground-observation-by-id-whole-entry-reference ]] ||
+      fail "mixed analysis has an unexpected action: $binding_action"
+    [[ $analysis_decision == typed-residual ]] ||
+      fail "mixed analysis is not a checked typed residual"
+    [[ $type_erasure_authorized == false ]] ||
+      fail "mixed analysis unexpectedly authorized type erasure"
+    lane=runtime-nbe
+    selected_exec=$runtime_nbe_exec
+    ;;
+  unsupported:*)
+    fail "unsupported binding-time analysis cannot be dispatched" ;;
+  static:*)
+    fail "static analysis requires boundary none" ;;
+  dynamic:*|mixed:*)
+    fail "$binding_time analysis requires an explicit runtime boundary" ;;
+  *)
+    fail "unknown binding-time class: $binding_time" ;;
+esac
+
+[[ -n $selected_exec ]] || fail "no executable configured for selected lane $lane"
+[[ -x $selected_exec ]] || fail "selected lane executable is not executable: $selected_exec"
+
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{ print $1 }'
+  else
+    shasum -a 256 "$1" | awk '{ print $1 }'
+  fi
+}
+
+sha256_stream() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{ print $1 }'
+  else
+    shasum -a 256 | awk '{ print $1 }'
+  fi
+}
+
+source_sha256=$(sha256_file "$source_file")
+[[ $source_sha256 == "$analysis_source_sha256" ]] ||
+  fail "analysis source SHA-256 does not match the current source"
+analysis_sha256=$(sha256_file "$analysis")
+executor_sha256=$(sha256_file "$selected_exec")
+case $lane in
+  native)
+    arguments_sha256=$(printf '%s\0' "${native_args[@]:1}" | sha256_stream) ;;
+  packet)
+    arguments_sha256=$(printf '%s\0' "${packet_args[@]:1}" | sha256_stream) ;;
+  runtime-nbe)
+    arguments_sha256=$(printf '%s\0' "${runtime_nbe_args[@]:1}" | sha256_stream) ;;
+esac
+
+lane_pid=
+interrupt_lane() {
+  local signal=$1
+  local status=$2
+  if [[ -n $lane_pid ]]; then
+    kill -s "$signal" "$lane_pid" 2>/dev/null || true
+    wait "$lane_pid" 2>/dev/null || true
+  fi
+  rm -f -- "$provenance"
+  exit "$status"
+}
+trap 'interrupt_lane HUP 129' HUP
+trap 'interrupt_lane INT 130' INT
+trap 'interrupt_lane TERM 143' TERM
+
+set +e
+case $lane in
+  native)
+    CUBICAL_DISPATCH_LANE=$lane \
+    CUBICAL_DISPATCH_ANALYSIS=$analysis \
+    CUBICAL_DISPATCH_SOURCE=$source_file \
+    CUBICAL_DISPATCH_SOURCE_SHA256=$analysis_source_sha256 \
+    CUBICAL_DISPATCH_INPUT_TREE_SHA256=$analysis_input_tree_sha256 \
+    CUBICAL_DISPATCH_INTERFACE_MODULE=$interface_top_level_module \
+    CUBICAL_DISPATCH_INTERFACE_HASH=$interface_full_hash \
+    CUBICAL_DISPATCH_BOUNDARY=$boundary \
+      "$selected_exec" "${native_args[@]:1}" &
+    ;;
+  packet)
+    CUBICAL_DISPATCH_LANE=$lane \
+    CUBICAL_DISPATCH_ANALYSIS=$analysis \
+    CUBICAL_DISPATCH_SOURCE=$source_file \
+    CUBICAL_DISPATCH_SOURCE_SHA256=$analysis_source_sha256 \
+    CUBICAL_DISPATCH_INPUT_TREE_SHA256=$analysis_input_tree_sha256 \
+    CUBICAL_DISPATCH_INTERFACE_MODULE=$interface_top_level_module \
+    CUBICAL_DISPATCH_INTERFACE_HASH=$interface_full_hash \
+    CUBICAL_DISPATCH_BOUNDARY=$boundary \
+      "$selected_exec" "${packet_args[@]:1}" &
+    ;;
+  runtime-nbe)
+    CUBICAL_DISPATCH_LANE=$lane \
+    CUBICAL_DISPATCH_ANALYSIS=$analysis \
+    CUBICAL_DISPATCH_SOURCE=$source_file \
+    CUBICAL_DISPATCH_SOURCE_SHA256=$analysis_source_sha256 \
+    CUBICAL_DISPATCH_INPUT_TREE_SHA256=$analysis_input_tree_sha256 \
+    CUBICAL_DISPATCH_INTERFACE_MODULE=$interface_top_level_module \
+    CUBICAL_DISPATCH_INTERFACE_HASH=$interface_full_hash \
+    CUBICAL_DISPATCH_BOUNDARY=$boundary \
+      "$selected_exec" "${runtime_nbe_args[@]:1}" &
+    ;;
+esac
+lane_pid=$!
+wait "$lane_pid"
+lane_status=$?
+lane_pid=
+set -e
+trap - HUP INT TERM
+[[ $lane_status -eq 0 ]] || exit "$lane_status"
+
+provenance_temp=$(mktemp "$provenance_parent/.three-lane-dispatch.XXXXXX")
+cleanup() {
+  rm -f -- "$provenance_temp"
+}
+trap cleanup EXIT HUP INT TERM
+{
+  printf 'format\tthree-lane-dispatch-v1\n'
+  printf 'lane\t%s\n' "$lane"
+  printf 'boundary\t%s\n' "$boundary"
+  printf 'binding-time\t%s\n' "$binding_time"
+  printf 'binding-time-reason\t%s\n' "$binding_reason"
+  printf 'binding-time-action\t%s\n' "$binding_action"
+  printf 'analysis-decision\t%s\n' "$analysis_decision"
+  printf 'type-erasure-authorized\t%s\n' "$type_erasure_authorized"
+  printf 'source-sha256\t%s\n' "$source_sha256"
+  printf 'input-tree-sha256\t%s\n' "$analysis_input_tree_sha256"
+  printf 'interface-identity\t%s\n' "$interface_identity"
+  printf 'interface-top-level-module\t%s\n' "$interface_top_level_module"
+  printf 'interface-full-hash\t%s\n' "$interface_full_hash"
+  printf 'analysis-sha256\t%s\n' "$analysis_sha256"
+  printf 'executor-sha256\t%s\n' "$executor_sha256"
+  printf 'arguments-sha256\t%s\n' "$arguments_sha256"
+} > "$provenance_temp"
+mv -- "$provenance_temp" "$provenance"
+trap - EXIT HUP INT TERM
+
+printf 'ThreeLaneDispatch PASS (%s)\n' "$lane"

@@ -1,0 +1,363 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: cubical-agda-run \
+  --source FILE --entry NAME \
+  --boundary none|cross-process|in-process \
+  --output-dir DIR \
+  [--native-classification ordinary|erased-cubical] \
+  [--packet-expression EXPR --packet-consumer EXPR] \
+  [--packet-consumer-source FILE] \
+  [--runtime-expression EXPR] \
+  [--runtime-fuel N] [--runtime-allocations N] [--runtime-packet-bytes N] \
+  [--include DIR ...] [--agda-arg ARG ...]
+
+Run one real CubicalChez binding-time analysis, dispatch exactly one production
+lane, and retain only that lane's successful publications.
+EOF
+}
+
+fail() { printf 'CCZ-PROGRAM-REJECT: %s\n' "$*" >&2; exit 65; }
+need_value() { [[ $# -ge 2 ]] || fail "missing value for $1"; }
+
+source_file=
+entry=
+boundary=
+output_dir=
+native_classification=
+packet_expression=
+packet_consumer=
+packet_consumer_source=
+runtime_expression=
+runtime_fuel=
+runtime_allocations=
+runtime_packet_bytes=
+declare -a include_dirs=('')
+declare -a agda_args=('')
+
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --source) need_value "$@"; source_file=$2; shift 2 ;;
+    --entry) need_value "$@"; entry=$2; shift 2 ;;
+    --boundary) need_value "$@"; boundary=$2; shift 2 ;;
+    --output-dir) need_value "$@"; output_dir=$2; shift 2 ;;
+    --native-classification) need_value "$@"; native_classification=$2; shift 2 ;;
+    --packet-expression) need_value "$@"; packet_expression=$2; shift 2 ;;
+    --packet-consumer) need_value "$@"; packet_consumer=$2; shift 2 ;;
+    --packet-consumer-source) need_value "$@"; packet_consumer_source=$2; shift 2 ;;
+    --runtime-expression) need_value "$@"; runtime_expression=$2; shift 2 ;;
+    --runtime-fuel) need_value "$@"; runtime_fuel=$2; shift 2 ;;
+    --runtime-allocations) need_value "$@"; runtime_allocations=$2; shift 2 ;;
+    --runtime-packet-bytes) need_value "$@"; runtime_packet_bytes=$2; shift 2 ;;
+    --include) need_value "$@"; include_dirs+=("$2"); shift 2 ;;
+    --agda-arg) need_value "$@"; agda_args+=("$2"); shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) fail "unknown argument: $1" ;;
+  esac
+done
+
+for required in source_file entry boundary output_dir; do
+  [[ -n ${!required} ]] || fail "missing required option for $required"
+done
+[[ -f $source_file && $source_file == *.agda ]] ||
+  fail "source is not an Agda file: $source_file"
+[[ -d $output_dir ]] || fail "output directory does not exist: $output_dir"
+case $boundary in none|cross-process|in-process) ;; *) fail "invalid boundary: $boundary" ;; esac
+case $boundary in
+  none)
+    [[ $native_classification == ordinary || $native_classification == erased-cubical ]] ||
+      fail "native lane requires a valid classification"
+    ;;
+  cross-process)
+    [[ -n $packet_expression && $packet_expression == "$entry" ]] ||
+      fail "packet expression must equal the checked analysis entry"
+    [[ -n $packet_consumer ]] || fail "packet lane requires a consumer"
+    ;;
+  in-process)
+    [[ -n $runtime_expression && $runtime_expression == "$entry" ]] ||
+      fail "runtime expression must equal the checked analysis entry"
+    ;;
+esac
+for limit_name in runtime_fuel runtime_allocations runtime_packet_bytes; do
+  limit_value=${!limit_name}
+  [[ -z $limit_value || $limit_value =~ ^[1-9][0-9]*$ ]] ||
+    fail "$limit_name must be a positive decimal integer"
+  [[ -z $limit_value || $boundary == in-process ]] ||
+    fail "$limit_name is valid only for the in-process runtime lane"
+done
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+dispatcher=$repo_root/bin/cubical-agda-dispatch
+lane_exec=$repo_root/bin/cubical-agda-lane-exec
+analyzer=${CUBICAL_ANALYZER:?set CUBICAL_ANALYZER}
+analyzer_agda_data=${CUBICAL_ANALYZER_AGDA_DATA:?set CUBICAL_ANALYZER_AGDA_DATA}
+for executable in "$dispatcher" "$lane_exec" "$analyzer"; do
+  [[ -x $executable ]] || fail "required executable is missing: $executable"
+done
+
+source_dir=$(CDPATH= cd -- "$(dirname -- "$source_file")" && pwd -P)
+source_file=$source_dir/$(basename -- "$source_file")
+output_dir=$(CDPATH= cd -- "$output_dir" && pwd -P)
+packet_consumer_source=${packet_consumer_source:-$source_file}
+[[ -f $packet_consumer_source ]] || fail "packet consumer source is missing: $packet_consumer_source"
+consumer_source_dir=$(CDPATH= cd -- "$(dirname -- "$packet_consumer_source")" && pwd -P)
+packet_consumer_source=$consumer_source_dir/$(basename -- "$packet_consumer_source")
+
+declare -a resolved_include_dirs=('')
+for include_dir in "${include_dirs[@]:1}"; do
+  [[ -d $include_dir ]] || fail "include directory does not exist: $include_dir"
+  resolved_include_dirs+=("$(CDPATH= cd -- "$include_dir" && pwd -P)")
+done
+for argument in "${agda_args[@]:1}"; do
+  case $argument in
+    -l|--library|--library=*|--library-file|--library-file=*)
+      fail "library inputs must be materialized and supplied through --include"
+      ;;
+  esac
+done
+
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{ print $1 }'
+  else
+    shasum -a 256 "$1" | awk '{ print $1 }'
+  fi
+}
+
+sha256_stream() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{ print $1 }'
+  else
+    shasum -a 256 | awk '{ print $1 }'
+  fi
+}
+
+tree_sha256() {
+  local directory=$1
+  if find "$directory" -type l -print -quit | grep -q .; then
+    fail "input tree contains a mutable symbolic link: $directory"
+  fi
+  (
+    CDPATH= cd -- "$directory"
+    find . -type f -print | LC_ALL=C sort | while IFS= read -r relative; do
+      printf '%s\t%s\n' "$(sha256_file "$relative")" "$relative"
+    done
+  ) | sha256_stream
+}
+
+input_identity() {
+  local identity_source_dir=$1 identity_consumer_dir=$2
+  shift 2
+  {
+    printf 'source\t%s\n' "$(tree_sha256 "$identity_source_dir")"
+    printf 'consumer\t%s\n' "$(tree_sha256 "$identity_consumer_dir")"
+    local index=0 identity_include
+    for identity_include in "$@"; do
+      index=$((index + 1))
+      printf 'include-%s\t%s\n' "$index" "$(tree_sha256 "$identity_include")"
+    done
+  } | sha256_stream
+}
+
+original_source_file=$source_file
+original_source_dir=$source_dir
+original_consumer_source=$packet_consumer_source
+original_consumer_dir=$consumer_source_dir
+original_source_sha256=$(sha256_file "$original_source_file")
+original_input_identity=$(input_identity "$original_source_dir" "$original_consumer_dir" \
+  "${resolved_include_dirs[@]:1}")
+
+published_artifacts='
+analysis.txt
+dispatch.provenance.tsv
+native-program
+native-program.provenance.tsv
+native-program.malonzo.sha256
+native-program.malonzo.tar
+native-program.binary-audit.txt
+native.observation
+native.provenance.tsv
+term.packet
+packet.observation
+packet.provenance.tsv
+runtime-nbe.packet
+runtime-nbe.observation
+runtime-nbe.provenance.tsv
+'
+clear_publications() {
+  while IFS= read -r name; do
+    [[ -n $name ]] && rm -f -- "$output_dir/$name"
+  done <<< "$published_artifacts"
+  return 0
+}
+
+clear_publications
+stage=$(mktemp -d "$output_dir/.program-analysis.XXXXXX")
+success=no
+child_pid=
+cleanup() {
+  if [[ -n $stage && -d $stage ]]; then
+    chmod -R u+w "$stage" 2>/dev/null || true
+  fi
+  rm -rf -- "$stage"
+  [[ $success == yes ]] || clear_publications
+}
+interrupt_child() {
+  local signal=$1 status=$2
+  if [[ -n $child_pid ]]; then
+    kill -s "$signal" "$child_pid" 2>/dev/null || true
+    wait "$child_pid" 2>/dev/null || true
+  fi
+  exit "$status"
+}
+trap cleanup EXIT
+trap 'interrupt_child HUP 129' HUP
+trap 'interrupt_child INT 130' INT
+trap 'interrupt_child TERM 143' TERM
+
+for input_root in "$original_source_dir" "$original_consumer_dir" \
+  "${resolved_include_dirs[@]:1}"; do
+  case $output_dir/ in
+    "$input_root"/*) fail "output directory must not be nested below an input root: $input_root" ;;
+  esac
+done
+
+snapshot_root=$stage/inputs
+snapshot_source_dir=$snapshot_root/source
+snapshot_consumer_dir=$snapshot_root/consumer
+mkdir -p "$snapshot_source_dir" "$snapshot_consumer_dir"
+cp -R -- "$original_source_dir/." "$snapshot_source_dir/"
+cp -R -- "$original_consumer_dir/." "$snapshot_consumer_dir/"
+source_dir=$snapshot_source_dir
+source_file=$snapshot_source_dir/$(basename -- "$original_source_file")
+consumer_source_dir=$snapshot_consumer_dir
+packet_consumer_source=$snapshot_consumer_dir/$(basename -- "$original_consumer_source")
+
+declare -a snapshot_include_dirs=('')
+snapshot_index=0
+for include_dir in "${resolved_include_dirs[@]:1}"; do
+  snapshot_index=$((snapshot_index + 1))
+  snapshot_include=$snapshot_root/include-$snapshot_index
+  mkdir -p "$snapshot_include"
+  cp -R -- "$include_dir/." "$snapshot_include/"
+  snapshot_include_dirs+=("$snapshot_include")
+done
+chmod -R a-w "$snapshot_root"
+
+snapshot_input_identity=$(input_identity "$snapshot_source_dir" "$snapshot_consumer_dir" \
+  "${snapshot_include_dirs[@]:1}")
+[[ $snapshot_input_identity == "$original_input_identity" ]] ||
+  fail "immutable input snapshot does not match the requested source/dependencies"
+analysis_source_sha256=$(sha256_file "$source_file")
+[[ $analysis_source_sha256 == "$original_source_sha256" ]] ||
+  fail "immutable source snapshot does not match the requested source"
+
+declare -a analyzer_command=(
+  "$analyzer" --cubical-chez --cubical-chez-engine=agda-baseline
+  --cubical-chez-residual=manifest "--cubical-chez-output=$stage"
+  "--cubical-chez-entry=$entry" -i "$source_dir" --no-write-interfaces
+)
+for include_dir in "${snapshot_include_dirs[@]:1}"; do
+  analyzer_command+=(-i "$include_dir")
+done
+analyzer_command+=("${agda_args[@]:1}" "$source_file")
+
+set +e
+Agda_datadir="$analyzer_agda_data" "${analyzer_command[@]}" \
+  > "$stage/analyzer.stdout" 2> "$stage/analyzer.stderr" &
+child_pid=$!
+wait "$child_pid"
+analyzer_status=$?
+child_pid=
+set -e
+[[ -s $stage/staging.txt ]] || {
+  cat "$stage/analyzer.stdout"; cat "$stage/analyzer.stderr" >&2
+  fail "analysis produced no checked staging manifest"
+}
+binding_time=$(sed -n 's/^binding-time: //p' "$stage/staging.txt")
+[[ -n $binding_time && $(grep -c '^binding-time: ' "$stage/staging.txt") -eq 1 ]] ||
+  fail "analysis has no unique binding-time"
+case $binding_time in
+  static) [[ $analyzer_status -eq 0 ]] || fail "static analysis failed with status $analyzer_status" ;;
+  dynamic|mixed|unsupported) [[ $analyzer_status -ne 0 ]] || fail "$binding_time analysis unexpectedly reported static success" ;;
+  *) fail "unknown binding-time class: $binding_time" ;;
+esac
+
+post_analysis_source_sha256=$(sha256_file "$source_file")
+[[ $post_analysis_source_sha256 == "$analysis_source_sha256" ]] ||
+  fail "source changed while binding-time analysis was running"
+post_analysis_input_identity=$(input_identity "$snapshot_source_dir" "$snapshot_consumer_dir" \
+  "${snapshot_include_dirs[@]:1}")
+[[ $post_analysis_input_identity == "$snapshot_input_identity" ]] ||
+  fail "immutable source/dependency snapshot changed during binding-time analysis"
+current_original_identity=$(input_identity "$original_source_dir" "$original_consumer_dir" \
+  "${resolved_include_dirs[@]:1}")
+[[ $current_original_identity == "$original_input_identity" ]] ||
+  fail "source or dependency changed while binding-time analysis was running"
+if grep -q '^source-sha256: ' "$stage/staging.txt"; then
+  fail "analysis unexpectedly supplied its own source-sha256"
+fi
+printf 'source-sha256: %s\n' "$analysis_source_sha256" >> "$stage/staging.txt"
+if grep -q '^input-tree-sha256: ' "$stage/staging.txt"; then
+  fail "analysis unexpectedly supplied its own input-tree-sha256"
+fi
+printf 'input-tree-sha256: %s\n' "$snapshot_input_identity" >> "$stage/staging.txt"
+
+declare -a dispatch_command=(
+  "$dispatcher" --analysis "$stage/staging.txt" --source "$source_file"
+  --boundary "$boundary" --provenance "$output_dir/dispatch.provenance.tsv"
+  --native-exec "$lane_exec" --native-arg --output-dir --native-arg "$output_dir"
+  --native-arg --classification --native-arg "$native_classification"
+  --packet-exec "$lane_exec" --packet-arg --output-dir --packet-arg "$output_dir"
+  --packet-arg --expression --packet-arg "$packet_expression"
+  --packet-arg --consumer --packet-arg "$packet_consumer"
+  --packet-arg --consumer-source --packet-arg "$packet_consumer_source"
+  --runtime-nbe-exec "$lane_exec" --runtime-nbe-arg --output-dir
+  --runtime-nbe-arg "$output_dir" --runtime-nbe-arg --expression
+  --runtime-nbe-arg "$runtime_expression"
+)
+if [[ -n $runtime_fuel ]]; then
+  dispatch_command+=(--runtime-nbe-arg --runtime-fuel --runtime-nbe-arg "$runtime_fuel")
+fi
+if [[ -n $runtime_allocations ]]; then
+  dispatch_command+=(--runtime-nbe-arg --runtime-allocations --runtime-nbe-arg "$runtime_allocations")
+fi
+if [[ -n $runtime_packet_bytes ]]; then
+  dispatch_command+=(--runtime-nbe-arg --runtime-packet-bytes --runtime-nbe-arg "$runtime_packet_bytes")
+fi
+for include_dir in "${snapshot_include_dirs[@]:1}"; do
+  dispatch_command+=(--native-arg --include --native-arg "$include_dir")
+  dispatch_command+=(--packet-arg --include --packet-arg "$include_dir")
+  dispatch_command+=(--runtime-nbe-arg --include --runtime-nbe-arg "$include_dir")
+done
+for argument in "${agda_args[@]:1}"; do
+  dispatch_command+=(--packet-arg --agda-arg --packet-arg "$argument")
+  dispatch_command+=(--runtime-nbe-arg --agda-arg --runtime-nbe-arg "$argument")
+done
+
+set +e
+"${dispatch_command[@]}" &
+child_pid=$!
+wait "$child_pid"
+dispatch_status=$?
+child_pid=
+set -e
+[[ $dispatch_status -eq 0 ]] || exit "$dispatch_status"
+
+case $boundary in
+  none) [[ -s $output_dir/native.provenance.tsv ]] || fail "native adapter published no provenance" ;;
+  cross-process) [[ -s $output_dir/packet.provenance.tsv ]] || fail "packet adapter published no provenance" ;;
+  in-process) [[ -s $output_dir/runtime-nbe.provenance.tsv ]] || fail "runtime adapter published no provenance" ;;
+esac
+
+cp -- "$stage/staging.txt" "$stage/analysis.publish"
+mv -- "$stage/analysis.publish" "$output_dir/analysis.txt"
+chmod -R u+w "$stage"
+rm -rf -- "$stage"
+stage=
+success=yes
+trap - EXIT HUP INT TERM
+printf 'CubicalAgdaProgram PASS (%s, %s)\n' "$binding_time" "$boundary"

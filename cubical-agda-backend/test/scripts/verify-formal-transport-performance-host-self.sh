@@ -5,7 +5,7 @@ set -eu
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 backend_dir=$(CDPATH= cd -- "$script_dir/../.." && pwd)
 profile="$backend_dir/config/nbe-performance-host-profile.tsv"
-workspace=$(mktemp -d /private/tmp/formal-performance-host-self.XXXXXX)
+workspace=$(mktemp -d "${TMPDIR:-/tmp}/formal-performance-host-self.XXXXXX")
 valid="$workspace/valid.tsv"
 
 cleanup() {

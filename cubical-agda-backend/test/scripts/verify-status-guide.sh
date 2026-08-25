@@ -7,7 +7,15 @@ goals="$repo_root/GOALS.md"
 checklist="$repo_root/DELIVERY_CHECKLIST.md"
 readme="$repo_root/README.md"
 status_doc="$repo_root/docs/STATUS.md"
+support_matrix="$repo_root/docs/SUPPORT-MATRIX.md"
+test_results="$repo_root/docs/TEST-RESULTS.md"
+selection_doc="$repo_root/docs/NBE_SELECTION.md"
+runtime_lock="$repo_root/config/runtime-nbe-provider.lock.tsv"
+runtime_prototype="$repo_root/runtime/nbe/src/Cubical/Runtime/Nbe.hs"
+workflow="$repo_root/../.github/workflows/goal1-native.yml"
+goal3_workflow="$repo_root/../.github/workflows/goal3-runtime-nbe.yml"
 runtime_source="$repo_root/runtime/agda-2.9/src/full/Agda/TypeChecking/Primitive/Cubical/Runtime.hs"
+runtime_wire="$repo_root/runtime/nbe/src/Cubical/Runtime/Nbe/Wire.hs"
 
 fail() {
   echo "Project status contract FAIL: $*" >&2
@@ -20,7 +28,9 @@ require_text() {
   grep -Fq -- "$needle" "$file" || fail "$file is missing: $needle"
 }
 
-for file in "$goals" "$checklist" "$readme" "$status_doc" "$runtime_source"
+for file in "$goals" "$checklist" "$readme" "$status_doc" "$support_matrix" \
+  "$test_results" "$selection_doc" "$runtime_lock" "$runtime_prototype" "$runtime_source" \
+  "$runtime_wire" "$goal3_workflow"
 do
   [ -s "$file" ] || fail "required file is missing or empty: $file"
 done
@@ -38,29 +48,68 @@ done
 require_text "$goals" '## 目标 1：原版编译器的本地二进制路径'
 require_text "$goals" '## 目标 2：跨进程 Term 搬运'
 require_text "$goals" '## 目标 3：最终程序进程内的 runtime NbE'
-goal_open_count=$(grep -Fxc '**状态：未实现。**' "$goals")
-[ "$goal_open_count" -eq 2 ] || fail "goals 1 and 3 are not both explicitly unimplemented"
+require_text "$goals" '**状态：已实现并通过专项及 clean-clone 验收。**'
+require_text "$goals" '**状态：11/11 实现项及 clean-clone 全量验证已通过；独立语义验收仍未完成。**'
 require_text "$goals" '现有 compiler-process NbE candidate 不等于目标 3'
-require_text "$goals" '现有 static Chez 输出不等于目标 1'
+require_text "$goals" '目标 1 使用独立的 stock MAlonzo/GHC 路径'
 
 done_count=$(awk '/^- \[[xX]\] / { count++ } END { print count + 0 }' "$checklist")
 open_count=$(awk '/^- \[ \] / { count++ } END { print count + 0 }' "$checklist")
 total_count=$((done_count + open_count))
 completion_pct=$(awk -v done="$done_count" -v total="$total_count" \
   'BEGIN { printf "%.1f", 100 * done / total }')
-[ "$done_count" -eq 20 ] || fail "completed checklist count is $done_count, expected 20"
-[ "$open_count" -eq 36 ] || fail "open checklist count is $open_count, expected 36"
+[ "$done_count" -eq 50 ] || fail "completed checklist count is $done_count, expected 50"
+[ "$open_count" -eq 6 ] || fail "open checklist count is $open_count, expected 6"
 require_text "$checklist" \
-  "新范围统计：$done_count/$total_count 项已完成（$completion_pct%）"
-require_text "$checklist" '目标 1 为 0/9'
-require_text "$checklist" '目标 2 为 8/9'
-require_text "$checklist" '目标 3 为 0/11'
-require_text "$checklist" '当前 static Chez 路径不能代替本节验收'
-require_text "$checklist" '当前 NbE candidate 只在编译器进程中运行'
+  "新范围统计：$done_count/$total_count 项已有实现证据（$completion_pct%）"
+require_text "$checklist" '目标 1 为 9/9'
+require_text "$checklist" '目标 2 为 9/9'
+require_text "$checklist" '目标 3 实现项为 11/11'
+require_text "$checklist" 'static Chez 结果未被用于本节验收'
+require_text "$checklist" '`t11/t11b/t09/t16a/t16b/t16c` 的新门禁从同一'
+require_text "$checklist" '要求与 runtime observation 逐字相等'
 
-require_text "$readme" '| 1. stock Agda -> MAlonzo -> Haskell -> GHC 二进制 | **未实现** |'
-require_text "$readme" '| 3. 最终程序进程内 runtime NbE | **未实现** |'
-require_text "$status_doc" '| Complete revised checklist | 20/56 | 35.7% by item count; not effort-weighted |'
+require_text "$readme" '| 1. stock Agda -> MAlonzo -> Haskell -> GHC 二进制 | **已实现并验收** |'
+require_text "$readme" '| 2. 跨进程 `Term + Type` packet | **已实现并验收** |'
+require_text "$readme" '| 3. 最终程序进程内 runtime NbE | **实现项 11/11；clean-clone 全量验证通过，独立验收待定** |'
+require_text "$status_doc" '| Complete revised checklist | 50/56 implementation items | 89.3% by item count; release gates still open |'
+require_text "$status_doc" '| 3. linked NbE inside the final program process | 11/11 implementation items | CLEAN-CLONE FULL VERIFICATION PASS; independent acceptance pending |'
+require_text "$support_matrix" '| Goal 3 NbE linked into the final program process | `OWNER-BLOCKED` |'
+require_text "$test_results" 'Goal 2 is 9/9: macOS clean-clone run `32753401570`'
+require_text "$test_results" 'correct `App (Var 1) (Var 0)`'
+require_text "$selection_doc" 'GOAL 3 RUNTIME PROVIDER SELECTED'
+require_text "$status_doc" '`goal3-runtime-nbe` workflow'
+require_text "$status_doc" 'missing macOS `rg` can no longer turn the security check into a skip'
+require_text "$test_results" '| `make verify-runtime-source-audit` |'
+require_text "$test_results" '| `make verify-three-lane-e2e` |'
+require_text "$checklist" 'F 节据此关闭'
+[ -s "$workflow" ] || fail "Goal 1 workflow is missing"
+require_text "$workflow" 'locked-stock-native'
+require_text "$goal3_workflow" 'make verify-runtime-nbe-agda-bridge'
+require_text "$goal3_workflow" 'make verify-runtime-nbe-final-malonzo'
+require_text "$goal3_workflow" 'make verify-runtime-nbe-cctt-provider'
+require_text "$goal3_workflow" 'make verify-runtime-nbe-differential'
+
+lock_status=$(awk -F '\t' '$1 == "status" { print $2; exit }' "$runtime_lock")
+[ "$lock_status" = linked ] || fail "Goal 3 provider lock must be linked"
+lock_acceptance=$(awk -F '\t' '$1 == "goal3-acceptance" { print $2; exit }' "$runtime_lock")
+[ "$lock_acceptance" = pending-independent-review ] ||
+  fail "Goal 3 provider acceptance must remain pending independent review"
+require_text "$runtime_wire" 'data Ty'
+require_text "$runtime_wire" 'data Term'
+require_text "$runtime_prototype" 'data Value'
+require_text "$runtime_source" 'import qualified Agda.Syntax.Internal as Internal'
+if grep -Eq 'import[[:space:]]+Agda\.Syntax\.Internal' "$runtime_prototype"; then
+  fail "status contract must be revised before claiming the prototype is Agda-connected"
+fi
+
+goal3_checked=$(awk '
+  /^## E\. / { in_goal=1; next }
+  /^## / && in_goal { exit }
+  in_goal && /^- \[[xX]\] / { count++ }
+  END { print count + 0 }
+' "$checklist")
+[ "$goal3_checked" -eq 11 ] || fail "Goal 3 has $goal3_checked checked items, expected 11 after locked differential CI"
 
 require_text "$runtime_source" 'maxRuntimePacketBytes = 64 * 1024 * 1024'
 require_text "$runtime_source" 'cubicalRuntimeResultTermFile'
@@ -78,4 +127,4 @@ if grep -Fq 'make -C backend' \
   fail "pre-flattening make command remains"
 fi
 
-echo "Project status contract PASS ($done_count/$total_count; goals 1 and 3 explicitly open)"
+echo "Project status contract PASS ($done_count/$total_count implementation items; three-lane integration closed, Goal 3 independent review and release gates pending)"

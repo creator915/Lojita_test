@@ -1,0 +1,6 @@
+format	native-toolchain-lock-v1
+stock-agda-origin	https://github.com/agda/agda.git
+stock-agda-revision	84497d0f63ab8c6c906a6fb3ceb512afb04e275b
+stock-agda-version	2.9.0-84497d0
+ghc-version	9.10.3
+ghc-project-revision	3f4d7d38b9661435bdde981451ac50c4335ed090

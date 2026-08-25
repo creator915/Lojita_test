@@ -7,22 +7,22 @@
 
 | 目标 | 状态 | 当前边界 |
 | --- | --- | --- |
-| 1. stock Agda -> MAlonzo -> Haskell -> GHC 二进制 | **未实现** | 现有 static Chez 输出不等于该目标 |
-| 2. 跨进程 `Term + Type` packet | **已有实现** | 仍需 clean-clone overlay 构建验收 |
-| 3. 最终程序进程内 runtime NbE | **未实现** | 当前 NbE 只在 Agda 编译器进程内 |
+| 1. stock Agda -> MAlonzo -> Haskell -> GHC 二进制 | **已实现并验收** | 锁定 Stock Agda 2.9.0 / MAlonzo / GHC 9.10.3；独立二进制审计 |
+| 2. 跨进程 `Term + Type` packet | **已实现并验收** | 锁定源码 overlay、runner、file/pipe/负例均通过 clean-clone |
+| 3. 最终程序进程内 runtime NbE | **实现项 11/11；clean-clone 全量验证通过，独立验收待定** | cctt 的 Coe/HCom/Glue 对实际输入归一化；t11/t11b 使用证明关联的同输入精确差分 |
 
 当前可用的是候选 CubicalChez 后端、checked typed residual/packet、编译期
-NbE adapter 候选与完整的安全拒绝门禁。目标 1 和 3 未关闭前，不得将
-仓库标记为完整交付。
+NbE adapter 候选与完整的安全拒绝门禁。当前目标 1、目标 2 已关闭，目标 3 的实现项与 clean-clone 全量验证已通过，但独立语义验收仍待完成；
+真实三路 production adapter 与统一端到端已通过本地及远端 clean-clone；但目标 3 独立语义验收和总体发布门禁未关闭前，不得将仓库标记为完整交付。
 
 ## 目标数据流
 
 ```text
 Agda source
    |
-   +-- native-safe ------> stock Agda/MAlonzo -> erased Haskell -> binary   [OPEN]
+   +-- native-safe ------> stock Agda/MAlonzo -> erased Haskell -> binary   [IMPLEMENTED]
    +-- cross-process ----> checked Term + Type packet                       [IMPLEMENTED]
-   `-- runtime-higher ---> linked in-process runtime NbE                    [OPEN]
+   `-- runtime-higher ---> linked in-process runtime NbE      [IMPLEMENTED; CLEAN VERIFY PASS; REVIEW PENDING]
 ```
 
 跨进程只传输 Agda Internal `Term + Type` 协议数据。NbE 语义值、closure 和
@@ -36,6 +36,7 @@ Agda source
 ├── DELIVERY_CHECKLIST.md        唯一验收清单
 ├── src/                         CubicalChez 编译器后端
 ├── runtime/agda-2.9/            v2 typed Term 运行时 overlay 源码
+├── runtime/nbe/                 独立 wire AST、语义域和最终进程内 runtime 库
 ├── config/                      NbE/provider/性能锁定信息
 ├── compat/                      锁定上游的显式兼容补丁
 ├── test/fixtures/               Agda 测试输入
@@ -68,6 +69,22 @@ Homebrew 布局可以直接使用 Make 默认值。其他布局可传入：
 - `GHC_PREFIX`
 - `GHC`
 
+目标 1 的锁定原生通道还使用：
+
+- `NATIVE_AGDA`
+- `NATIVE_AGDA_SOURCE_DIR`
+- `NATIVE_AGDA_DATA_DIR`
+- `NATIVE_GHC`
+
+目标 3 的锁定 runtime 通道还显式使用同一套：
+
+- `RUNTIME_NBE_GHC`
+- `RUNTIME_NBE_GHC_PKG`
+- `RUNTIME_NBE_CABAL`
+
+版本与官方源码 revision 固定在
+[`config/native-toolchain.lock.tsv`](config/native-toolchain.lock.tsv)。
+
 ## 快速开始
 
 从仓库根目录执行：
@@ -92,6 +109,16 @@ Scheme。
 
 ```sh
 make verify
+```
+
+目标 1 的真实 Stock Agda/MAlonzo/GHC 验收：
+
+```sh
+NATIVE_AGDA=/path/to/agda \
+NATIVE_AGDA_SOURCE_DIR=/path/to/clean/agda-source \
+NATIVE_AGDA_DATA_DIR=/path/to/agda-data \
+NATIVE_GHC=/path/to/ghc \
+make verify-native-lane
 ```
 
 长时间 Agda 2.9 验收需要显式的锁定路径：
@@ -119,10 +146,26 @@ make verify-formal-transport-production-candidate
 默认 `nbe` 仍为 `FAIL-CLOSED`：未选定并链接生产 provider 时返回
 `CCZ-NBE-UNAVAILABLE`。候选测试构建的通过不会隐式改变默认二进制。
 
+统一三路 production 入口是 `bin/cubical-agda-run`。它接受
+`--source/--entry/--boundary/--output-dir`，通过重复的 `--include` 声明并快照全部
+源码依赖；不接受未纳入 identity 的 Agda library registry 参数。进程内 runtime-NbE
+限额统一使用 `--runtime-fuel N`、`--runtime-allocations N` 和
+`--runtime-packet-bytes N`，由同一调度链传入最终已链接程序。
+
 ## 主要验收命令
 
 ```sh
 make verify-status-guide
+make verify-delivery-aggregation
+make verify-native-lane-contract
+make verify-native-lane
+make verify-runtime-nbe
+make verify-runtime-nbe-cctt-provider
+make verify-runtime-nbe-agda-bridge
+make verify-runtime-nbe-differential
+make verify-runtime-nbe-final-malonzo
+make verify-three-lane-dispatch
+make verify-three-lane-e2e
 make verify-support-matrix
 make verify-nbe-adapter-spike
 make verify-nbe-production-candidate
@@ -132,14 +175,18 @@ make verify-formal-transport-production-candidate
 make verify-v2-runtime
 ```
 
-`verify-v2-runtime` 当前还要求 `AGDA29_SOURCE_DIR` 中安装了仓库
-`runtime/agda-2.9/` overlay。将这一步变成 clean-clone 自动化仍是目标 2 的最后开放项。
+`verify-v2-runtime` 要求 `AGDA29_SOURCE_DIR` 中安装了仓库
+`runtime/agda-2.9/` overlay；macOS clean-clone 会从锁定上游源码自动安装、构建并验证该 overlay。
 
 ## 文档
 
 - [`GOALS.md`](GOALS.md)：最终三路目标。
 - [`DELIVERY_CHECKLIST.md`](DELIVERY_CHECKLIST.md)：验收唯一事实源。
 - [`ARCHITECTURE.md`](docs/ARCHITECTURE.md)：现有编译期架构。
+- [`NATIVE_LANE.md`](docs/NATIVE_LANE.md)：目标 1 分类、工具链锁与产物审计。
+- [`RUNTIME_NBE_BOUNDARY.md`](docs/RUNTIME_NBE_BOUNDARY.md)：目标 3 最终进程与数据边界。
+- [`RUNTIME_NBE_ABI.md`](docs/RUNTIME_NBE_ABI.md)：目标 3 ABI、provider 和资源边界。
+- [`THREE_LANE_DISPATCH.md`](docs/THREE_LANE_DISPATCH.md)：真实三路 production 决策、adapter、产物与清理边界。
 - [`ENGINE_CONTRACT.md`](docs/ENGINE_CONTRACT.md)：引擎请求/结果与 typed residual 契约。
 - [`SUPPORT-MATRIX.md`](docs/SUPPORT-MATRIX.md)：支持、候选、残余与拒绝状态。
 - [`STATUS.md`](docs/STATUS.md)：当前实现与未交付项。
@@ -150,7 +197,16 @@ make verify-v2-runtime
 
 ## 当前边界
 
-- Chez 是现有候选静态目标，不是目标 1 要求的原版 MAlonzo/GHC 路径。
-- 编译器进程内 adapter candidate 不是目标 3 要求的最终程序 runtime NbE。
+- Chez 仍是独立候选静态目标；目标 1 由 `bin/cubical-agda-native` 的原版 MAlonzo/GHC 路径验收。
+- 编译器进程内 adapter candidate 不是目标 3 证据。目标 3 的独立窄腰接收
+  真实 Agda Internal definition slice，覆盖验收所需 Bool/Nat/Int/Vec/Pi/
+  Sigma/Glue/S¹ 与 transport/composition，并链接进 Stock Agda/MAlonzo/GHC
+  最终程序。cctt provider 为实际 Bool/Int/Vec/Sigma 输入构造并求值 cctt
+  `Coe`、`HCom`、`GlueTy`、`Glue` 和 `Unglue`；Church 项只承担受限 wire
+  数据编码，不再承担 transport/composition 语义，也不再以固定 probe 授权本地结果。未声明的通用 Kan、indexed
+  data 和任意 HIT 仍 fail closed。
 - `t11/t11b` 等已知残余不得进入无类型执行路径。
-- 生产 NbE provider 仍缺正式仓库/revision/许可证批准，默认保持安全拒绝。
+- 编译器进程的默认 `nbe` provider lock 仍保持未选择和安全拒绝；它与目标 3
+  最终进程 runtime 的独立 cctt lock 不同。后者已链接 vendored Core 的
+  `eval`/`quoteUnfold`。provider、ELF 与 t11/t11b 精确同输入差分已在锁定 CI
+  通过；Goal 3 独立语义验收仍须单独完成。

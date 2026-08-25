@@ -17,6 +17,7 @@ runtime_test_dir="$agda_source_dir/test/CubicalRuntime"
 self_test_script="$runtime_test_dir/run-tests.sh"
 transport_test_script="$runtime_test_dir/run-transport-tests-v2.sh"
 ghc29=${GHC29:-ghc}
+cabal29=${CABAL29:-cabal}
 
 if [ ! -f "$agda_source_dir/Agda.cabal" ]; then
   echo "Agda.cabal not found below AGDA29_SOURCE_DIR: $agda_source_dir" >&2
@@ -33,6 +34,17 @@ if [ ! -f "$self_test_script" ] || [ ! -f "$transport_test_script" ]; then
   exit 2
 fi
 
+cmp "$backend_dir/runtime/agda-2.9/src/full/Agda/TypeChecking/Primitive/Cubical/Runtime.hs" \
+  "$agda_source_dir/src/full/Agda/TypeChecking/Primitive/Cubical/Runtime.hs" || {
+    echo "Installed Runtime.hs does not match the maintained v2 overlay" >&2
+    exit 2
+  }
+cmp "$backend_dir/runtime/agda-2.9/src/cubical-run/Main.hs" \
+  "$agda_source_dir/src/cubical-run/Main.hs" || {
+    echo "Installed agda-cubical-run does not match the maintained v2 overlay" >&2
+    exit 2
+  }
+
 if [ ! -f "$transport_source" ]; then
   echo "Original transport source is missing: $transport_source" >&2
   exit 2
@@ -44,14 +56,14 @@ if [ "$actual_transport_sha256" != "$transport_source_sha256" ]; then
   exit 2
 fi
 
-agda_bin=$(CDPATH= cd -- "$agda_source_dir" && cabal list-bin -w "$ghc29" exe:agda)
-runner=$(CDPATH= cd -- "$agda_source_dir" && cabal list-bin -w "$ghc29" exe:agda-cubical-run)
+agda_bin=$(CDPATH= cd -- "$agda_source_dir" && "$cabal29" list-bin -w "$ghc29" exe:agda)
+runner=$(CDPATH= cd -- "$agda_source_dir" && "$cabal29" list-bin -w "$ghc29" exe:agda-cubical-run)
 if [ ! -x "$agda_bin" ] || [ ! -x "$runner" ]; then
   echo "Building the pinned stock Agda and archived v2 runner..."
   (CDPATH= cd -- "$agda_source_dir" && \
-    cabal build -w "$ghc29" exe:agda exe:agda-cubical-run)
-  agda_bin=$(CDPATH= cd -- "$agda_source_dir" && cabal list-bin -w "$ghc29" exe:agda)
-  runner=$(CDPATH= cd -- "$agda_source_dir" && cabal list-bin -w "$ghc29" exe:agda-cubical-run)
+    "$cabal29" build -w "$ghc29" exe:agda exe:agda-cubical-run)
+  agda_bin=$(CDPATH= cd -- "$agda_source_dir" && "$cabal29" list-bin -w "$ghc29" exe:agda)
+  runner=$(CDPATH= cd -- "$agda_source_dir" && "$cabal29" list-bin -w "$ghc29" exe:agda-cubical-run)
 fi
 
 if [ ! -x "$agda_bin" ] || [ ! -x "$runner" ]; then
@@ -63,15 +75,63 @@ mkdir -p "$evidence_dir"
 summary_file="$evidence_dir/summary.tsv"
 printf 'suite\tstatus\treal_seconds\tmax_rss_bytes\n' > "$summary_file"
 
+run_measured() {
+  stderr_file=$1
+  shift
+  if [ ! -x /usr/bin/time ]; then
+    "$@" 2>"$stderr_file"
+    command_status=$?
+    printf '\nCCZ_TIME_REAL=-\nCCZ_TIME_RSS_BYTES=-\n' >> "$stderr_file"
+    return "$command_status"
+  fi
+  case $(uname -s) in
+    Darwin)
+      /usr/bin/time -l "$@" 2>"$stderr_file"
+      ;;
+    Linux)
+      /usr/bin/time -f '\nCCZ_TIME_REAL=%e\nCCZ_TIME_RSS_KIB=%M' \
+        "$@" 2>"$stderr_file"
+      ;;
+    *)
+      "$@" 2>"$stderr_file"
+      ;;
+  esac
+}
+
+read_measurement() {
+  measurement_file=$1
+  case $(uname -s) in
+    Darwin)
+      measured_real=$(awk '$2 == "real" { print $1; exit }' "$measurement_file")
+      measured_rss=$(awk '/maximum resident set size/ { print $1; exit }' "$measurement_file")
+      ;;
+    Linux)
+      measured_real=$(sed -n 's/^CCZ_TIME_REAL=//p' "$measurement_file" | tail -n 1)
+      measured_rss_bytes=$(sed -n 's/^CCZ_TIME_RSS_BYTES=//p' "$measurement_file" | tail -n 1)
+      if [ -n "$measured_rss_bytes" ]; then
+        measured_rss=$measured_rss_bytes
+      else
+        measured_rss_kib=$(sed -n 's/^CCZ_TIME_RSS_KIB=//p' "$measurement_file" | tail -n 1)
+        measured_rss=$(awk -v kib="${measured_rss_kib:-0}" 'BEGIN { printf "%.0f", kib * 1024 }')
+      fi
+      ;;
+    *)
+      measured_real=-
+      measured_rss=-
+      ;;
+  esac
+}
+
 self_stdout="$evidence_dir/self-contained.stdout.log"
 self_stderr="$evidence_dir/self-contained.stderr.log"
 echo "archived v2 self-contained runtime suite"
-if /usr/bin/time -l env Agda_datadir="$agda_source_dir/src/data" \
+if run_measured "$self_stderr" env Agda_datadir="$agda_source_dir/src/data" \
   sh "$self_test_script" "$runner" "$agda_bin" \
-  >"$self_stdout" 2>"$self_stderr"
+  >"$self_stdout"
 then
-  self_real=$(awk '$2 == "real" { print $1; exit }' "$self_stderr")
-  self_rss=$(awk '/maximum resident set size/ { print $1; exit }' "$self_stderr")
+  read_measurement "$self_stderr"
+  self_real=$measured_real
+  self_rss=$measured_rss
   printf 'self-contained\tPASS\t%s\t%s\n' "$self_real" "$self_rss" >> "$summary_file"
   echo "self-contained PASS (${self_real}s, max RSS ${self_rss} bytes)"
 else
@@ -130,17 +190,18 @@ echo "interface warmup PASS"
 transport_stdout="$evidence_dir/transport-matrix.stdout.log"
 transport_stderr="$evidence_dir/transport-matrix.stderr.log"
 echo "archived v2 TransportTests runtime matrix"
-if /usr/bin/time -l env \
+if run_measured "$transport_stderr" env \
   Agda_datadir="$agda_source_dir/src/data" \
   AGDA_BIN="$agda_bin" \
   CUBICAL_RUNNER="$runner" \
   CUBICAL_DIR="$workspace_cubical_dir" \
   TRANSPORT_TEST_FILE="$workspace_fixture_dir/TransportTests.agda" \
   sh "$transport_test_script" \
-  >"$transport_stdout" 2>"$transport_stderr"
+  >"$transport_stdout"
 then
-  transport_real=$(awk '$2 == "real" { print $1; exit }' "$transport_stderr")
-  transport_rss=$(awk '/maximum resident set size/ { print $1; exit }' "$transport_stderr")
+  read_measurement "$transport_stderr"
+  transport_real=$measured_real
+  transport_rss=$measured_rss
   printf 'transport-matrix\tPASS\t%s\t%s\n' "$transport_real" "$transport_rss" >> "$summary_file"
   echo "transport-matrix PASS (${transport_real}s, max RSS ${transport_rss} bytes)"
 else

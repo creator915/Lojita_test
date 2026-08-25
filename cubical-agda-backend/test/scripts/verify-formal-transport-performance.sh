@@ -15,7 +15,7 @@ if [ ! -f "$profile" ] || [ ! -f "$host_profile" ] || \
   exit 2
 fi
 
-temporary_dir=$(mktemp -d /private/tmp/formal-transport-performance.XXXXXX)
+temporary_dir=$(mktemp -d "${TMPDIR:-/tmp}/formal-transport-performance.XXXXXX")
 cleanup() {
   rm -rf "$temporary_dir"
 }

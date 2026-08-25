@@ -1,0 +1,164 @@
+name: macos-clean-clone-verify
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  full-make-verify:
+    runs-on: macos-15-intel
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: source
+
+      - name: Install the legacy backend toolchain
+        run: brew install agda chezscheme
+
+      - name: Install the locked native/runtime GHC
+        uses: haskell-actions/setup@v2
+        with:
+          ghc-version: 9.10.3
+          cabal-version: latest
+
+      - name: Make a second clean clone
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --no-local "$GITHUB_WORKSPACE/source" "$RUNNER_TEMP/acceptance-clone"
+          git -C "$RUNNER_TEMP/acceptance-clone" checkout --detach "$(git -C "$GITHUB_WORKSPACE/source" rev-parse HEAD)"
+          test -z "$(git -C "$RUNNER_TEMP/acceptance-clone" status --porcelain)"
+          echo "ACCEPTANCE_ROOT=$RUNNER_TEMP/acceptance-clone/cubical-agda-backend" >> "$GITHUB_ENV"
+
+      - name: Build locked Stock Agda with the locked GHC
+        shell: bash
+        working-directory: ${{ env.ACCEPTANCE_ROOT }}
+        run: |
+          set -euo pipefail
+          locked_ghc=$(command -v ghc)
+          locked_cabal=$(command -v cabal)
+          agda_origin=$(awk -F '\t' '$1 == "stock-agda-origin" { print $2 }' config/native-toolchain.lock.tsv)
+          agda_revision=$(awk -F '\t' '$1 == "stock-agda-revision" { print $2 }' config/native-toolchain.lock.tsv)
+          mkdir -p .toolchain/agda
+          git -C .toolchain/agda init
+          git -C .toolchain/agda remote add origin "$agda_origin"
+          git -C .toolchain/agda fetch --depth 1 origin "$agda_revision"
+          git -C .toolchain/agda checkout --detach FETCH_HEAD
+          "$locked_cabal" update
+          "$locked_cabal" build -w "$locked_ghc" --project-dir=.toolchain/agda lib:Agda exe:agda
+          agda_exe=$("$locked_cabal" list-bin -w "$locked_ghc" --project-dir=.toolchain/agda exe:agda)
+          agda_package_db=$(find .toolchain/agda/dist-newstyle/packagedb -mindepth 1 -maxdepth 1 -type d | head -n 1)
+          store_dir=$("$locked_cabal" path --store-dir)
+          dependency_package_db=$(find "$store_dir" -mindepth 2 -maxdepth 2 -type d -name package.db | grep 'ghc-9\.10\.3' | head -n 1)
+          {
+            echo "LOCKED_GHC=$locked_ghc"
+            echo "LOCKED_GHC_PKG=$(dirname "$locked_ghc")/ghc-pkg"
+            echo "LOCKED_CABAL=$locked_cabal"
+            echo "LOCKED_AGDA=$agda_exe"
+            echo "LOCKED_AGDA_SOURCE=$PWD/.toolchain/agda"
+            echo "LOCKED_AGDA_DATA=$PWD/.toolchain/agda/src/data"
+            echo "LOCKED_AGDA_PACKAGE_DB=$PWD/$agda_package_db"
+            echo "LOCKED_DEPENDENCY_PACKAGE_DB=$dependency_package_db"
+          } >> "$GITHUB_ENV"
+
+      - name: Build the Goal 2 v2 overlay with the locked GHC
+        shell: bash
+        working-directory: ${{ env.ACCEPTANCE_ROOT }}
+        run: |
+          set -euo pipefail
+          agda_origin=$(awk -F '\t' '$1 == "stock-agda-origin" { print $2 }' config/native-toolchain.lock.tsv)
+          agda_revision=$(awk -F '\t' '$1 == "stock-agda-revision" { print $2 }' config/native-toolchain.lock.tsv)
+          mkdir -p .toolchain/agda-v2
+          git -C .toolchain/agda-v2 init
+          git -C .toolchain/agda-v2 remote add origin "$agda_origin"
+          git -C .toolchain/agda-v2 fetch --depth 1 origin "$agda_revision"
+          git -C .toolchain/agda-v2 checkout --detach FETCH_HEAD
+          test -z "$(git -C .toolchain/agda-v2 status --porcelain)"
+          if ! cp -cR .toolchain/agda/dist-newstyle \
+            .toolchain/agda-v2/dist-newstyle 2>/dev/null
+          then
+            mkdir -p .toolchain/agda-v2/dist-newstyle
+            cp -R .toolchain/agda/dist-newstyle/. \
+              .toolchain/agda-v2/dist-newstyle/
+          fi
+          sh test/scripts/install-v2-runtime-overlay.sh "$PWD/.toolchain/agda-v2"
+          "$LOCKED_CABAL" build -w "$LOCKED_GHC" \
+            --project-dir=.toolchain/agda-v2 lib:Agda exe:agda exe:agda-cubical-run
+          v2_agda=$("$LOCKED_CABAL" list-bin -w "$LOCKED_GHC" \
+            --project-dir=.toolchain/agda-v2 exe:agda)
+          v2_runner=$("$LOCKED_CABAL" list-bin -w "$LOCKED_GHC" \
+            --project-dir=.toolchain/agda-v2 exe:agda-cubical-run)
+          test -x "$v2_agda"
+          test -x "$v2_runner"
+          {
+            echo "LOCKED_AGDA_V2_SOURCE=$PWD/.toolchain/agda-v2"
+            echo "LOCKED_AGDA_V2=$v2_agda"
+            echo "LOCKED_AGDA_V2_RUNNER=$v2_runner"
+          } >> "$GITHUB_ENV"
+
+      - name: Fetch locked Cubical differential oracle
+        shell: bash
+        working-directory: ${{ env.ACCEPTANCE_ROOT }}
+        run: |
+          set -euo pipefail
+          mkdir -p .toolchain/cubical
+          git -C .toolchain/cubical init
+          git -C .toolchain/cubical remote add origin https://github.com/agda/cubical.git
+          git -C .toolchain/cubical fetch --depth 1 origin b150186d2544e7efeddd31e5d14a8b9ecbb100f7
+          git -C .toolchain/cubical checkout --detach FETCH_HEAD
+          echo "LOCKED_CUBICAL=$PWD/.toolchain/cubical" >> "$GITHUB_ENV"
+
+      - name: Resolve matching Homebrew Agda and GHC
+        shell: bash
+        working-directory: ${{ env.ACCEPTANCE_ROOT }}
+        run: |
+          set -euo pipefail
+          agda_prefix=$(brew --prefix agda)
+          legacy_db=$(find "$agda_prefix/libexec" -path '*/package.db' -type d | head -n 1)
+          legacy_ghc_version=$(basename "$(dirname "$legacy_db")" | sed -E 's/^ghc-([0-9]+\.[0-9]+).*/\1/')
+          legacy_ghc=$(brew --prefix "ghc@$legacy_ghc_version")/bin/ghc
+          test -x "$legacy_ghc"
+          {
+            echo "LEGACY_AGDA_PREFIX=$agda_prefix"
+            echo "LEGACY_AGDA_DB=$legacy_db"
+            echo "LEGACY_GHC=$legacy_ghc"
+          } >> "$GITHUB_ENV"
+
+      - name: Run complete acceptance from the clean clone
+        shell: bash
+        working-directory: ${{ env.ACCEPTANCE_ROOT }}
+        run: |
+          set -euo pipefail
+          test -z "$(git status --porcelain --untracked-files=no)"
+          make verify \
+            AGDA_PREFIX="$LEGACY_AGDA_PREFIX" \
+            AGDA_PACKAGE_DB="$LEGACY_AGDA_DB" \
+            AGDA_LIBRARY_REGISTRY="$LEGACY_AGDA_PREFIX/share/agda/example-libraries" \
+            GHC="$LEGACY_GHC" \
+            NATIVE_AGDA="$LOCKED_AGDA" \
+            NATIVE_AGDA_SOURCE_DIR="$LOCKED_AGDA_SOURCE" \
+            NATIVE_AGDA_DATA_DIR="$LOCKED_AGDA_DATA" \
+            NATIVE_GHC="$LOCKED_GHC" \
+            AGDA29_SOURCE_DIR="$LOCKED_AGDA_V2_SOURCE" \
+            CUBICAL29_DIR="$LOCKED_CUBICAL" \
+            GHC29="$LOCKED_GHC" \
+            CABAL29="$LOCKED_CABAL" \
+            RUNTIME_NBE_GHC="$LOCKED_GHC" \
+            RUNTIME_NBE_GHC_PKG="$LOCKED_GHC_PKG" \
+            RUNTIME_NBE_CABAL="$LOCKED_CABAL" \
+            RUNTIME_NBE_AGDA_PACKAGE_DB="$LOCKED_AGDA_PACKAGE_DB" \
+            RUNTIME_NBE_DEPENDENCY_PACKAGE_DB="$LOCKED_DEPENDENCY_PACKAGE_DB" \
+            RUNTIME_NBE_AGDA_DATADIR="$LOCKED_AGDA_DATA" \
+            RUNTIME_NBE_CUBICAL_DIR="$LOCKED_CUBICAL"
+
+      - name: Retain complete acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-clean-clone-evidence
+          path: ${{ env.ACCEPTANCE_ROOT }}/build/
+          if-no-files-found: warn

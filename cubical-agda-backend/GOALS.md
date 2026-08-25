@@ -21,7 +21,7 @@ Agda 源程序
 
 ## 目标 1：原版编译器的本地二进制路径
 
-**状态：未实现。**
+**状态：已实现并通过专项及 clean-clone 验收。**
 
 对不需要运行时搬运高阶同伦结构的程序，使用原版 Agda
 MAlonzo 路径编译为类型擦除的 Haskell，再由 GHC 生成单个本地二进制。
@@ -35,7 +35,7 @@ MAlonzo 路径编译为类型擦除的 Haskell，再由 GHC 生成单个本地�
 
 ## 目标 2：跨进程 Term 搬运
 
-**状态：已有实现，仍需完成 clean-clone 集成验收。**
+**状态：已实现并通过专项及 clean-clone 验收。**
 
 跨进程边界传输 Agda 已检查的 Internal `Term + Type`，并携带模块与
 interface identity。消费端必须重新检查闭性、metavariable、类型与依赖身份。
@@ -44,7 +44,7 @@ interface identity。消费端必须重新检查闭性、metavariable、类型�
 
 ## 目标 3：最终程序进程内的 runtime NbE
 
-**状态：未实现。**
+**状态：11/11 实现项及 clean-clone 全量验证已通过；独立语义验收仍未完成。**
 
 这里的“进程内”明确指最终用户程序的运行进程，不是 Agda
 编译器进程。必须把成熟 NbE 作为 runtime 组件链接到最终产物，在同一进程内
@@ -59,7 +59,10 @@ interface identity。消费端必须重新检查闭性、metavariable、类型�
 
 ## 当前代码不得被误解为的内容
 
-- 现有 compiler-process NbE candidate 不等于目标 3。
-- 现有 static Chez 输出不等于目标 1 的 MAlonzo/GHC 路径。
+- 现有 compiler-process NbE candidate 不等于目标 3。目标 3 由
+  `runtime/nbe/` 的独立窄腰实现：真实 Agda Internal 输入进入最终 MAlonzo
+  程序，锁定 cctt Core 对实际 wire 值执行 eval/quotation，Agda 适配层覆盖清单
+  声明的受限语义。真实同输入差分已有锁定 CI 证据，但在独立确认前不认定目标 3 验收完成。
+- 目标 1 使用独立的 stock MAlonzo/GHC 路径；现有 static Chez 输出未作为其证据。
 - 候选 NbE 的 8 组/42 行差分通过，不等于已通过 runtime NbE 验收。
-- 目标 1 和目标 3 全部验收项关闭前，项目不得声称“完整交付”。
+- 总体发布门禁关闭前，项目不得声称“完整交付”；三路调度技术验收通过不替代目标 3 独立语义验收。

@@ -286,7 +286,7 @@ else
   done
 fi
 
-workspace_dir=$(mktemp -d /private/tmp/agda29-formal-transport.XXXXXX)
+workspace_dir=$(mktemp -d "${TMPDIR:-/tmp}/agda29-formal-transport.XXXXXX")
 workspace_cubical_dir="$workspace_dir/cubical"
 workspace_input_dir="$workspace_dir/input"
 library_file="$workspace_dir/libraries"

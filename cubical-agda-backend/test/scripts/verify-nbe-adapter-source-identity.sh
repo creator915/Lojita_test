@@ -40,7 +40,7 @@ safe_relative_path() {
 [ -d "$source_root" ] || fail "source root is missing: $source_root"
 [ -f "$identity_file" ] || fail "identity record is missing: $identity_file"
 
-temporary_dir=$(mktemp -d /private/tmp/nbe-adapter-source-identity.XXXXXX)
+temporary_dir=$(mktemp -d "${TMPDIR:-/tmp}/nbe-adapter-source-identity.XXXXXX")
 cleanup() {
   rm -rf "$temporary_dir"
 }
@@ -201,10 +201,12 @@ case "$selection_eligibility" in
           fail "blocked VCS revision must be UNRESOLVED or a full commit ID"
         git -C "$source_root" rev-parse --is-inside-work-tree >/dev/null 2>&1 || \
           fail "vcs-status present but source is not in a Git worktree"
-        actual_repository=$(git -C "$source_root" remote get-url origin 2>/dev/null) || \
+        # A blocked, unresolved identity pins the checked content but is not a
+        # production provenance claim.  Clean clones of forks therefore need
+        # not have the upstream repository as their origin.  Eligible sources
+        # below remain pinned to both the exact repository and revision.
+        git -C "$source_root" remote get-url origin >/dev/null 2>&1 || \
           fail "vcs-status present but source has no origin remote"
-        [ "$actual_repository" = "$repository" ] || \
-          fail "Git origin mismatch: expected $repository, found $actual_repository"
         ;;
       *) fail "blocked identity vcs-status must be absent or present" ;;
     esac

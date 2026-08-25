@@ -1,6 +1,6 @@
 # Test results
 
-Last updated: 2026-08-23 (Asia/Shanghai)
+Last updated: 2026-08-25 (Asia/Shanghai)
 
 This is the current evidence ledger, not a claim that final acceptance is
 complete. An isolated selected+linked production candidate is now connected,
@@ -14,15 +14,37 @@ The latest controlled three-run release-candidate performance run passes every
 functional, time, RSS, allocation, artifact, stage, host, and publication gate
 under isolated GHC `-O2`. Its Higher/typed-residual RSS p95 is `1.194333`
 against the unchanged `1.30` ceiling. The earlier O0 result remains retained
-as an honest historical fail (`1.303373 > 1.30`). Provider identity and
-owner-approved production thresholds remain open.
+as an honest historical fail (`1.303373 > 1.30`). The compiler-process
+candidate's promotion identity and owner-approved production thresholds remain
+open for the separate compiler-process candidate. Goal 3 instead uses an
+independent final-process lock: ten unmodified cctt Core modules are pinned,
+packaged as a library, and linked behind the Agda runtime adapter.
+Goal 1 now has separate Linux x86-64 evidence from official stock Agda commit
+`84497d0`, MAlonzo and GHC 9.10.3. The maintained lane and a clone of local
+commit `7578f56` both pass two compile/run cases and two fail-closed cases.
 The controlled collector now fails closed before staging or replacing prior
 evidence when the fixed host/power/quiescence contract is not met. An earlier
 Battery Power retry was correctly rejected without staging or replacement;
 the subsequent AC-powered release run published 3,219 raw evidence files.
+Goal 2 is 9/9: macOS clean-clone run `32753401570` installs the maintained overlay into an independent locked Agda checkout, builds the runner with one locked GHC/Cabal pair, and passes the self-contained plus file/pipe/negative transport matrix. Production three-lane head `6ddd859` connects one real analysis to native, separate v2 producer/consumer packet, or linked final-process runtime NbE. A Linux clean clone passes complete `make verify`; Goal 1 run `32829677733`, Goal 3 run `32829677729`, and macOS second-clone run `32829677728` all pass. The runtime source audit no longer depends on optional `rg`; its portable-grep regression proves that the audit succeeds without ripgrep and still rejects a malicious `System.Process` source. Goal 3 has code and specialized tests for 11/11 implementation items, but independent acceptance remains pending. The runtime passes 27 self-tests;
+the real Agda bridge passes seven cases for literals, Pi, checked definitions,
+same-expression oracle comparison and fail-closed pattern definitions. The
+Stock Agda/MAlonzo/GHC final-program gate passes nine rows, including static
+runtime symbols, no compiler symbols, zero exec attempts and preserved
+`PrimTrans`/`PrimHComp` packets whose outputs agree with the Agda oracle.
+The maintained `semantic-negative-index.packet` regression now returns the
+correct `App (Var 1) (Var 0)`, and a malicious negative-index packet rejects.
+cctt linkage passes ten source hashes, fifteen actual-input Coe/HCom/Glue
+eval/quotation cases and final native symbol checks. The replacement same-input gate covers
+`t11/t11b/t09/t16a/t16b/t16c`; checked proofs now connect the residual indexed
+`t11/t11b` definitions to canonical oracles computed from their shared inputs,
+and the gate compares the Bool-pair observations exactly. PR run `32701822346`
+and push run `32701816817` both pass 6/6. This ledger records technical evidence,
+not independent Goal 3 acceptance.
 
 ## Environment
 
+- Current goal-1 replay: Linux x86-64, official Agda `84497d0`, GHC 9.10.3.
 - Host: macOS 26.3.1, arm64 Apple M4, 24 GiB RAM.
 - Local slice: Agda 2.8.0, GHC 9.12.3, Chez Scheme 10.4.1.
 - Pinned delivery tree: supplied Agda 2.9.0 snapshot, exact parent std-lib
@@ -39,8 +61,21 @@ the maintained source/input hashes and awaits an independent upstream match.
 
 | Target | Scope | Result | Time / peak RSS |
 | --- | --- | --- | --- |
+| `make verify-runtime-nbe` | runtime semantic domain, typed requests, input-dependence control, cache, limits, archive/harness link, no-exec and higher-order readback regression | 27/27 PASS | not measured |
+| `make verify-runtime-nbe-cctt-provider` | exact cctt Core source/license identity, real cctt Coe/HCom/Glue construction, input-driven eval/quotation, runtime archive and native linkage | 10 source hashes + 15 actual-input cases + symbol audits PASS | current local Linux run |
+| `make verify-runtime-nbe-agda-bridge` | real checked Agda Internal Bool/Nat/Pi and single-clause definition slice, same-expression Agda oracle, unsupported-pattern rejection | 7/7 PASS | local Linux run |
+| `make verify-runtime-nbe-differential` | same checked Agda definitions exported to the linked runtime and observed by Agda: `t11/t11b/t09/t16a/t16b/t16c` | 6/6 PASS; t11/t11b `PROOF-LINKED-SAME-INPUT-MATCH`, remaining rows `SAME-INPUT-MATCH` | PR `32701822346`; push `32701816817` |
+| `make verify-runtime-nbe-final-malonzo` | Stock Agda -> MAlonzo -> GHC user program with linked runtime; real `PrimTrans`/`PrimHComp`, unsupported-face rejection, oracle, symbol and no-exec audits | 9/9 PASS | local Linux run |
+| `make verify-runtime-nbe-oracle` | pinned Agda 2.9 + Cubical v0.9 typecheck plus five separately hand-written prototype expectations | 2 modules / 5 expectations PROTOTYPE-PASS; not a differential test | not measured |
+| `make verify-native-lane` | locked official Agda -> MAlonzo erased Haskell -> locked GHC ELF; ordinary and erased-Cubical compile/run, direct-stock differential, full-Cubical misclassification, stale publication and type-error comparison | 2 compile/run PASS + 2 fail-closed PASS; 28 generated Haskell files audited; no compiler, `TCState`, runtime NbE, Agda library or residual transport identity in either ELF; identical PASS from clean clone of `7578f56` | current Linux x86-64 run PASS on 2026-08-23; resources not benchmarked |
+| `make verify-runtime-source-audit` | portable final-process source scan independent of `rg`, plus clean and forbidden-source controls | clean source PASS; malicious `System.Process` source EXPECTED-REJECT | local Linux and current-head macOS aggregate PASS |
+| `make verify-v2-runtime` | locked Agda 2.9 overlay and runner; self-contained runtime plus stock baseline, file/stdin pipe transport, wrong-consumer and residual controls | self-contained PASS; transport matrix PASS; clean-clone run `32753401570` | macOS 15 Intel clean clone; metrics retained in artifact |
+| `make verify-three-lane-dispatch` | one checked staging analysis plus explicit boundary; native/packet/runtime-nbe selection, non-selected lane bypass, deterministic hash provenance, malformed/incoherent analysis and failed-executor rejection | 3 positive routes + 5 fail-closed classes PASS; policy-layer contract, complemented by the real end-to-end target below | under 1 s; resources not benchmarked |
+| `make verify-three-lane-e2e` | one real binding-time analysis from immutable source/consumer/include snapshots; top-level-module/full-interface identity; locked Stock Agda/MAlonzo/GHC native, separate v2 producer/consumer packet, and Stock-MAlonzo linked runtime NbE; unified limits and real failure/cancel cleanup | 3 real positives PASS; real native compile, packet producer and runtime bridge failures; type/module and source/dependency identity mismatch; linked-runtime fuel exhaustion; analyzer plus native compile/program, packet producer/consumer and runtime bridge/final TERM EXPECTED-REJECT; no live child, private stage, or stale publication | reliability hardening commit `e6d44ca` local locked-toolchain PASS; earlier Linux clean clone and macOS run `32829677728` PASS |
+| `make verify-runtime-nbe-boundary` | goal 3 final-process identity, linked-library requirement, immutable checked request/result boundary, and compiler/closure/subprocess/network prohibitions | boundary contract PASS; acceptance pending | under 1 s; resources not benchmarked |
+| `make verify` | aggregate production three-lane end-to-end plus native/packet/provider/bridge/MAlonzo/differential and legacy gates | head `6ddd859` PASS in a Linux clean clone and macOS second clean-clone run `32829677728`; Goal 1/3 runs `32829677733`/`32829677729` PASS. This is technical evidence, not independent Goal 3 acceptance. | Linux and macOS clean clones |
 | `make verify-agda29-stock-baseline` | official stock parent projection plus supplied v2 overlay | 10,084/10,084 stock files and 9/9 overlay files PASS | not benchmarked |
-| `make verify` | root-layout local Agda 2.8 static, goal/checklist/README/support/troubleshooting/benchmark documentation contracts, NbE provider census/source identity/test-only adapter spike/production candidate/lock/fallback policy, engine-result recheck, four-way binding time, typed-residual shell composition, primitive catalog, static-closure authorization, Chez core ABI, failure taxonomy, timing/host/performance/publication self-tests, Cubical static, typed rejection and safety smoke | revised status 20/56 with goals 1 and 3 explicitly open; root layout and seven-option CLI synchronized; source identity 3 positive + 6 negative; adapter spike 14 baseline-equal + 9 fail-closed; production candidate, lock, fallback, EngineResult, binding-time, residual, primitive, closure, ABI, failure, timing, performance, publication and smoke gates all PASS | current root-layout run PASS on 2026-08-23; wall time and peak RSS not separately captured |
+| historical `make verify` | root-layout local Agda 2.8 static, goal/checklist/README/support/troubleshooting/benchmark documentation contracts, NbE provider census/source identity/test-only adapter spike/production candidate/lock/fallback policy, engine-result recheck, four-way binding time, typed-residual shell composition, primitive catalog, static-closure authorization, Chez core ABI, failure taxonomy, timing/host/performance/publication self-tests, Cubical static, typed rejection and safety smoke | pre-goal-1 status 20/56 with goals 1 and 3 explicitly open; root layout and seven-option CLI synchronized; source identity 3 positive + 6 negative; adapter spike 14 baseline-equal + 9 fail-closed; production candidate, lock, fallback, EngineResult, binding-time, residual, primitive, closure, ABI, failure, timing, performance, publication and smoke gates all PASS | supplied historical root-layout run PASS on 2026-08-23; wall time and peak RSS not separately captured |
 | `make verify-agda29` | test-only ordinary/recursive-Nat/custom-data/record/Pi-Universe/alias/exact-primitive/ground+neutral-Cubical+Glue-cancellation NbE adapter differential, one isolated selected+linked production-candidate differential, cycle/fuel/invalid-projection/postulated-sort/unregistered-primitive/impostor/PrimFaceForall controls, ordinary/mixed whole-entry, closed and lambda-lifted open-hole packets, exact type/body dependency slicing, versioned Chez record/data/function/primitive ABI, opaque-shell observation, ID-addressed and batch observation, explicit Bool/Nat/Word64/Char/Int unary/vector plus single-slot, ordered, and dependent Bool/Nat/Word64/Char/Int lexical replay, registry/descriptor self-checks, general checked packet-reference mapping, quota/lock/state-transaction controls, typed proxies with composition/retention/recursive GC, and packet/bridge/producer safety negatives | 155 positive executions + 146 expected rejections PASS | current full dependency/backend fault-build recompilation PASS; wall time/peak RSS not captured |
 | `make verify-nbe-adapter-transport-base` | pinned original/projection byte identity plus test-only NbE/Agda-baseline comparison for exact `TransportBase.t01/t02/t07` | 3/3 PASS; observed/Treeless/Scheme byte-identical; `t01/t02/t07 = 7/7/4`; exact Nat and exact Nat-function transport counters verified | 4.03 s; peak RSS not measured |
 | `make verify-nbe-adapter-transport-glue` | pinned original/projection byte identity plus test-only NbE/Agda-baseline comparison for canonical `TransportGlue.t03/t04/t08`, eighteen local varying/semantic-constant/dependent-self-path/directed singleton/nested/bounded-spine/fieldwise/dependent-alias/closed-parameterized/metadata-data-record/readback-closed-function/direct-closed-Pi/outer-indexed-Pi/ground-payload-indexed-Pi positives, and non-canonical double-composition/mismatched-dependent-field/binder-indexed-stable-lookalike/nested-payload-indexed-Pi/dependent-payload-type/internal-transport-function-record/over-limit controls | all eighteen local extensions PASS with observed/Treeless/Scheme byte-identical; direct Pi/function/stable counts 3/1/1, indexed-field/application counts 1/1, and the payload case records one preserved ground field; all seven controls EXPECTED-REJECT with zero publication | current changed-source run PASS; peak RSS not measured |

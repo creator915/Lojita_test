@@ -72,7 +72,7 @@ do
   fi
 done
 
-workspace_dir=$(mktemp -d /private/tmp/agda29-nbe-transport-hit.XXXXXX)
+workspace_dir=$(mktemp -d "${TMPDIR:-/tmp}/agda29-nbe-transport-hit.XXXXXX")
 workspace_cubical_dir="$workspace_dir/cubical"
 workspace_input_dir="$workspace_dir/input"
 cleanup() {

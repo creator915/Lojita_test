@@ -23,7 +23,7 @@ groups='base glue int core boundary hit higher monolithic'
   exit 2
 }
 
-temporary_dir=$(mktemp -d /private/tmp/formal-stage-timings.XXXXXX)
+temporary_dir=$(mktemp -d "${TMPDIR:-/tmp}/formal-stage-timings.XXXXXX")
 cleanup() {
   rm -rf "$temporary_dir"
 }

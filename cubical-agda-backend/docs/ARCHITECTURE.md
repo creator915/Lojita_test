@@ -24,11 +24,15 @@ Last updated: 2026-08-23 (Asia/Shanghai)
 └── README.md                          operator-facing quick start
 ```
 
-This document describes the implemented compiler/backend slice. The product
-target is broader: goal 1 adds a stock Agda/MAlonzo/GHC lane, while goal 3 adds
-an NbE component linked into the final program process. Neither lane is
-implemented yet. The existing compiler-process adapter must not be presented
-as goal 3, and static Chez publication must not be presented as goal 1.
+This document describes the implemented compiler/backend slice. Goal 1 has an
+independent locked stock Agda/MAlonzo/GHC lane. Goal 3 is implemented for its
+declared acceptance fragment: the compiler-side bridge translates a fail-closed
+subset of checked Internal `Term + Type` plus definitions into the shared wire
+model, and a registered static Haskell package containing the vendored cctt
+Core is linked into an Agda/MAlonzo-generated final program. That path covers
+the required transport/hcomp/Glue/Pi/Sigma/Vec/S¹ cases and same-input oracle
+gate. The existing compiler-process adapter is not Goal 3 evidence. Static Chez
+publication is not used as Goal 1 evidence.
 
 The dependency direction is one-way: `src` depends on Agda APIs but never on
 tests, compatibility patches, generated evidence, or documentation.  Test
@@ -50,15 +54,44 @@ This is the architecture ledger for the current slice:
 
 | Dimension | Current decision |
 |---|---|
-| Goal | Produce verified static Chez output or a checked typed packet; never silently erase a residual Cubical value. |
+| Goal | Produce a locked stock-MAlonzo native binary, verified static Chez output, or a checked typed packet; never silently erase a residual Cubical value. |
 | Context | Agda's checked `Term`, `Type`, signature, interface hash, and explicit backend options. |
 | Action boundary | Static Scheme emission or typed packet emission; both are selected by deterministic backend code. |
 | Constraints | Closed/meta-free packet payload, dual Internal/Treeless audit, canonical packet header, no stale executable artifact on failure. |
-| Verification | Agda 2.8 smoke plus pinned Agda 2.9 cross-process positive and negative gates. |
+| Verification | Locked official Agda 2.9 MAlonzo native gates, Agda 2.8 smoke, plus pinned Agda 2.9 cross-process positive and negative gates. |
 | Correction | Fail closed, preserve diagnostics/evidence, restore temporary upstream patches through an exit trap. |
 | Open decision | The provider content manifest and GitHub origin are reproducible; approved immutable revision and license identity, owner-approved performance thresholds, and a general type-preserving typed-value embedding beyond the versioned Chez core ABI and checked packet-reference boundary remain open. Formal functional differential, stage timing, and the provisional controlled O2 performance gate are complete. |
 
-## Safety boundary
+## Goal 1 native lane
+
+`bin/cubical-agda-native` is separate from `src/Main.hs` and never registers the
+Chez backend. It validates `config/native-toolchain.lock.tsv`, requires a clean
+official Agda checkout at the exact revision, and accepts either an ordinary
+entry module or the written erased-Cubical class in `docs/NATIVE_LANE.md`.
+
+The first stock invocation uses `--ghc-dont-call-ghc`. The driver audits the
+complete MAlonzo source set and records its hashes. The second stock invocation
+uses `--with-compiler` with the locked GHC; source hashes must not change. The
+resulting executable is rejected if `nm`, `strings`, or dynamic-link evidence
+contains Agda compiler/typechecker identities, `TCState`, CubicalChez NbE, the
+Agda library, or residual transport primitives. Only the binary and its four
+evidence files are published, and every failure removes those exact outputs.
+
+The erased-Cubical class is deliberately narrow. Stock Agda's erasure checker
+must accept the program. Three exact generated-only identity stubs in the
+locked primitive support module are permitted, but they may not occur in any
+other generated module and may not appear in the final binary.
+
+## Goal 3 final-process runtime
+
+The Goal 3 runtime sits in the final user-program process, outside this
+compiler-process diagram. Its normative process and data boundary is
+`config/runtime-nbe-boundary.tsv`, explained in
+`docs/RUNTIME_NBE_BOUNDARY.md`. Only immutable checked `Term + Type`, a closed
+definition slice and context identity may enter that linked runtime. Semantic
+closures and `TCState` never cross; an Agda subprocess or compiler callback is
+forbidden. `docs/RUNTIME_NBE_ABI.md` records the implemented narrow-waist ABI
+and its explicit fail-closed semantic limits.
 
 ```text
 Agda elaboration and type checking
@@ -287,8 +320,15 @@ forces dynamic whole-entry residual handling, retains effective engine `nbe`,
 and does not invoke the baseline normalizer.
 Unavailable, timeout, failed, and invalid-readback outcomes remain fail-closed.
 See `ENGINE_CONTRACT.md`.
-The inspected `AndrasKovacs/cctt` candidate is not a drop-in Agda library; see
-`NBE_SELECTION.md` for the semantic and packaging gap.
+The upstream `AndrasKovacs/cctt` executable is not a drop-in Agda library. Goal
+3 therefore vendors its unmodified Core modules behind a repository-owned
+Cabal library and an explicit Agda-wire semantic adapter. The bounded adapter
+encodes the actual bounded wire value as a closed term and constructs cctt's
+own `Coe`, `HCom`, `GlueTy`, `Glue`, and `Unglue` syntax for the Cubical action.
+It decodes the quoted normal form; Church terms are data encodings, not a
+selector or host-side transport replacement, and no fixed cctt probe authorizes
+a separately computed value. See
+`NBE_SELECTION.md` for the separation from the compiler-process candidate.
 
 The boundary does not trust either implementation's read-back. Before
 Treeless conversion, `validateEngineResult` requires the returned term/type

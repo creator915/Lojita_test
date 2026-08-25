@@ -10,10 +10,13 @@ Copy the paths below into the same paths in the pinned Agda tree:
 - `src/cubical-run/Main.hs`
 - `test/CubicalRuntime/`
 
-Append `agda-cubical-run.cabal.fragment` to the executable section of the
-pinned `Agda.cabal`, then build `exe:agda-cubical-run`. The runtime source in
-this repository already includes the bounded and exception-safe packet decode
-changes represented by `compat/agda-2.9/runtime-safe-packet-decode.patch`.
+Register `Agda.TypeChecking.Primitive.Cubical.Runtime` in the Agda library
+module list, append `agda-cubical-run.cabal.fragment` to the pinned
+`Agda.cabal`, then build `exe:agda-cubical-run`. The maintained
+`test/scripts/install-v2-runtime-overlay.sh` performs these steps and rejects
+duplicate installation. The runtime source in this repository already includes
+the bounded and exception-safe packet decode changes represented by
+`compat/agda-2.9/runtime-safe-packet-decode.patch`.
 
 This component implements checked cross-process `Term + Type` transport. It is
 not the linked runtime NbE required by goal 3.

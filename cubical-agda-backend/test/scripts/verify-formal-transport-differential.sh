@@ -52,7 +52,7 @@ comparison_summary="$evidence_dir/summary.tsv"
 printf 'group\tbaseline_engine\tcandidate_engine\trows\tstatus\n' \
   > "$comparison_summary"
 
-temporary_dir=$(mktemp -d /private/tmp/formal-transport-differential.XXXXXX)
+temporary_dir=$(mktemp -d "${TMPDIR:-/tmp}/formal-transport-differential.XXXXXX")
 cleanup() {
   rm -rf "$temporary_dir"
 }
