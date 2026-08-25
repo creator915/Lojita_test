@@ -171,10 +171,23 @@ sha256_file() {
 }
 
 stage=$(mktemp -d "$output_parent/.cubical-agda-native.XXXXXX")
+child_pid=
 cleanup() {
   rm -rf -- "$stage"
 }
-trap cleanup EXIT HUP INT TERM
+interrupt_child() {
+  local signal=$1
+  local status=$2
+  if [[ -n $child_pid ]]; then
+    kill -s "$signal" "$child_pid" 2>/dev/null || true
+    wait "$child_pid" 2>/dev/null || true
+  fi
+  exit "$status"
+}
+trap cleanup EXIT
+trap 'interrupt_child HUP 129' HUP
+trap 'interrupt_child INT 130' INT
+trap 'interrupt_child TERM 143' TERM
 
 source_dir=$(CDPATH= cd -- "$(dirname -- "$source_file")" && pwd -P)
 source_file=$source_dir/$(basename -- "$source_file")
@@ -196,8 +209,11 @@ declare -a generate_args=(
 
 set +e
 Agda_datadir="$agda_data_dir" "$agda" "${generate_args[@]}" \
-  >"$stage/agda-generate.stdout" 2>"$stage/agda-generate.stderr"
+  >"$stage/agda-generate.stdout" 2>"$stage/agda-generate.stderr" &
+child_pid=$!
+wait "$child_pid"
 generate_status=$?
+child_pid=
 set -e
 cat "$stage/agda-generate.stdout"
 cat "$stage/agda-generate.stderr" >&2
@@ -265,8 +281,11 @@ declare -a compile_args=(
 
 set +e
 Agda_datadir="$agda_data_dir" "$agda" "${compile_args[@]}" \
-  >"$stage/agda-ghc.stdout" 2>"$stage/agda-ghc.stderr"
+  >"$stage/agda-ghc.stdout" 2>"$stage/agda-ghc.stderr" &
+child_pid=$!
+wait "$child_pid"
 compile_status=$?
+child_pid=
 set -e
 cat "$stage/agda-ghc.stdout"
 cat "$stage/agda-ghc.stderr" >&2
@@ -330,4 +349,7 @@ cp "$stage/malonzo-sources.tar" "$malonzo_archive"
   printf 'result\tPASS\n'
 } > "$provenance_file"
 
+rm -rf -- "$stage"
+stage=
+trap - EXIT HUP INT TERM
 printf 'native lane PASS: %s\n' "$output_file"

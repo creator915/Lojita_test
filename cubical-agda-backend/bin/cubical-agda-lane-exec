@@ -1,0 +1,261 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+fail() { printf 'CCZ-LANE-REJECT: %s\n' "$*" >&2; exit 65; }
+need_value() { [[ $# -ge 2 ]] || fail "missing value for $1"; }
+
+output_dir=
+classification=
+expression=
+consumer=
+consumer_source=
+declare -a include_dirs=('')
+declare -a agda_args=('')
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --output-dir) need_value "$@"; output_dir=$2; shift 2 ;;
+    --classification) need_value "$@"; classification=$2; shift 2 ;;
+    --expression) need_value "$@"; expression=$2; shift 2 ;;
+    --consumer) need_value "$@"; consumer=$2; shift 2 ;;
+    --consumer-source) need_value "$@"; consumer_source=$2; shift 2 ;;
+    --include) need_value "$@"; include_dirs+=("$2"); shift 2 ;;
+    --agda-arg) need_value "$@"; agda_args+=("$2"); shift 2 ;;
+    *) fail "unknown argument: $1" ;;
+  esac
+done
+
+lane=${CUBICAL_DISPATCH_LANE:-}
+source_file=${CUBICAL_DISPATCH_SOURCE:-}
+case $lane in native|packet|runtime-nbe) ;; *) fail "invalid production lane: $lane" ;; esac
+[[ -f $source_file ]] || fail "checked source is missing: $source_file"
+[[ -d $output_dir ]] || fail "output directory does not exist: $output_dir"
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+output_dir=$(CDPATH= cd -- "$output_dir" && pwd -P)
+source_dir=$(CDPATH= cd -- "$(dirname -- "$source_file")" && pwd -P)
+source_file=$source_dir/$(basename -- "$source_file")
+consumer_source=${consumer_source:-$source_file}
+
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{ print $1 }'
+  else
+    shasum -a 256 "$1" | awk '{ print $1 }'
+  fi
+}
+
+stage=$(mktemp -d "$output_dir/.lane-exec.XXXXXX")
+success=no
+child_pid=
+cleanup_lane_publications() {
+  case $lane in
+    native)
+      rm -f -- "$output_dir/native-program" "$output_dir/native-program.provenance.tsv" \
+        "$output_dir/native-program.malonzo.sha256" "$output_dir/native-program.malonzo.tar" \
+        "$output_dir/native-program.binary-audit.txt" "$output_dir/native.observation" \
+        "$output_dir/native.provenance.tsv"
+      ;;
+    packet)
+      rm -f -- "$output_dir/term.packet" "$output_dir/packet.observation" \
+        "$output_dir/packet.provenance.tsv"
+      ;;
+    runtime-nbe)
+      rm -f -- "$output_dir/runtime-nbe.packet" "$output_dir/runtime-nbe.observation" \
+        "$output_dir/runtime-nbe.provenance.tsv"
+      ;;
+  esac
+}
+cleanup() {
+  rm -rf -- "$stage"
+  [[ $success == yes ]] || cleanup_lane_publications
+}
+interrupt_child() {
+  local signal=$1 status=$2
+  if [[ -n $child_pid ]]; then
+    kill -s "$signal" "$child_pid" 2>/dev/null || true
+    wait "$child_pid" 2>/dev/null || true
+  fi
+  exit "$status"
+}
+trap cleanup EXIT
+trap 'interrupt_child HUP 129' HUP
+trap 'interrupt_child INT 130' INT
+trap 'interrupt_child TERM 143' TERM
+
+case $lane in
+  native)
+    native_driver=$repo_root/bin/cubical-agda-native
+    native_lock=${CUBICAL_NATIVE_LOCK:?set CUBICAL_NATIVE_LOCK}
+    native_agda=${CUBICAL_NATIVE_AGDA:?set CUBICAL_NATIVE_AGDA}
+    native_agda_source=${CUBICAL_NATIVE_AGDA_SOURCE:?set CUBICAL_NATIVE_AGDA_SOURCE}
+    native_agda_data=${CUBICAL_NATIVE_AGDA_DATA:?set CUBICAL_NATIVE_AGDA_DATA}
+    native_ghc=${CUBICAL_NATIVE_GHC:?set CUBICAL_NATIVE_GHC}
+    [[ $classification == ordinary || $classification == erased-cubical ]] ||
+      fail "native lane requires a valid classification"
+    declare -a native_command=(
+      "$native_driver" --lock "$native_lock" --agda "$native_agda"
+      --agda-source "$native_agda_source" --agda-data-dir "$native_agda_data"
+      --ghc "$native_ghc" --classification "$classification"
+      --source "$source_file" --output "$output_dir/native-program"
+    )
+    for include_dir in "${include_dirs[@]:1}"; do
+      native_command+=(--include "$include_dir")
+    done
+    set +e
+    "${native_command[@]}" &
+    child_pid=$!
+    wait "$child_pid"
+    native_compile_status=$?
+    child_pid=
+    set -e
+    [[ $native_compile_status -eq 0 ]] || exit "$native_compile_status"
+    set +e
+    "$output_dir/native-program" > "$stage/observation" 2> "$stage/native.stderr" &
+    child_pid=$!
+    wait "$child_pid"
+    native_status=$?
+    child_pid=
+    set -e
+    if [[ $native_status -ne 0 ]]; then
+      cat "$stage/observation"; cat "$stage/native.stderr" >&2; exit "$native_status"
+    fi
+    mv -- "$stage/observation" "$output_dir/native.observation"
+    {
+      printf 'format\tnative-program-adapter-v1\n'
+      printf 'lane\tnative\n'
+      printf 'analysis-source\tchecked-manifest\n'
+      printf 'compiler\tstock-agda-malonzo-ghc\n'
+      printf 'term-packet\tnone\n'
+      printf 'runtime-nbe\tnone\n'
+      printf 'source-sha256\t%s\n' "$(sha256_file "$source_file")"
+      printf 'binary-sha256\t%s\n' "$(sha256_file "$output_dir/native-program")"
+      printf 'observation-sha256\t%s\n' "$(sha256_file "$output_dir/native.observation")"
+      printf 'result\tPASS\n'
+    } > "$stage/provenance"
+    mv -- "$stage/provenance" "$output_dir/native.provenance.tsv"
+    ;;
+
+  packet)
+    runner=${CUBICAL_PACKET_RUNNER:?set CUBICAL_PACKET_RUNNER}
+    packet_agda_data=${CUBICAL_PACKET_AGDA_DATA:?set CUBICAL_PACKET_AGDA_DATA}
+    [[ -x $runner ]] || fail "packet runner is not executable: $runner"
+    [[ -n $expression && -n $consumer ]] || fail "packet lane requires producer and consumer"
+    [[ -f $consumer_source ]] || fail "packet consumer source is missing: $consumer_source"
+    consumer_dir=$(CDPATH= cd -- "$(dirname -- "$consumer_source")" && pwd -P)
+    consumer_source=$consumer_dir/$(basename -- "$consumer_source")
+    declare -a producer=(-v0 -i "$source_dir" --no-write-interfaces)
+    producer+=("${agda_args[@]:1}" "--cubical-export=$expression" \
+      "--cubical-term-file=$stage/term.packet" "$source_file")
+    set +e
+    Agda_datadir="$packet_agda_data" "$runner" "${producer[@]}" \
+      > "$stage/producer.stdout" 2> "$stage/producer.stderr" &
+    child_pid=$!
+    wait "$child_pid"
+    producer_status=$?
+    child_pid=
+    set -e
+    if [[ $producer_status -ne 0 ]]; then
+      cat "$stage/producer.stdout"; cat "$stage/producer.stderr" >&2; exit "$producer_status"
+    fi
+    [[ -s $stage/term.packet ]] || fail "packet producer emitted no Term packet"
+    declare -a importer=(-v0 -i "$consumer_dir" --no-write-interfaces)
+    importer+=("${agda_args[@]:1}" "--cubical-import=$consumer" \
+      "--cubical-term-file=$stage/term.packet" "$consumer_source")
+    set +e
+    Agda_datadir="$packet_agda_data" "$runner" "${importer[@]}" \
+      > "$stage/observation" 2> "$stage/consumer.stderr" &
+    child_pid=$!
+    wait "$child_pid"
+    consumer_status=$?
+    child_pid=
+    set -e
+    if [[ $consumer_status -ne 0 ]]; then
+      cat "$stage/observation"; cat "$stage/consumer.stderr" >&2; exit "$consumer_status"
+    fi
+    mv -- "$stage/term.packet" "$output_dir/term.packet"
+    mv -- "$stage/observation" "$output_dir/packet.observation"
+    {
+      printf 'format\tterm-packet-program-adapter-v1\n'
+      printf 'lane\tpacket\n'
+      printf 'packet-format\tagda-cubical-runtime-term-v2\n'
+      printf 'payload\tchecked-internal-term+type\n'
+      printf 'semantic-closure\tnone\n'
+      printf 'tcstate\tnone\n'
+      printf 'source-sha256\t%s\n' "$(sha256_file "$source_file")"
+      printf 'consumer-source-sha256\t%s\n' "$(sha256_file "$consumer_source")"
+      printf 'runner-sha256\t%s\n' "$(sha256_file "$runner")"
+      printf 'packet-sha256\t%s\n' "$(sha256_file "$output_dir/term.packet")"
+      printf 'observation-sha256\t%s\n' "$(sha256_file "$output_dir/packet.observation")"
+      printf 'result\tPASS\n'
+    } > "$stage/provenance"
+    mv -- "$stage/provenance" "$output_dir/packet.provenance.tsv"
+    ;;
+
+  runtime-nbe)
+    bridge=${CUBICAL_RUNTIME_BRIDGE:?set CUBICAL_RUNTIME_BRIDGE}
+    runtime_agda_data=${CUBICAL_RUNTIME_AGDA_DATA:?set CUBICAL_RUNTIME_AGDA_DATA}
+    final_program=${CUBICAL_RUNTIME_FINAL_PROGRAM:?set CUBICAL_RUNTIME_FINAL_PROGRAM}
+    [[ -x $bridge && -x $final_program ]] || fail "runtime bridge/final program is missing"
+    [[ -n $expression ]] || fail "runtime lane requires an expression"
+    strings "$final_program" > "$stage/final.strings"
+    grep -Fq 'cctt-core-runtime-v1@ba16f3758a322e9be77ada1da2b93f45d500192e' \
+      "$stage/final.strings" || fail "final program lacks the locked cctt marker"
+    sh "$repo_root/test/scripts/check-ghc-symbols.sh" "$final_program" \
+      _Core_eval_info _Quotation_quoteUnfold_info || fail "final program lacks cctt symbols"
+    declare -a runtime_common=(-v0 -i "$source_dir" --no-write-interfaces)
+    runtime_common+=("${agda_args[@]:1}")
+    set +e
+    Agda_datadir="$runtime_agda_data" "$bridge" "${runtime_common[@]}" \
+      "--cubical-runtime-nbe-export=$expression" \
+      "--cubical-runtime-nbe-file=$stage/runtime.packet" "$source_file" \
+      > "$stage/bridge.stdout" 2> "$stage/bridge.stderr" &
+    child_pid=$!
+    wait "$child_pid"
+    bridge_status=$?
+    child_pid=
+    set -e
+    if [[ $bridge_status -ne 0 ]]; then
+      cat "$stage/bridge.stdout"; cat "$stage/bridge.stderr" >&2; exit "$bridge_status"
+    fi
+    [[ -s $stage/runtime.packet ]] || fail "runtime bridge emitted no packet"
+    context=$(sed -n '2s/.*packetContext = "\([^"]*\)".*/\1/p' "$stage/runtime.packet")
+    [[ -n $context ]] || fail "runtime packet has no compiled-context identity"
+    set +e
+    "$final_program" "$context" "$stage/runtime.packet" \
+      > "$stage/observation" 2> "$stage/final.stderr" &
+    child_pid=$!
+    wait "$child_pid"
+    final_status=$?
+    child_pid=
+    set -e
+    if [[ $final_status -ne 0 ]]; then
+      cat "$stage/observation"; cat "$stage/final.stderr" >&2; exit "$final_status"
+    fi
+    grep -q '^OK' "$stage/observation" || fail "linked final program returned no runtime success"
+    mv -- "$stage/runtime.packet" "$output_dir/runtime-nbe.packet"
+    mv -- "$stage/observation" "$output_dir/runtime-nbe.observation"
+    {
+      printf 'format\truntime-nbe-program-adapter-v1\n'
+      printf 'lane\truntime-nbe\n'
+      printf 'packet-format\tcubical-runtime-nbe-v1\n'
+      printf 'execution\tlinked-final-program-process\n'
+      printf 'compiler-subprocess\tnone\n'
+      printf 'source-sha256\t%s\n' "$(sha256_file "$source_file")"
+      printf 'bridge-sha256\t%s\n' "$(sha256_file "$bridge")"
+      printf 'final-program-sha256\t%s\n' "$(sha256_file "$final_program")"
+      printf 'packet-sha256\t%s\n' "$(sha256_file "$output_dir/runtime-nbe.packet")"
+      printf 'observation-sha256\t%s\n' "$(sha256_file "$output_dir/runtime-nbe.observation")"
+      printf 'compiled-context\t%s\n' "$context"
+      printf 'provider\tcctt-core-runtime-v1@ba16f3758a322e9be77ada1da2b93f45d500192e\n'
+      printf 'result\tPASS\n'
+    } > "$stage/provenance"
+    mv -- "$stage/provenance" "$output_dir/runtime-nbe.provenance.tsv"
+    ;;
+esac
+
+rm -rf -- "$stage"
+stage=
+success=yes
+trap - EXIT HUP INT TERM
+printf 'CubicalAgdaLaneExec PASS (%s)\n' "$lane"

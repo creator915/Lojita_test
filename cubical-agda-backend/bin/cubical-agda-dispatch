@@ -203,6 +203,21 @@ case $lane in
     arguments_sha256=$(printf '%s\0' "${runtime_nbe_args[@]:1}" | sha256_stream) ;;
 esac
 
+lane_pid=
+interrupt_lane() {
+  local signal=$1
+  local status=$2
+  if [[ -n $lane_pid ]]; then
+    kill -s "$signal" "$lane_pid" 2>/dev/null || true
+    wait "$lane_pid" 2>/dev/null || true
+  fi
+  rm -f -- "$provenance"
+  exit "$status"
+}
+trap 'interrupt_lane HUP 129' HUP
+trap 'interrupt_lane INT 130' INT
+trap 'interrupt_lane TERM 143' TERM
+
 set +e
 case $lane in
   native)
@@ -210,27 +225,29 @@ case $lane in
     CUBICAL_DISPATCH_ANALYSIS=$analysis \
     CUBICAL_DISPATCH_SOURCE=$source_file \
     CUBICAL_DISPATCH_BOUNDARY=$boundary \
-      "$selected_exec" "${native_args[@]:1}"
-    lane_status=$?
+      "$selected_exec" "${native_args[@]:1}" &
     ;;
   packet)
     CUBICAL_DISPATCH_LANE=$lane \
     CUBICAL_DISPATCH_ANALYSIS=$analysis \
     CUBICAL_DISPATCH_SOURCE=$source_file \
     CUBICAL_DISPATCH_BOUNDARY=$boundary \
-      "$selected_exec" "${packet_args[@]:1}"
-    lane_status=$?
+      "$selected_exec" "${packet_args[@]:1}" &
     ;;
   runtime-nbe)
     CUBICAL_DISPATCH_LANE=$lane \
     CUBICAL_DISPATCH_ANALYSIS=$analysis \
     CUBICAL_DISPATCH_SOURCE=$source_file \
     CUBICAL_DISPATCH_BOUNDARY=$boundary \
-      "$selected_exec" "${runtime_nbe_args[@]:1}"
-    lane_status=$?
+      "$selected_exec" "${runtime_nbe_args[@]:1}" &
     ;;
 esac
+lane_pid=$!
+wait "$lane_pid"
+lane_status=$?
+lane_pid=
 set -e
+trap - HUP INT TERM
 [[ $lane_status -eq 0 ]] || exit "$lane_status"
 
 provenance_temp=$(mktemp "$provenance_parent/.three-lane-dispatch.XXXXXX")

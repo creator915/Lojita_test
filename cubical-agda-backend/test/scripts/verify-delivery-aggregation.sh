@@ -15,6 +15,7 @@ verify_dependencies=$(sed -n 's/^verify:[[:space:]]*//p' "$makefile")
 for target in \
   verify-three-lane-dispatch \
   verify-native-lane \
+  verify-three-lane-e2e \
   verify-v2-runtime-overlay-install \
   verify-v2-runtime \
   verify-runtime-source-audit \
@@ -55,4 +56,4 @@ for fact in \
     fail "macOS clean-clone workflow is missing: $fact"
 done
 
-echo 'DeliveryAggregation PASS (three-lane dispatch plus native/packet/provider/bridge/MAlonzo/differential in make verify; macOS clean clone)'
+echo 'DeliveryAggregation PASS (real three-lane execution plus native/packet/provider/bridge/MAlonzo/differential verification in make verify; macOS clean clone)'
