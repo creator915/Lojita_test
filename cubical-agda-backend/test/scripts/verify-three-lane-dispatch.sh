@@ -14,6 +14,14 @@ fail() {
   exit 1
 }
 
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{ print $1 }'
+  else
+    shasum -a 256 "$1" | awk '{ print $1 }'
+  fi
+}
+
 require_field() {
   file=$1
   key=$2
@@ -42,6 +50,7 @@ write_analysis() {
     printf 'binding-time-action: %s\n' "$action"
     printf 'decision: %s\n' "$decision"
     printf 'type-erasure-authorized: %s\n' "$erasure"
+    printf 'source-sha256: %s\n' "$(sha256_file "$workspace/source.agda")"
   } > "$file"
 }
 

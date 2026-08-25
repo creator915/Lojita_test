@@ -110,6 +110,10 @@ analysis_decision=$(manifest_value decision) ||
   fail "analysis must contain exactly one non-empty decision"
 type_erasure_authorized=$(manifest_value type-erasure-authorized) ||
   fail "analysis must contain exactly one type-erasure-authorized decision"
+analysis_source_sha256=$(manifest_value source-sha256) ||
+  fail "analysis must contain exactly one non-empty source-sha256"
+[[ $analysis_source_sha256 =~ ^[0-9a-f]{64}$ ]] ||
+  fail "analysis source-sha256 must be 64 lowercase hexadecimal characters"
 
 case $binding_time:$boundary in
   static:none)
@@ -192,6 +196,8 @@ sha256_stream() {
 }
 
 source_sha256=$(sha256_file "$source_file")
+[[ $source_sha256 == "$analysis_source_sha256" ]] ||
+  fail "analysis source SHA-256 does not match the current source"
 analysis_sha256=$(sha256_file "$analysis")
 executor_sha256=$(sha256_file "$selected_exec")
 case $lane in
@@ -224,6 +230,7 @@ case $lane in
     CUBICAL_DISPATCH_LANE=$lane \
     CUBICAL_DISPATCH_ANALYSIS=$analysis \
     CUBICAL_DISPATCH_SOURCE=$source_file \
+    CUBICAL_DISPATCH_SOURCE_SHA256=$analysis_source_sha256 \
     CUBICAL_DISPATCH_BOUNDARY=$boundary \
       "$selected_exec" "${native_args[@]:1}" &
     ;;
@@ -231,6 +238,7 @@ case $lane in
     CUBICAL_DISPATCH_LANE=$lane \
     CUBICAL_DISPATCH_ANALYSIS=$analysis \
     CUBICAL_DISPATCH_SOURCE=$source_file \
+    CUBICAL_DISPATCH_SOURCE_SHA256=$analysis_source_sha256 \
     CUBICAL_DISPATCH_BOUNDARY=$boundary \
       "$selected_exec" "${packet_args[@]:1}" &
     ;;
@@ -238,6 +246,7 @@ case $lane in
     CUBICAL_DISPATCH_LANE=$lane \
     CUBICAL_DISPATCH_ANALYSIS=$analysis \
     CUBICAL_DISPATCH_SOURCE=$source_file \
+    CUBICAL_DISPATCH_SOURCE_SHA256=$analysis_source_sha256 \
     CUBICAL_DISPATCH_BOUNDARY=$boundary \
       "$selected_exec" "${runtime_nbe_args[@]:1}" &
     ;;

@@ -4,6 +4,8 @@ set -euo pipefail
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
 program=$repo_root/bin/cubical-agda-run
+dispatcher=$repo_root/bin/cubical-agda-dispatch
+lane_exec=$repo_root/bin/cubical-agda-lane-exec
 analyzer=$repo_root/build/cubical-chez-agda29
 native_fixture=$repo_root/test/fixtures/three-lane/NativeProgram.agda
 packet_fixture=$repo_root/test/fixtures/agda/PacketResidual.agda
@@ -44,7 +46,7 @@ archive_execution() {
 trap archive_execution EXIT
 
 fail() { echo "ThreeLaneE2E FAIL: $*" >&2; exit 1; }
-for executable in "$program" "$analyzer" "$packet_runner" "$runtime_bridge" \
+for executable in "$program" "$dispatcher" "$lane_exec" "$analyzer" "$packet_runner" "$runtime_bridge" \
   "$runtime_final" "$runtime_standalone" "$NATIVE_AGDA" "$NATIVE_GHC"; do
   [[ -x $executable ]] || fail "required executable is missing: $executable"
 done
@@ -75,6 +77,13 @@ require_field() {
     $1 == key && $2 == expected { count++ }
     END { if (count != 1) exit 1 }
   ' "$file" || fail "$file lacks $key=$expected"
+}
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{ print $1 }'
+  else
+    shasum -a 256 "$1" | awk '{ print $1 }'
+  fi
 }
 assert_no_staging() {
   local directory=$1
@@ -173,10 +182,39 @@ run_program --source "$native_fixture" --entry analysis --boundary none \
   fail "native binary output mismatch"
 require_field "$shared_output/dispatch.provenance.tsv" lane native
 require_field "$shared_output/native.provenance.tsv" term-packet none
+grep -Fqx "source-sha256: $(sha256_file "$native_fixture")" \
+  "$shared_output/analysis.txt" || fail "analysis was not bound to the native source bytes"
 [[ -x $shared_output/native-program ]] || fail "native executable was not published"
 [[ ! -e $shared_output/term.packet && ! -e $shared_output/runtime-nbe.packet ]] ||
   fail "native run retained a different lane"
 assert_no_staging "$shared_output"
+
+# A real analysis must not authorize any production lane after its source bytes
+# change. Reuse the checked native analysis with an initially byte-identical
+# source copy, mutate that copy, and configure the real production executor.
+mutation_source_dir=$execution_root/mutated-source
+mutation_output=$execution_root/mutation-output
+mkdir -p "$mutation_source_dir" "$mutation_output"
+mutation_source=$mutation_source_dir/NativeProgram.agda
+cp -- "$native_fixture" "$mutation_source"
+cp -- "$shared_output/analysis.txt" "$workspace/native.analysis.txt"
+printf '\n-- changed after analysis\n' >> "$mutation_source"
+set +e
+env "${program_environment[@]}" "$dispatcher" \
+  --analysis "$workspace/native.analysis.txt" --source "$mutation_source" \
+  --boundary none --provenance "$mutation_output/dispatch.provenance.tsv" \
+  --native-exec "$lane_exec" --native-arg --output-dir \
+  --native-arg "$mutation_output" --native-arg --classification \
+  --native-arg ordinary \
+  > "$workspace/source-mutation.stdout" 2> "$workspace/source-mutation.stderr"
+mutation_status=$?
+set -e
+[[ $mutation_status -eq 65 ]] ||
+  fail "post-analysis source mutation returned $mutation_status instead of 65"
+grep -Fq 'analysis source SHA-256 does not match the current source' \
+  "$workspace/source-mutation.stderr" ||
+  fail "post-analysis source mutation missed the stable hash rejection"
+assert_no_publications "$mutation_output"
 
 # TERM during the real analyzer must remove every private and public artifact.
 cancel_output=$execution_root/cancel-output

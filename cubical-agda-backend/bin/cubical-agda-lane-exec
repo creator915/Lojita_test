@@ -27,6 +27,7 @@ done
 
 lane=${CUBICAL_DISPATCH_LANE:-}
 source_file=${CUBICAL_DISPATCH_SOURCE:-}
+analysis_source_sha256=${CUBICAL_DISPATCH_SOURCE_SHA256:-}
 case $lane in native|packet|runtime-nbe) ;; *) fail "invalid production lane: $lane" ;; esac
 [[ -f $source_file ]] || fail "checked source is missing: $source_file"
 [[ -d $output_dir ]] || fail "output directory does not exist: $output_dir"
@@ -44,6 +45,11 @@ sha256_file() {
     shasum -a 256 "$1" | awk '{ print $1 }'
   fi
 }
+
+[[ $analysis_source_sha256 =~ ^[0-9a-f]{64}$ ]] ||
+  fail "dispatch supplied no valid analysis source SHA-256"
+[[ $(sha256_file "$source_file") == "$analysis_source_sha256" ]] ||
+  fail "source changed after analysis and before lane execution"
 
 stage=$(mktemp -d "$output_dir/.lane-exec.XXXXXX")
 success=no

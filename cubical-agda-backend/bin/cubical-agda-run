@@ -89,6 +89,16 @@ source_file=$source_dir/$(basename -- "$source_file")
 output_dir=$(CDPATH= cd -- "$output_dir" && pwd -P)
 packet_consumer_source=${packet_consumer_source:-$source_file}
 
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{ print $1 }'
+  else
+    shasum -a 256 "$1" | awk '{ print $1 }'
+  fi
+}
+
+analysis_source_sha256=$(sha256_file "$source_file")
+
 published_artifacts='
 analysis.txt
 dispatch.provenance.tsv
@@ -165,6 +175,14 @@ case $binding_time in
   dynamic|mixed|unsupported) [[ $analyzer_status -ne 0 ]] || fail "$binding_time analysis unexpectedly reported static success" ;;
   *) fail "unknown binding-time class: $binding_time" ;;
 esac
+
+post_analysis_source_sha256=$(sha256_file "$source_file")
+[[ $post_analysis_source_sha256 == "$analysis_source_sha256" ]] ||
+  fail "source changed while binding-time analysis was running"
+if grep -q '^source-sha256: ' "$stage/staging.txt"; then
+  fail "analysis unexpectedly supplied its own source-sha256"
+fi
+printf 'source-sha256: %s\n' "$analysis_source_sha256" >> "$stage/staging.txt"
 
 cp -- "$stage/staging.txt" "$output_dir/analysis.txt"
 declare -a dispatch_command=(
