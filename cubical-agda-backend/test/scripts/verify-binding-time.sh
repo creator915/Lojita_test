@@ -210,6 +210,11 @@ bind_analysis_source() {
     exit 1
   fi
   printf 'source-sha256: %s\n' "$(sha256_file "$source")" >> "$analysis"
+  if grep -q '^input-tree-sha256: ' "$analysis"; then
+    echo "Binding-time analyzer unexpectedly supplied input-tree-sha256" >&2
+    exit 1
+  fi
+  printf 'input-tree-sha256: %s\n' "$(sha256_file "$source")" >> "$analysis"
 }
 bind_analysis_source "$static_dir/staging.txt" "$static_dir/StaticOrdinary.agda"
 bind_analysis_source "$evidence_dir/dynamic/staging.txt" \

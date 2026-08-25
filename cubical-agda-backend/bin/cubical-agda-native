@@ -203,6 +203,7 @@ declare -a generate_args=(
   --ghc-dont-call-ghc
   --compile-dir="$stage"
   --no-libraries
+  --no-write-interfaces
   "${include_args[@]}"
   "$source_file"
 )
@@ -272,6 +273,7 @@ declare -a compile_args=(
   --compile
   --compile-dir="$stage"
   --no-libraries
+  --no-write-interfaces
   --with-compiler="$ghc"
   --ghc-flag=-o
   --ghc-flag="$stage/native-program"

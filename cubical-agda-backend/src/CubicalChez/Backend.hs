@@ -1,6605 +1,2198 @@
-{-# LANGUAGE CPP #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE OverloadedStrings #-}
-
-module CubicalChez.Backend (chezBackend) where
-
-import Agda.Compiler.Backend
-#if defined(CUBICAL_CHEZ_AGDA_29)
-import Agda.Compiler.Common (curIF)
-#endif
-#if defined(CUBICAL_CHEZ_AGDA_29)
-import Agda.Compiler.ToTreeless (closedTermToTreeless, mkDefaultCCConfig)
-#else
-import Agda.Compiler.ToTreeless (CCSubst (EraseUnused), closedTermToTreeless)
-#endif
-import Agda.Syntax.Common.Pretty (prettyShow)
-import Agda.Syntax.Common (Hiding (NotHidden), getHiding)
-#if defined(CUBICAL_CHEZ_TEST_UNRESOLVED_META) || defined(CUBICAL_CHEZ_TEST_ENGINE_UNRESOLVED_META)
-import Agda.Syntax.Common (MetaId (MetaId), noModuleNameHash)
-#endif
-import Agda.Syntax.Internal
-  ( Clause (..)
-  , ConHead
-  , ConInfo
-  , Term
-  , Type
-  , telToList
-  )
-import qualified Agda.Syntax.Internal as Internal
-import Agda.Syntax.Internal.Names (NamesIn, namesIn)
-import Agda.Syntax.Literal (Literal (..))
-import Agda.Syntax.Internal.MetaVars (noMetas)
-import Agda.TypeChecking.Records
-  ( etaExpandRecord_
-  , isEtaRecordType
-  , isRecord
-  , mkCon
-  )
-import Agda.TypeChecking.Reduce (normalise, reduce)
-import Agda.TypeChecking.Free (closed)
-import Agda.TypeChecking.Substitute (teleLam, telePi)
-import qualified Agda.TypeChecking.CheckInternal as CheckInternal
-import qualified Agda.TypeChecking.Monad.Builtin as Builtin
-#if defined(CUBICAL_CHEZ_AGDA_29)
-import qualified Agda.TypeChecking.Serialise as Serialise
-#endif
-import Agda.Utils.GetOpt
-  ( ArgDescr (NoArg, ReqArg)
-  , OptDescr (Option)
-  )
-import Agda.Utils.Impossible (__IMPOSSIBLE__)
-#if defined(CUBICAL_CHEZ_TEST_NBE_ADAPTER_SPIKE) || defined(CUBICAL_CHEZ_NBE_ADAPTER_CANDIDATE)
-import qualified CubicalChez.Nbe.AdapterSpike as NbeSpike
-#endif
-#if defined(CUBICAL_CHEZ_AGDA_29)
-import qualified Agda.Utils.Serialize as RawSerialise
-#endif
-import Control.DeepSeq (NFData)
-import Control.Monad (forM, forM_, unless, when)
-import Control.Monad.Except (catchError, throwError)
-import Control.Monad.IO.Class (liftIO)
-#if defined(CUBICAL_CHEZ_AGDA_29)
-import Control.Monad.Trans.Maybe (MaybeT, runMaybeT)
-#endif
-import qualified Data.ByteString as ByteString
-import Data.Char (isAlphaNum, ord)
-import Data.List (intercalate, isInfixOf, isPrefixOf, isSuffixOf)
-import qualified Data.Map.Strict as Map
-import Data.Maybe (catMaybes, fromMaybe)
-import Data.IORef (modifyIORef', newIORef, readIORef)
-import qualified Data.Set as Set
-import qualified Data.Text as Text
-import Data.Word (Word64)
-import GHC.Generics (Generic)
-import GHC.Clock (getMonotonicTimeNSec)
-import Numeric (showHex)
-import System.Directory
-  ( createDirectoryIfMissing
-  , doesDirectoryExist
-  , doesFileExist
-  , listDirectory
-  , removeFile
-  )
-import System.FilePath ((</>))
-import System.IO (hFlush, hSetBinaryMode, stdout)
-
-data ChezOptions = ChezOptions
-  { chezEnabled :: Bool
-  , chezEngine :: String
-  , chezNbeFallback :: String
-  , chezResidualPolicy :: String
-  , chezPacketFile :: Maybe FilePath
-  , chezOutputDirectory :: FilePath
-  , chezEntry :: String
-  }
-  deriving (Generic)
-
-instance NFData ChezOptions
-
-data CompiledDef = CompiledDef
-  { compiledName :: QName
-  , compiledTerm :: TTerm
-  , compiledFromMainModule :: Bool
-  , compiledIsEntry :: Bool
-  , compiledInternalTermBlockers :: [QName]
-  , compiledInternalTypeBlockers :: [QName]
-  , compiledInternalTermCatalogBlockers :: [QName]
-  , compiledInternalTypeCatalogBlockers :: [QName]
-  , compiledInternalTermSemanticSources :: [(QName, String)]
-  , compiledInternalTypeSemanticSources :: [(QName, String)]
-  , compiledInternalTermSemanticCatalogDisagreements :: [QName]
-  , compiledInternalTypeSemanticCatalogDisagreements :: [QName]
-  , compiledTreelessBlockers :: [QName]
-  , compiledInternalTermUnknownCubical :: [QName]
-  , compiledInternalTypeUnknownCubical :: [QName]
-  , compiledTreelessUnknownCubical :: [QName]
-  , compiledBindingTime :: BindingTimeClass
-  , compiledBindingReason :: BindingTimeReason
-  , compiledRequestedEngine :: String
-  , compiledEffectiveEngine :: String
-  , compiledNbeFallbackPolicy :: String
-  , compiledNbeFallbackUsed :: Bool
-  , compiledNbeFallbackReason :: String
-  , compiledEngineEvidence :: [String]
-  , compiledTypedResidual :: Maybe TypedResidual
-  , compiledEngineTotalNanoseconds :: Word64
-  , compiledNbeEvaluationNanoseconds :: Maybe Word64
-  , compiledNbeReadbackNanoseconds :: Maybe Word64
-  , compiledResultAdmissionNanoseconds :: Word64
-  , compiledInternalAuditNanoseconds :: Word64
-  , compiledTreelessNanoseconds :: Word64
-  }
-
-data BindingTimeClass
-  = BindingStatic
-  | BindingDynamic
-  | BindingMixed
-  | BindingUnsupported
-  deriving (Eq)
-
-data BindingTimeReason
-  = NoRuntimeBlockers
-  | WholeEntryRuntimeHead
-  | StaticContextAroundRuntimeBlocker
-  | InternalSemanticCatalogDisagreement
-  | InternalTreelessAuditDisagreement
-  | UnknownCubicalPrimitive
-  deriving (Eq)
-
--- | The primary binding-time evidence for one checked Internal value. The
--- semantic side is derived from Agda's registered Cubical builtin/primitive
--- identities (plus checked Kan-operation metadata), while the catalog side is
--- the pinned 2.8/2.9 compatibility allowlist. Publication requires both sides
--- to agree; the allowlist is no longer itself the Internal classifier.
-data InternalSemanticAudit = InternalSemanticAudit
-  { internalSemanticBlockers :: [QName]
-  , internalCatalogBlockers :: [QName]
-  , internalSemanticSources :: [(QName, String)]
-  , internalSemanticCatalogDisagreements :: [QName]
-  , internalUnknownCubicalPrimitives :: [QName]
-  }
-
--- | Stable machine-readable failure taxonomy. Human explanations may grow,
--- but automation should key only on these codes.
-data BackendFailureClass
-  = InvalidConfiguration
-  | EntryRejected
-  | NbeUnavailable
-  | NbeUnsupportedFeature
-  | EngineTimeout
-  | NbeExecutionFailed
-  | EngineResultInvalid
-  | UnsupportedProgram
-  | ResidualRequired
-  | ResidualizationFailed
-  | SchemeLoweringFailed
-
--- | Evidence retained when the candidate Treeless term still needs typed
--- Cubical semantics.  Both the diagnostic manifest and the Agda 2.9 packet
--- bridge consume this original Internal Term and Type; no typed information
--- is reconstructed from erased Treeless syntax.
-data TypedResidual = TypedResidual
-  { residualTerm :: Term
-  , residualType :: Type
-  , residualDirectDependencies :: [QName]
-  }
-
--- | A checked dependency graph for the current whole-entry residual. Every
--- QName in the transitive closure was resolved from Agda's current signature.
--- Agda builtins/primitives are retained as non-expanded signature leaves;
--- ordinary definitions are traversed through their checked Definition value.
-data ResidualClosure = ResidualClosure
-  { residualClosurePayload :: TypedResidual
-  , residualClosureResolvedDependencies :: [QName]
-  , residualClosureExpandedDefinitions :: [QName]
-  , residualClosureSignatureLeaves :: [QName]
-  , residualClosureExcludedPresentationDependencies :: [QName]
-  }
-
-data DependencyGraph = DependencyGraph
-  { dependencyGraphResolved :: [QName]
-  , dependencyGraphExpanded :: [QName]
-  , dependencyGraphLeaves :: [QName]
-  , dependencyGraphExcludedPresentation :: [QName]
-  }
-
--- | A deterministic plan for carving maximal blocker-headed Treeless subtrees
--- out of a mixed entry. Treeless provides identity only: each selected subtree
--- must match exactly one subterm discovered by Agda's Internal rechecker,
--- which supplies the authoritative Term, Type, and local telescope. Open
--- sources are lambda-lifted before they become packet payloads.
-data ResidualSlicePlan
-  = ResidualSliceNotApplicable String
-  | ResidualSlicePlanned [ResidualHolePlan]
-
-data ResidualHolePlan = ResidualHolePlan
-  { residualHoleId :: String
-  , residualHolePath :: String
-  , residualHoleBlockers :: [QName]
-  , residualHoleClosure :: ResidualClosure
-  , residualHoleCallableAbi :: ResidualHoleCallableAbi
-  , residualHoleSourceClosed :: Bool
-  , residualHoleEnvironmentArity :: Int
-  }
-
--- | Deliberately narrow capabilities derived from the checked hole type.
--- Closed/single-slot holes accept one visible builtin Bool/Nat/Word64/Char/Int argument;
--- an open multi-slot hole may instead carry an ordered non-dependent
--- Bool/Nat/Word64/Char/Int
--- environment vector. Application and result consumption stay inside Agda;
--- only the final Bool/Nat observation crosses back to Chez.
-data ResidualHoleCallableAbi
-  = ResidualHoleObservationOnly
-  | ResidualHoleUnaryGroundElimination ResidualGroundCodec
-  | ResidualHoleOrderedGroundEnvironmentElimination [ResidualGroundCodec]
-  | ResidualHoleDependentGroundEnvironmentElimination
-  deriving (Eq)
-
-data ResidualGroundCodec
-  = ResidualGroundBool
-  | ResidualGroundNat
-  | ResidualGroundWord64
-  | ResidualGroundChar
-  | ResidualGroundInt
-  deriving (Eq)
-
-data ResidualGroundCodecDescriptor = ResidualGroundCodecDescriptor
-  { groundCodecDescriptorCodec :: ResidualGroundCodec
-  , groundCodecDescriptorName :: String
-  , groundCodecDescriptorArgumentValidator :: String
-  , groundCodecDescriptorArgumentReifier :: String
-  , groundCodecDescriptorEntryParser :: String
-  , groundCodecDescriptorValueReifier :: String
-  }
-
-residualGroundCodecDescriptors :: [ResidualGroundCodecDescriptor]
-residualGroundCodecDescriptors =
-  [ ResidualGroundCodecDescriptor
-      ResidualGroundBool
-      "bool"
-      "cubical-chez-valid-bool-argument?"
-      "(lambda (literal) (string-append \"Agda.Builtin.Bool.\" literal))"
-      "(lambda (literal) (cubical-chez-agda-bool-value literal))"
-      ( "(lambda (value) (string-append \"Agda.Builtin.Bool.\""
-          ++ " (cubical-chez-agda-bool-literal value)))"
-      )
-  , ResidualGroundCodecDescriptor
-      ResidualGroundNat
-      "nat"
-      "cubical-chez-valid-nat-argument?"
-      "(lambda (literal) literal)"
-      "(lambda (literal) (cubical-chez-agda-nat-value literal))"
-      ( "(lambda (value)"
-          ++ " (unless (and (integer? value) (exact? value)"
-          ++ " (>= value 0) (<= value 4294967295))"
-          ++ " (cubical-chez-bridge-fail \"CCZ-TYPED-BRIDGE-ENVIRONMENT\""
-          ++ " \"expected bounded Chez Agda Nat\"))"
-          ++ " (number->string value))"
-      )
-  , ResidualGroundCodecDescriptor
-      ResidualGroundWord64
-      "word64"
-      "cubical-chez-valid-word64-argument?"
-      ( "(lambda (literal)"
-          ++ " (string-append \"(Agda.Builtin.Word.primWord64FromNat \""
-          ++ " literal \" )\"))"
-      )
-      "(lambda (literal) (cubical-chez-agda-word64-value literal))"
-      ( "(lambda (value)"
-          ++ " (unless (and (integer? value) (exact? value)"
-          ++ " (>= value 0) (<= value 18446744073709551615))"
-          ++ " (cubical-chez-bridge-fail \"CCZ-TYPED-BRIDGE-ENVIRONMENT\""
-          ++ " \"expected bounded Chez Agda Word64\"))"
-          ++ " (string-append \"(Agda.Builtin.Word.primWord64FromNat \""
-          ++ " (number->string value) \" )\"))"
-      )
-  , ResidualGroundCodecDescriptor
-      ResidualGroundChar
-      "char"
-      "cubical-chez-valid-char-argument?"
-      ( "(lambda (literal)"
-          ++ " (string-append \"(Agda.Builtin.Char.primNatToChar \""
-          ++ " literal \" )\"))"
-      )
-      "(lambda (literal) (cubical-chez-agda-char-value literal))"
-      ( "(lambda (value)"
-          ++ " (unless (char? value)"
-          ++ " (cubical-chez-bridge-fail \"CCZ-TYPED-BRIDGE-ENVIRONMENT\""
-          ++ " \"expected Chez Agda Char\"))"
-          ++ " (string-append \"(Agda.Builtin.Char.primNatToChar \""
-          ++ " (number->string (char->integer value)) \" )\"))"
-      )
-  , ResidualGroundCodecDescriptor
-      ResidualGroundInt
-      "int"
-      "cubical-chez-valid-int-argument?"
-      "(lambda (literal) (cubical-chez-int-term (string->number literal)))"
-      "(lambda (literal) (cubical-chez-agda-int-value literal))"
-      ( "(lambda (value) (cubical-chez-int-term"
-          ++ " (cubical-chez-agda-int->integer value)))"
-      )
-  ]
-
-residualGroundCodecDescriptor
-  :: ResidualGroundCodec
-  -> ResidualGroundCodecDescriptor
-residualGroundCodecDescriptor codec =
-  case
-    [ descriptor
-    | descriptor <- residualGroundCodecDescriptors
-    , groundCodecDescriptorCodec descriptor == codec
-    ] of
-    descriptor : _ -> descriptor
-    [] -> __IMPOSSIBLE__
-
--- | The single source of truth for ground values allowed to cross the erased
--- Chez boundary. Builtin identity lookup, callable ABI publication, manifest
--- evidence, and the generated Scheme registry all enumerate this value.
-allResidualGroundCodecs :: [ResidualGroundCodec]
-allResidualGroundCodecs =
-  map groundCodecDescriptorCodec residualGroundCodecDescriptors
-
-residualGroundCodecBuiltinName
-  :: ResidualGroundCodec
-  -> TCM (Maybe QName)
-residualGroundCodecBuiltinName = \case
-  ResidualGroundBool -> Builtin.getBuiltinName' Builtin.builtinBool
-  ResidualGroundNat -> Builtin.getBuiltinName' Builtin.builtinNat
-  ResidualGroundWord64 -> Builtin.getBuiltinName' Builtin.builtinWord64
-  ResidualGroundChar -> Builtin.getBuiltinName' Builtin.builtinChar
-  ResidualGroundInt -> Builtin.getBuiltinName' Builtin.builtinInteger
-
-residualGroundCodecRegistry
-  :: TCM [(ResidualGroundCodec, Maybe QName)]
-residualGroundCodecRegistry = forM allResidualGroundCodecs $ \codec -> do
-  builtinName <- residualGroundCodecBuiltinName codec
-  pure (codec, builtinName)
-
-lookupResidualGroundCodec
-  :: [(ResidualGroundCodec, Maybe QName)]
-  -> QName
-  -> Maybe ResidualGroundCodec
-lookupResidualGroundCodec registry actual =
-  case
-    [ codec
-    | (codec, Just registered) <- registry
-    , actual == registered
-    ] of
-    codec : _ -> Just codec
-    [] -> Nothing
-
-data ResidualHoleSeed = ResidualHoleSeed
-  { residualHoleSeedId :: String
-  , residualHoleSeedPath :: String
-  , residualHoleSeedBlockers :: [QName]
-  , residualHoleSeedTreeless :: TTerm
-  }
-
-data ResidualHoleCandidate = ResidualHoleCandidate
-  { residualHoleCandidateTerm :: Term
-  , residualHoleCandidateType :: Type
-  , residualHoleCandidateTreeless :: TTerm
-  , residualHoleCandidateSourceClosed :: Bool
-  , residualHoleCandidateEnvironmentArity :: Int
-  }
-
--- | Capability produced only after the complete reachable Treeless closure
--- has no unresolved definitions and every definition lowers to Scheme.  The
--- static publication path consumes this value, so blocker classification
--- alone can never authorize type erasure.
-data StaticClosure = StaticClosure
-  { staticClosureDefinitions :: [CompiledDef]
-  , staticClosureProgram :: String
-  }
-
-data StaticClosureFailure = StaticClosureFailure
-  { staticClosureFailureDefinitions :: [CompiledDef]
-  , staticClosureFailureUnresolved :: [QName]
-  , staticClosureFailureBlockers :: [QName]
-  , staticClosureFailureUnknownCubical :: [QName]
-  , staticClosureFailureReason :: String
-  , staticClosureFailureLowering :: String
-  , staticClosureFailureProblem :: String
-  }
-
-data StaticClosureReport
-  = StaticClosureNotApplicable
-  | StaticClosureComplete Int
-  | StaticClosureIncomplete Int [QName] [QName] [QName] String String
-
--- | Versioned contract shared by the ordinary static program and the mixed
--- residual static shell.  Treeless does not distinguish record constructors
--- from data constructors, so both deliberately use the same tagged-vector
--- representation.  The declared value is kept separate from the lowering
--- implementation so a producer cannot silently publish a new ABI under the
--- old version label.
-data ChezCoreAbi = ChezCoreAbi
-  { chezCoreAbiVersion :: String
-  , chezCoreAbiQName :: String
-  , chezCoreAbiFunction :: String
-  , chezCoreAbiDataConstructor :: String
-  , chezCoreAbiRecord :: String
-  , chezCoreAbiConstructorTagIndex :: Int
-  , chezCoreAbiConstructorFieldBaseIndex :: Int
-  , chezCoreAbiPrimitiveApplication :: String
-  , chezCoreAbiPrimitiveFirstClass :: String
-  }
-  deriving (Eq)
-
-data ChezPrimitiveForm
-  = ChezPrimitiveBinary String
-  | ChezPrimitiveIf
-  | ChezPrimitiveBegin
-  | ChezPrimitiveIdentity
-
-chezPrimitiveApplicationTable :: [(TPrim, Int, ChezPrimitiveForm)]
-chezPrimitiveApplicationTable =
-#if defined(CUBICAL_CHEZ_TEST_CORE_ABI_PRIMITIVE_DRIFT)
-  [ (PAdd, 2, ChezPrimitiveBinary "-")
-#else
-  [ (PAdd, 2, ChezPrimitiveBinary "+")
-#endif
-  , (PAdd64, 2, ChezPrimitiveBinary "+")
-  , (PSub, 2, ChezPrimitiveBinary "-")
-  , (PSub64, 2, ChezPrimitiveBinary "-")
-  , (PMul, 2, ChezPrimitiveBinary "*")
-  , (PMul64, 2, ChezPrimitiveBinary "*")
-  , (PQuot, 2, ChezPrimitiveBinary "quotient")
-  , (PQuot64, 2, ChezPrimitiveBinary "quotient")
-  , (PRem, 2, ChezPrimitiveBinary "remainder")
-  , (PRem64, 2, ChezPrimitiveBinary "remainder")
-  , (PGeq, 2, ChezPrimitiveBinary ">=")
-  , (PLt, 2, ChezPrimitiveBinary "<")
-  , (PLt64, 2, ChezPrimitiveBinary "<")
-  , (PEqI, 2, ChezPrimitiveBinary "=")
-  , (PEq64, 2, ChezPrimitiveBinary "=")
-  , (PEqF, 2, ChezPrimitiveBinary "=")
-  , (PEqS, 2, ChezPrimitiveBinary "string=?")
-  , (PEqC, 2, ChezPrimitiveBinary "char=?")
-  , (PIf, 3, ChezPrimitiveIf)
-  , (PSeq, 2, ChezPrimitiveBegin)
-  , (PITo64, 1, ChezPrimitiveIdentity)
-  , (P64ToI, 1, ChezPrimitiveIdentity)
-  ]
-
-chezPrimitiveFirstClassTable :: [(TPrim, String)]
-chezPrimitiveFirstClassTable =
-  [ (PAdd, "+")
-  , (PSub, "-")
-  , (PMul, "*")
-  ]
-
-renderChezPrimitiveFormAbi :: ChezPrimitiveForm -> String
-renderChezPrimitiveFormAbi = \case
-  ChezPrimitiveBinary operator -> operator
-  ChezPrimitiveIf -> "if"
-  ChezPrimitiveBegin -> "begin"
-  ChezPrimitiveIdentity -> "identity"
-
-renderChezPrimitiveApplicationMap :: String
-renderChezPrimitiveApplicationMap = intercalate "," $
-  [ show primitive ++ "/" ++ show arity ++ "="
-      ++ renderChezPrimitiveFormAbi form
-  | (primitive, arity, form) <- chezPrimitiveApplicationTable
-  ]
-
-renderChezPrimitiveFirstClassMap :: String
-renderChezPrimitiveFirstClassMap = intercalate "," $
-  [ show primitive ++ "=curried:" ++ operator
-  | (primitive, operator) <- chezPrimitiveFirstClassTable
-  ]
-
-expectedChezPrimitiveApplicationMap :: String
-expectedChezPrimitiveApplicationMap =
-  "PAdd/2=+,PAdd64/2=+,PSub/2=-,PSub64/2=-,PMul/2=*,PMul64/2=*"
-    ++ ",PQuot/2=quotient,PQuot64/2=quotient,PRem/2=remainder"
-    ++ ",PRem64/2=remainder,PGeq/2=>=,PLt/2=<,PLt64/2=<,PEqI/2=="
-    ++ ",PEq64/2==,PEqF/2==,PEqS/2=string=?,PEqC/2=char=?"
-    ++ ",PIf/3=if,PSeq/2=begin,PITo64/1=identity,P64ToI/1=identity"
-
-expectedChezPrimitiveFirstClassMap :: String
-expectedChezPrimitiveFirstClassMap =
-  "PAdd=curried:+,PSub=curried:-,PMul=curried:*"
-
-implementedChezCoreAbi :: ChezCoreAbi
-implementedChezCoreAbi = ChezCoreAbi
-  { chezCoreAbiVersion = "chez-core-abi-v1"
-  , chezCoreAbiQName = "agda-prefix+non-alphanumeric-codepoint-hex-v1"
-  , chezCoreAbiFunction = "unary-curried-closure-v1"
-  , chezCoreAbiDataConstructor = "tagged-vector-v1"
-  , chezCoreAbiRecord = "tagged-vector-v1"
-  , chezCoreAbiConstructorTagIndex = 0
-  , chezCoreAbiConstructorFieldBaseIndex = 1
-  , chezCoreAbiPrimitiveApplication = "exact-arity-whitelist-v1"
-  , chezCoreAbiPrimitiveFirstClass = "curried-add-sub-mul-v1"
-  }
-
-declaredChezCoreAbi :: ChezCoreAbi
-#if defined(CUBICAL_CHEZ_TEST_CORE_ABI_MISMATCH)
-declaredChezCoreAbi = implementedChezCoreAbi
-  { chezCoreAbiFunction = "uncurried-closure-v0"
-  }
-#else
-declaredChezCoreAbi = implementedChezCoreAbi
-#endif
-
-validateChezCoreAbi :: Either String ()
-validateChezCoreAbi
-  | declaredChezCoreAbi /= implementedChezCoreAbi = Left $
-      "declared Chez core ABI does not match the lowering implementation"
-  | renderChezPrimitiveApplicationMap /=
-      expectedChezPrimitiveApplicationMap = Left $
-      "Chez core ABI v1 primitive application map changed without a version bump"
-  | renderChezPrimitiveFirstClassMap /=
-      expectedChezPrimitiveFirstClassMap = Left $
-      "Chez core ABI v1 first-class primitive map changed without a version bump"
-  | otherwise = Right ()
-
-renderChezCoreAbiManifest :: [String]
-renderChezCoreAbiManifest =
-  [ "chez-core-abi: " ++ chezCoreAbiVersion declaredChezCoreAbi
-  , "chez-qname-abi: " ++ chezCoreAbiQName declaredChezCoreAbi
-  , "chez-function-abi: " ++ chezCoreAbiFunction declaredChezCoreAbi
-  , "chez-data-constructor-abi: "
-      ++ chezCoreAbiDataConstructor declaredChezCoreAbi
-  , "chez-record-abi: " ++ chezCoreAbiRecord declaredChezCoreAbi
-  , "chez-constructor-tag-index: "
-      ++ show (chezCoreAbiConstructorTagIndex declaredChezCoreAbi)
-  , "chez-constructor-field-base-index: "
-      ++ show (chezCoreAbiConstructorFieldBaseIndex declaredChezCoreAbi)
-  , "chez-primitive-application-abi: "
-      ++ chezCoreAbiPrimitiveApplication declaredChezCoreAbi
-  , "chez-primitive-application-map: "
-      ++ renderChezPrimitiveApplicationMap
-  , "chez-primitive-first-class-abi: "
-      ++ chezCoreAbiPrimitiveFirstClass declaredChezCoreAbi
-  , "chez-primitive-first-class-map: "
-      ++ renderChezPrimitiveFirstClassMap
-  ]
-
-data StaticEngine
-  = AgdaBaseline
-  | MatureNbe
-  | NbeAdapterSpike
-
-data EngineRequest = EngineRequest
-  { requestTerm :: Term
-  , requestType :: Type
-  }
-
-data EngineResult = EngineResult
-  { resultNormalTerm :: Term
-  , resultNormalType :: Type
-  }
-
-data EngineAttempt
-  = EngineSucceeded StaticEngine [String] EngineStageBreakdown EngineResult
-  | EngineUnsupported StaticEngine [String] EngineStageBreakdown String
-
-data EngineStageBreakdown = EngineStageBreakdown
-  { engineEvaluationNanoseconds :: Maybe Word64
-  , engineReadbackNanoseconds :: Maybe Word64
-  }
-
-data EngineExecution = EngineExecution
-  { executionResult :: EngineResult
-  , executionRequestedEngine :: String
-  , executionEffectiveEngine :: String
-  , executionFallbackPolicy :: String
-  , executionFallbackUsed :: Bool
-  , executionFallbackReason :: String
-  , executionEngineEvidence :: [String]
-  , executionEngineTotalNanoseconds :: Word64
-  , executionNbeEvaluationNanoseconds :: Maybe Word64
-  , executionNbeReadbackNanoseconds :: Maybe Word64
-  , executionResultAdmissionNanoseconds :: Word64
-  }
-
-#if defined(CUBICAL_CHEZ_AGDA_29)
--- This is intentionally byte-compatible with the v2 runtime archive.
-type RuntimePacket =
-  ( String
-  , ( Word64
-    , ( Word64
-      , ( String
-        , (Term, Type)
-        )
-      )
-    )
-  )
-#endif
-
-expectedRuntimePacketMagic :: String
-expectedRuntimePacketMagic = "agda-cubical-runtime-term"
-
-expectedRuntimePacketVersion :: Word64
-expectedRuntimePacketVersion = 2
-
--- Test-only variants deliberately encode a bad header.  The verifier builds
--- them as separate executables and proves that the producer self-check fails
--- before publishing a packet.
-runtimePacketMagic :: String
-#if defined(CUBICAL_CHEZ_TEST_BAD_MAGIC)
-runtimePacketMagic = "invalid-cubical-runtime-term"
-#else
-runtimePacketMagic = expectedRuntimePacketMagic
-#endif
-
-runtimePacketVersion :: Word64
-#if defined(CUBICAL_CHEZ_TEST_BAD_VERSION)
-runtimePacketVersion = expectedRuntimePacketVersion + 1
-#else
-runtimePacketVersion = expectedRuntimePacketVersion
-#endif
-
-packetCodecName :: String
-#if defined(CUBICAL_CHEZ_AGDA_29)
-packetCodecName = "agda-utils-serialize"
-#else
-packetCodecName = "unavailable-agda-2.8-development-build"
-#endif
-
-type ChezModule = [CompiledDef]
-
-chezBackend :: Backend
-chezBackend = Backend chezBackend'
-
-chezBackend' :: Backend' ChezOptions ChezOptions () ChezModule (Maybe CompiledDef)
-chezBackend' = Backend'
-  { backendName = "CubicalChez"
-  , backendVersion = Just "0.1.0-dev"
-  , options = ChezOptions
-      { chezEnabled = False
-      , chezEngine = "agda-baseline"
-      , chezNbeFallback = "reject"
-      , chezResidualPolicy = "reject"
-      , chezPacketFile = Nothing
-      , chezOutputDirectory = "build" </> "formal-generated"
-      , chezEntry = "main"
-      }
-  , commandLineFlags =
-      [ Option [] ["cubical-chez"] (NoArg enable)
-          "compile with the staged Cubical Chez backend"
-      , Option [] ["cubical-chez-engine"] (ReqArg setEngine "ENGINE")
-          "static engine: agda-baseline or nbe"
-      , Option [] ["cubical-chez-nbe-fallback"] (ReqArg setNbeFallback "POLICY")
-          "on NbE unsupported feature: reject or agda-baseline"
-      , Option [] ["cubical-chez-residual"] (ReqArg setResidualPolicy "POLICY")
-          "typed residual policy: reject, manifest, or packet"
-      , Option [] ["cubical-chez-packet-file"] (ReqArg setPacketFile "FILE")
-          "packet destination override; use - for stdout"
-      , Option [] ["cubical-chez-output"] (ReqArg setOutputDirectory "DIRECTORY")
-          "output directory for Scheme, staging reports, and diagnostics"
-      , Option [] ["cubical-chez-entry"] (ReqArg setEntry "NAME")
-          "entry definition: unqualified name or fully qualified QName"
-      ]
-  , isEnabled = chezEnabled
-  , preCompile = validateOptions
-  , postCompile = writeProgram
-  , preModule = \_ _ _ _ -> pure (Recompile ())
-  , postModule = \_ _ _ _ defs -> pure (catMaybes defs)
-  , compileDef = compileDefinition
-  , scopeCheckingSuffices = False
-  , mayEraseType = const (pure True)
-  , backendInteractTop = Nothing
-  , backendInteractHole = Nothing
-  }
-  where
-    enable opts = pure opts {chezEnabled = True}
-    setEngine engine opts = pure opts {chezEngine = engine}
-    setNbeFallback policy opts = pure opts {chezNbeFallback = policy}
-    setResidualPolicy policy opts = pure opts {chezResidualPolicy = policy}
-    setPacketFile file opts = pure opts {chezPacketFile = Just file}
-    setOutputDirectory directory opts = pure opts {chezOutputDirectory = directory}
-    setEntry entry opts = pure opts {chezEntry = entry}
-
-validateOptions :: ChezOptions -> TCM ChezOptions
-validateOptions opts = do
-  -- A rejected invocation must not leave a stale successful publication that
-  -- can be mistaken for its output.  An empty output path has no safe cleanup
-  -- target, so that invalid case is rejected below without deleting anything.
-  when (not $ null $ chezOutputDirectory opts) $
-    liftIO $ clearPublishedArtifacts opts
-  validateOptionsAfterCleanup opts
-
-validateOptionsAfterCleanup :: ChezOptions -> TCM ChezOptions
-validateOptionsAfterCleanup opts
-  | chezEngine opts `notElem` ["agda-baseline", "nbe"] =
-      backendAbortWith InvalidConfiguration $
-        "unknown static engine " ++ show (chezEngine opts)
-  | chezResidualPolicy opts `notElem` ["reject", "manifest", "packet"] =
-      backendAbortWith InvalidConfiguration $
-        "unknown typed residual policy " ++ show (chezResidualPolicy opts)
-  | chezNbeFallback opts `notElem` ["reject", "agda-baseline", "typed-residual"] =
-      backendAbortWith InvalidConfiguration $
-        "unknown NbE fallback policy " ++ show (chezNbeFallback opts)
-  | chezEngine opts /= "nbe"
-  , chezNbeFallback opts /= "reject" =
-      backendAbortWith InvalidConfiguration
-        "a non-reject NbE fallback requires --cubical-chez-engine=nbe"
-  | Just packetFile <- chezPacketFile opts
-  , null packetFile = backendAbortWith InvalidConfiguration
-      "packet destination must not be empty"
-  | Just _ <- chezPacketFile opts
-  , chezResidualPolicy opts /= "packet" =
-      backendAbortWith InvalidConfiguration
-        "--cubical-chez-packet-file requires --cubical-chez-residual=packet"
-  | null (chezOutputDirectory opts) =
-      backendAbortWith InvalidConfiguration "output directory must not be empty"
-  | null (chezEntry opts) =
-      backendAbortWith InvalidConfiguration "entry definition must not be empty"
-  | otherwise = pure opts
-
-compileDefinition :: ChezOptions -> () -> IsMain -> Definition -> TCM (Maybe CompiledDef)
-compileDefinition opts _ isMain def = case theDef def of
-  Function {funClauses = [clause]}
-    | isMain == IsMain
-    , isRequestedEntryName (chezEntry opts) (defName def)
-    , null (telToList (clauseTel clause))
-    , Just body <- clauseBody clause -> do
-        engineExecution <- normalizeEntry opts $ EngineRequest
-          { requestTerm = body
-          , requestType = defType def
-          }
-        let engineResult = executionResult engineExecution
-            normalized = resultNormalTerm engineResult
-            normalizedType = resultNormalType engineResult
-        ((internalTermAudit, internalTypeAudit), internalAuditNanoseconds) <-
-          measureTcmStage $ do
-            termAudit <- auditTypedInternal normalized
-            typeAudit <- auditTypedInternal normalizedType
-            pure (termAudit, typeAudit)
-        let internalTermBlockers = internalSemanticBlockers internalTermAudit
-            internalTypeBlockers = internalSemanticBlockers internalTypeAudit
-            internalTermUnknownCubical =
-              internalUnknownCubicalPrimitives internalTermAudit
-            internalTypeUnknownCubical =
-              internalUnknownCubicalPrimitives internalTypeAudit
-        (compiled, treelessNanoseconds) <- measureTcmStage $
-          compileClosedTerm normalized
-
-        let treelessBlockers = testTreelessBlockers (typedTreelessBlockers compiled)
-            treelessUnknownCubical = typedTreelessUnknownCubical compiled
-            blockers = mergeBlockers internalTermBlockers treelessBlockers
-            unknownCubical = mergeBlockers
-              internalTermUnknownCubical
-              treelessUnknownCubical
-            typedResidualPassthrough =
-              "nbe-unsupported-disposition: typed-residual-passthrough-v1"
-                `elem` executionEngineEvidence engineExecution
-            (bindingTime, bindingReason)
-              | typedResidualPassthrough =
-                  (BindingDynamic, WholeEntryRuntimeHead)
-              | otherwise = classifyBindingTime
-                  internalTermBlockers
-                  treelessBlockers
-                  internalTermUnknownCubical
-                  treelessUnknownCubical
-                  (internalSemanticCatalogDisagreements internalTermAudit)
-                  compiled
-            typedResidual
-              | null blockers && null unknownCubical
-              , not typedResidualPassthrough = Nothing
-              | otherwise = Just TypedResidual
-                  { residualTerm = normalized
-                  , residualType = normalizedType
-                  , residualDirectDependencies = residualDependencyNames
-                      normalized
-                      normalizedType
-                  }
-        pure $ Just CompiledDef
-          { compiledName = defName def
-          , compiledTerm = compiled
-          , compiledFromMainModule = True
-          , compiledIsEntry = True
-          , compiledInternalTermBlockers = internalTermBlockers
-          , compiledInternalTypeBlockers = internalTypeBlockers
-          , compiledInternalTermCatalogBlockers =
-              internalCatalogBlockers internalTermAudit
-          , compiledInternalTypeCatalogBlockers =
-              internalCatalogBlockers internalTypeAudit
-          , compiledInternalTermSemanticSources =
-              internalSemanticSources internalTermAudit
-          , compiledInternalTypeSemanticSources =
-              internalSemanticSources internalTypeAudit
-          , compiledInternalTermSemanticCatalogDisagreements =
-              internalSemanticCatalogDisagreements internalTermAudit
-          , compiledInternalTypeSemanticCatalogDisagreements =
-              internalSemanticCatalogDisagreements internalTypeAudit
-          , compiledTreelessBlockers = treelessBlockers
-          , compiledInternalTermUnknownCubical = internalTermUnknownCubical
-          , compiledInternalTypeUnknownCubical = internalTypeUnknownCubical
-          , compiledTreelessUnknownCubical = treelessUnknownCubical
-          , compiledBindingTime = bindingTime
-          , compiledBindingReason = bindingReason
-          , compiledRequestedEngine = executionRequestedEngine engineExecution
-          , compiledEffectiveEngine = executionEffectiveEngine engineExecution
-          , compiledNbeFallbackPolicy = executionFallbackPolicy engineExecution
-          , compiledNbeFallbackUsed = executionFallbackUsed engineExecution
-          , compiledNbeFallbackReason = executionFallbackReason engineExecution
-          , compiledEngineEvidence = executionEngineEvidence engineExecution
-          , compiledTypedResidual = typedResidual
-          , compiledEngineTotalNanoseconds =
-              executionEngineTotalNanoseconds engineExecution
-          , compiledNbeEvaluationNanoseconds =
-              executionNbeEvaluationNanoseconds engineExecution
-          , compiledNbeReadbackNanoseconds =
-              executionNbeReadbackNanoseconds engineExecution
-          , compiledResultAdmissionNanoseconds =
-              executionResultAdmissionNanoseconds engineExecution
-          , compiledInternalAuditNanoseconds = internalAuditNanoseconds
-          , compiledTreelessNanoseconds = treelessNanoseconds
-          }
-  FunctionDefn {}
-    | isMain == IsMain
-    , isRequestedEntryName (chezEntry opts) (defName def) ->
-        backendAbortWith EntryRejected $
-          "entry definition must have one closed, argument-free clause: "
-          ++ prettyShow (defName def)
-  -- A non-default entry is an explicit closed-entry acceptance request.  Its
-  -- normalized body must therefore be self-contained.  Avoid converting the
-  -- complete imported signature to Treeless; if a definition reference does
-  -- survive normalization, the existing unresolved-closure gate rejects it.
-  FunctionDefn {}
-    | chezEntry opts /= "main" -> pure Nothing
-  FunctionDefn {} -> do
-    term <- toTreeless EagerEvaluation (defName def)
-    pure $ fmap (\compiled -> CompiledDef
-      { compiledName = defName def
-      , compiledTerm = compiled
-      , compiledFromMainModule = isMain == IsMain
-      , compiledIsEntry = False
-      , compiledInternalTermBlockers = []
-      , compiledInternalTypeBlockers = []
-      , compiledInternalTermCatalogBlockers = []
-      , compiledInternalTypeCatalogBlockers = []
-      , compiledInternalTermSemanticSources = []
-      , compiledInternalTypeSemanticSources = []
-      , compiledInternalTermSemanticCatalogDisagreements = []
-      , compiledInternalTypeSemanticCatalogDisagreements = []
-      , compiledTreelessBlockers = []
-      , compiledInternalTermUnknownCubical = []
-      , compiledInternalTypeUnknownCubical = []
-      , compiledTreelessUnknownCubical = []
-      , compiledBindingTime = BindingStatic
-      , compiledBindingReason = NoRuntimeBlockers
-      , compiledRequestedEngine = chezEngine opts
-      , compiledEffectiveEngine = chezEngine opts
-      , compiledNbeFallbackPolicy = chezNbeFallback opts
-      , compiledNbeFallbackUsed = False
-      , compiledNbeFallbackReason = "none"
-      , compiledEngineEvidence = []
-      , compiledTypedResidual = Nothing
-      , compiledEngineTotalNanoseconds = 0
-      , compiledNbeEvaluationNanoseconds = Nothing
-      , compiledNbeReadbackNanoseconds = Nothing
-      , compiledResultAdmissionNanoseconds = 0
-      , compiledInternalAuditNanoseconds = 0
-      , compiledTreelessNanoseconds = 0
-      }) term
-  _ -> pure Nothing
-
-compileClosedTerm :: Term -> TCM TTerm
-compileClosedTerm = closedTermToTreeless
-#if defined(CUBICAL_CHEZ_AGDA_29)
-  (mkDefaultCCConfig EagerEvaluation)
-#else
-  (EagerEvaluation, EraseUnused)
-#endif
-
-measureTcmStage :: TCM value -> TCM (value, Word64)
-measureTcmStage action = do
-  started <- liftIO getMonotonicTimeNSec
-  value <- action
-  finished <- liftIO getMonotonicTimeNSec
-  pure (value, finished - started)
-
--- | Typed engine request/result boundary.  The baseline and the future NbE
--- adapter must both return a normal form paired with its normalized type.
-normalizeEntry :: ChezOptions -> EngineRequest -> TCM EngineExecution
-normalizeEntry opts request = case parseStaticEngine (chezEngine opts) of
-  Left problem -> backendAbortWith InvalidConfiguration problem
-  Right engine -> do
-    (attempt, requestedEngineNanoseconds) <-
-      measureTcmStage $ runStaticEngine engine request
-    case attempt of
-      EngineSucceeded effective evidence breakdown result -> do
-        (preserveTypedResult, resultTypeAuditNanoseconds) <-
-          measureTcmStage $
-            requiresTypedResidualResultType evidence result
-        if preserveTypedResult
-          then finish
-            effective
-            True
-            "nbe-result-type-typed-residual"
-            ( evidence ++
-              [ "nbe-unsupported-disposition: typed-residual-passthrough-v1"
-              , "nbe-typed-residual-trigger: result-type-runtime-blocker-v1"
-              ]
-            )
-            breakdown
-            requestedEngineNanoseconds
-            resultTypeAuditNanoseconds
-            EngineResult
-              { resultNormalTerm = requestTerm request
-              , resultNormalType = requestType request
-              }
-          else finish effective False "none" evidence breakdown
-            requestedEngineNanoseconds resultTypeAuditNanoseconds result
-      EngineUnsupported unsupportedEngine evidence breakdown problem -> case chezNbeFallback opts of
-        "reject" -> backendAbortWith NbeUnsupportedFeature problem
-        "agda-baseline" -> do
-          (result, fallbackEngineNanoseconds) <-
-            measureTcmStage $ runAgdaBaseline request
-          finish AgdaBaseline True "nbe-unsupported-feature" []
-            emptyEngineStageBreakdown fallbackEngineNanoseconds 0 result
-        "typed-residual"
-          | "nbe-adapter-implementation: agda-specific-in-process-v1"
-              `elem` evidence ->
-              finish
-                unsupportedEngine
-                True
-                "nbe-unsupported-typed-residual"
-                ( evidence ++
-                  [ "nbe-unsupported-disposition: typed-residual-passthrough-v1"
-                  ]
-                )
-                (unsupportedStageBreakdown
-                  unsupportedEngine breakdown requestedEngineNanoseconds)
-                requestedEngineNanoseconds
-                0
-                EngineResult
-                  { resultNormalTerm = requestTerm request
-                  , resultNormalType = requestType request
-                  }
-          | otherwise -> backendAbortWith NbeUnavailable $
-              "typed-residual preservation requires a linked NbE adapter"
-        policy -> backendAbortWith InvalidConfiguration $
-          "unknown NbE fallback policy " ++ show policy
-  where
-    requiresTypedResidualResultType evidence result
-      | chezNbeFallback opts /= "typed-residual" = pure False
-      | "nbe-adapter-implementation: agda-specific-in-process-v1"
-          `notElem` evidence = pure False
-      | otherwise = do
-          resultTypeAudit <- auditTypedInternal (resultNormalType result)
-          pure $
-            not (null (internalSemanticBlockers resultTypeAudit)) ||
-            not (null (internalUnknownCubicalPrimitives resultTypeAudit)) ||
-            not
-              (null
-                (internalSemanticCatalogDisagreements resultTypeAudit))
-    finish effectiveEngine fallbackUsed fallbackReason evidence breakdown
-      engineNanoseconds preliminaryAdmissionNanoseconds result = do
-      (checked, validationNanoseconds) <- measureTcmStage $
-        validateEngineResult (testEngineResult result)
-      pure EngineExecution
-        { executionResult = checked
-        , executionRequestedEngine = chezEngine opts
-        , executionEffectiveEngine = renderStaticEngine effectiveEngine
-        , executionFallbackPolicy = chezNbeFallback opts
-        , executionFallbackUsed = fallbackUsed
-        , executionFallbackReason = fallbackReason
-        , executionEngineEvidence = evidence
-        , executionEngineTotalNanoseconds = engineNanoseconds
-        , executionNbeEvaluationNanoseconds =
-            engineEvaluationNanoseconds breakdown
-        , executionNbeReadbackNanoseconds =
-            engineReadbackNanoseconds breakdown
-        , executionResultAdmissionNanoseconds =
-            preliminaryAdmissionNanoseconds + validationNanoseconds
-        }
-
-emptyEngineStageBreakdown :: EngineStageBreakdown
-emptyEngineStageBreakdown = EngineStageBreakdown
-  { engineEvaluationNanoseconds = Nothing
-  , engineReadbackNanoseconds = Nothing
-  }
-
-unsupportedStageBreakdown
-  :: StaticEngine
-  -> EngineStageBreakdown
-  -> Word64
-  -> EngineStageBreakdown
-unsupportedStageBreakdown MatureNbe breakdown totalNanoseconds
-  | Nothing <- engineEvaluationNanoseconds breakdown
-  , Nothing <- engineReadbackNanoseconds breakdown = EngineStageBreakdown
-      { engineEvaluationNanoseconds = Just totalNanoseconds
-      , engineReadbackNanoseconds = Nothing
-      }
-unsupportedStageBreakdown _ breakdown _ = breakdown
-
-parseStaticEngine :: String -> Either String StaticEngine
-parseStaticEngine = \case
-  "agda-baseline" -> Right AgdaBaseline
-  "nbe" -> Right MatureNbe
-  engine -> Left $ "unknown static engine " ++ show engine
-
-renderStaticEngine :: StaticEngine -> String
-renderStaticEngine = \case
-  AgdaBaseline -> "agda-baseline"
-  MatureNbe -> "nbe"
-  NbeAdapterSpike -> "nbe-spike-test-only"
-
-runStaticEngine :: StaticEngine -> EngineRequest -> TCM EngineAttempt
-runStaticEngine = \case
-  AgdaBaseline ->
-    fmap (EngineSucceeded AgdaBaseline [] emptyEngineStageBreakdown) .
-      runAgdaBaseline
-  MatureNbe -> \request -> request `seq`
-#if defined(CUBICAL_CHEZ_TEST_ENGINE_TIMEOUT)
-    backendAbortWith EngineTimeout
-      "the NbE engine exceeded its configured evaluation deadline"
-#elif defined(CUBICAL_CHEZ_TEST_NBE_FAILURE)
-    backendAbortWith NbeExecutionFailed
-      "the NbE engine failed while evaluating the checked request"
-#elif defined(CUBICAL_CHEZ_TEST_NBE_UNSUPPORTED)
-    pure $ EngineUnsupported MatureNbe [] emptyEngineStageBreakdown
-      "the NbE adapter reported an unsupported feature in the checked request"
-#elif defined(CUBICAL_CHEZ_NBE_ADAPTER_CANDIDATE) && !defined(CUBICAL_CHEZ_NBE_PROVIDER_SELECTED) && !defined(CUBICAL_CHEZ_TEST_NBE_ADAPTER_SPIKE)
-    backendAbortWith NbeUnavailable $ unlines
-      [ "the in-process NbE production candidate is linked but not selected"
-      , "Linked adapter identity: " ++ NbeSpike.spikeProviderIdentity
-      , "Validate a selected provider lock before supplying the production selection build key."
-      ]
-#elif defined(CUBICAL_CHEZ_NBE_PROVIDER_SELECTED) && !defined(CUBICAL_CHEZ_NBE_ADAPTER_CANDIDATE) && !defined(CUBICAL_CHEZ_TEST_NBE_ADAPTER_SPIKE)
-    backendAbortWith NbeUnavailable $ unlines
-      [ "the NbE provider selection build key is present but no adapter is linked"
-      , "The two-key gate requires the in-process adapter candidate in the same build."
-      ]
-#elif defined(CUBICAL_CHEZ_TEST_NBE_ADAPTER_SPIKE) || (defined(CUBICAL_CHEZ_NBE_ADAPTER_CANDIDATE) && defined(CUBICAL_CHEZ_NBE_PROVIDER_SELECTED))
-    NbeSpike.normalizeRequestSpike
-      (requestTerm request)
-      (requestType request) >>= \case
-      NbeSpike.SpikeSucceeded report -> do
-        pure $ EngineSucceeded
-#if defined(CUBICAL_CHEZ_TEST_NBE_ADAPTER_SPIKE)
-          NbeAdapterSpike
-#else
-          MatureNbe
-#endif
-          [ "nbe-adapter-implementation: " ++ NbeSpike.spikeProviderIdentity
-#if defined(CUBICAL_CHEZ_TEST_NBE_ADAPTER_SPIKE)
-          , "nbe-adapter-linkage: test-only"
-          , "nbe-provider-lock-status: not-applicable-test-only"
-#else
-          , "nbe-adapter-linkage: production-candidate"
-          , "nbe-provider-lock-status: selected-build-key"
-#endif
-          , "nbe-definition-cache: per-request-qname-v1"
-          , "nbe-definition-cache-hits: "
-              ++ show (NbeSpike.spikeDefinitionCacheHits report)
-          , "nbe-definition-cache-misses: "
-              ++ show (NbeSpike.spikeDefinitionCacheMisses report)
-          , "nbe-recursion-cycle-policy: ground-call-shape-v1"
-          , "nbe-maximum-call-depth: "
-              ++ show (NbeSpike.spikeMaximumCallDepth report)
-          , "nbe-type-nodes-evaluated: "
-              ++ show (NbeSpike.spikeTypeNodesEvaluated report)
-          , "nbe-sort-nodes-evaluated: "
-              ++ show (NbeSpike.spikeSortNodesEvaluated report)
-          , "nbe-level-nodes-evaluated: "
-              ++ show (NbeSpike.spikeLevelNodesEvaluated report)
-          , "nbe-record-projections-evaluated: "
-              ++ show (NbeSpike.spikeRecordProjectionsEvaluated report)
-          , "nbe-neutral-record-type-heads-preserved: "
-              ++ show
-                (NbeSpike.spikeNeutralRecordTypeHeadsPreserved report)
-          , "nbe-neutral-data-type-heads-preserved: "
-              ++ show
-                (NbeSpike.spikeNeutralDataTypeHeadsPreserved report)
-          , "nbe-definitions-reduced: "
-              ++ show (NbeSpike.spikeDefinitionsReduced report)
-          , "nbe-hit-definition-patterns-matched: "
-              ++ show (NbeSpike.spikeHitDefinitionPatternsMatched report)
-          , "nbe-maximum-level-atom-count: "
-              ++ show (NbeSpike.spikeMaximumLevelAtomCount report)
-          , "nbe-primitive-registry-hits: "
-              ++ show (NbeSpike.spikePrimitiveRegistryHits report)
-          , "nbe-primitives-reduced: "
-              ++ show (NbeSpike.spikePrimitivesReduced report)
-          , "nbe-interval-operations-evaluated: "
-              ++ show (NbeSpike.spikeIntervalOperationsEvaluated report)
-          , "nbe-neutral-cofibration-simplifications: "
-              ++ show
-                (NbeSpike.spikeNeutralCofibrationSimplifications report)
-          , "nbe-path-applications-evaluated: "
-              ++ show (NbeSpike.spikePathApplicationsEvaluated report)
-          , "nbe-comps-expanded: "
-              ++ show (NbeSpike.spikeCompsExpanded report)
-          , "nbe-transports-reduced: "
-              ++ show (NbeSpike.spikeTransportsReduced report)
-          , "nbe-constant-nat-transports-reduced: "
-              ++ show
-                (NbeSpike.spikeConstantNatTransportsReduced report)
-          , "nbe-constant-nat-function-transports-reduced: "
-              ++ show
-                (NbeSpike.spikeConstantNatFunctionTransportsReduced report)
-          , "nbe-universe-transports-reduced: "
-              ++ show (NbeSpike.spikeUniverseTransportsReduced report)
-          , "nbe-glue-transports-reduced: "
-              ++ show (NbeSpike.spikeGlueTransportsReduced report)
-          , "nbe-backward-glue-transports-reduced: "
-              ++ show (NbeSpike.spikeBackwardGlueTransportsReduced report)
-          , "nbe-composed-glue-transports-reduced: "
-              ++ show
-                (NbeSpike.spikeComposedGlueTransportsReduced report)
-          , "nbe-pi-transports-reduced: "
-              ++ show (NbeSpike.spikePiTransportsReduced report)
-          , "nbe-varying-pi-codomain-transports-reduced: "
-              ++ show
-                (NbeSpike.spikeVaryingPiCodomainTransportsReduced report)
-          , "nbe-semantic-constant-pi-codomain-transports-reduced: "
-              ++ show
-                (NbeSpike.spikeSemanticConstantPiCodomainTransportsReduced report)
-          , "nbe-dependent-self-path-pi-codomain-transports-reduced: "
-              ++ show
-                (NbeSpike.spikeDependentSelfPathPiCodomainTransportsReduced report)
-          , "nbe-dependent-singleton-pi-codomain-transports-reduced: "
-              ++ show
-                (NbeSpike.spikeDependentSingletonPiCodomainTransportsReduced report)
-          , "nbe-dependent-reversed-singleton-pi-codomain-transports-reduced: "
-              ++ show
-                (NbeSpike.spikeDependentReversedSingletonPiCodomainTransportsReduced report)
-          , "nbe-dependent-nested-singleton-pi-codomain-transports-reduced: "
-              ++ show
-                (NbeSpike.spikeDependentNestedSingletonPiCodomainTransportsReduced report)
-          , "nbe-dependent-reversed-nested-singleton-pi-codomain-transports-reduced: "
-              ++ show
-                (NbeSpike.spikeDependentReversedNestedSingletonPiCodomainTransportsReduced report)
-          , "nbe-dependent-sigma-spine-pi-codomain-transports-reduced: "
-              ++ show
-                (NbeSpike.spikeDependentSigmaSpinePiCodomainTransportsReduced report)
-          , "nbe-dependent-reversed-sigma-spine-pi-codomain-transports-reduced: "
-              ++ show
-                (NbeSpike.spikeDependentReversedSigmaSpinePiCodomainTransportsReduced report)
-          , "nbe-dependent-sigma-spine-fields-transported: "
-              ++ show
-                (NbeSpike.spikeDependentSigmaSpineFieldsTransported report)
-          , "nbe-dependent-sigma-spine-stable-fields-preserved: "
-              ++ show
-                (NbeSpike.spikeDependentSigmaSpineStableFieldsPreserved report)
-          , "nbe-dependent-sigma-spine-indexed-pi-fields-transported: "
-              ++ show
-                (NbeSpike.spikeDependentSigmaSpineIndexedPiFieldsTransported report)
-          , "nbe-indexed-pi-field-applications-evaluated: "
-              ++ show
-                (NbeSpike.spikeIndexedPiFieldApplicationsEvaluated report)
-          , "nbe-indexed-pi-ground-payload-fields-preserved: "
-              ++ show
-                (NbeSpike.spikeIndexedPiGroundPayloadFieldsPreserved report)
-          , "nbe-closed-stable-function-values-validated: "
-              ++ show
-                (NbeSpike.spikeClosedStableFunctionValuesValidated report)
-          , "nbe-closed-stable-pi-type-views-validated: "
-              ++ show
-                (NbeSpike.spikeClosedStablePiTypeViewsValidated report)
-          , "nbe-record-transports-reduced: "
-              ++ show (NbeSpike.spikeRecordTransportsReduced report)
-          , "nbe-data-transports-reduced: "
-              ++ show (NbeSpike.spikeDataTransportsReduced report)
-          , "nbe-glue-unglue-cancellations: "
-              ++ show (NbeSpike.spikeGlueUnglueCancellations report)
-          , "nbe-hcomps-reduced: "
-              ++ show (NbeSpike.spikeHCompsReduced report)
-          , "nbe-fuel-limit: " ++ show NbeSpike.spikeFuelLimit
-          , "nbe-fuel-consumed: "
-              ++ show (NbeSpike.spikeFuelConsumed report)
-          ] EngineStageBreakdown
-          { engineEvaluationNanoseconds =
-              Just (NbeSpike.spikeEvaluationNanoseconds report)
-          , engineReadbackNanoseconds =
-              Just (NbeSpike.spikeReadbackNanoseconds report)
-          } EngineResult
-          { resultNormalTerm = NbeSpike.spikeNormalTerm report
-          , resultNormalType = NbeSpike.spikeNormalType report
-          }
-      NbeSpike.SpikeUnsupported problem -> pure $ EngineUnsupported
-#if defined(CUBICAL_CHEZ_TEST_NBE_ADAPTER_SPIKE)
-        NbeAdapterSpike
-        [ "nbe-adapter-implementation: " ++ NbeSpike.spikeProviderIdentity
-        , "nbe-adapter-linkage: test-only"
-        , "nbe-provider-lock-status: not-applicable-test-only"
-        ]
-#else
-        MatureNbe
-        [ "nbe-adapter-implementation: " ++ NbeSpike.spikeProviderIdentity
-        , "nbe-adapter-linkage: production-candidate"
-        , "nbe-provider-lock-status: selected-build-key"
-        ]
-#endif
-        emptyEngineStageBreakdown
-        problem
-      NbeSpike.SpikeFuelExhausted problem ->
-        backendAbortWith EngineTimeout problem
-      NbeSpike.SpikeRecursiveCycle problem ->
-        backendAbortWith NbeExecutionFailed problem
-#else
-    backendAbortWith NbeUnavailable $ unlines
-    [ "the NbE adapter has not been configured"
-    , "The two-key gate requires both a selected config/nbe-adapter.lock.tsv"
-    , "and adapter code linked against engine-request-v1."
-    , "Validate provider identity with make verify-nbe-adapter-contract."
-    , "Select --cubical-chez-engine=agda-baseline only for baseline verification."
-    ]
-#endif
-  NbeAdapterSpike -> \_ ->
-    backendAbortWith InvalidConfiguration
-      "the test-only NbE adapter spike cannot be selected through the CLI"
-
-runAgdaBaseline :: EngineRequest -> TCM EngineResult
-runAgdaBaseline request = do
-  normalizedType <- normalise (requestType request)
-  normalizedTerm <- baselineNormalise (requestTerm request) normalizedType
-  pure EngineResult
-    { resultNormalTerm = normalizedTerm
-    , resultNormalType = normalizedType
-    }
-
--- | No static evaluator is trusted to manufacture well-scoped Internal
--- syntax.  This gate is deliberately before Treeless conversion and type
--- erasure, so the future NbE adapter must return a closed, meta-free term/type
--- pair which Agda itself accepts in the current signature.
-validateEngineResult :: EngineResult -> TCM EngineResult
-validateEngineResult result = do
-  let term = resultNormalTerm result
-      ty = resultNormalType result
-  unless (closed (term, ty)) $
-    backendAbortWith EngineResultInvalid
-      "static engine returned an open Term or Type"
-  unless (noMetas (term, ty)) $
-    backendAbortWith EngineResultInvalid
-      "static engine returned unresolved metavariables"
-  (do
-      CheckInternal.checkType ty
-      CheckInternal.checkInternal term CmpLeq ty
-      pure result
-    ) `catchError` \_ ->
-      backendAbortWith EngineResultInvalid
-        "static engine returned a Term/Type pair rejected by Agda"
-
--- Compile-time-only faults prove each engine-result gate.  They are built as
--- isolated verifier binaries and cannot be selected through the production
--- CLI.
-testEngineResult :: EngineResult -> EngineResult
-#if defined(CUBICAL_CHEZ_TEST_ENGINE_OPEN_TERM)
-testEngineResult result = result
-  { resultNormalTerm = Internal.Var 0 []
-  }
-#elif defined(CUBICAL_CHEZ_TEST_ENGINE_UNRESOLVED_META)
-testEngineResult result = result
-  { resultNormalTerm = Internal.MetaV (MetaId 0 noModuleNameHash) []
-  }
-#elif defined(CUBICAL_CHEZ_TEST_ENGINE_TYPE_MISMATCH)
-testEngineResult result = result
-  { resultNormalTerm = Internal.Lit (LitString "invalid engine result")
-  }
-#else
-testEngineResult = id
-#endif
-
--- | Type-directed top-level eta expansion from the v2 runtime, followed by
--- Agda's reducer.  This is the oracle/baseline against which the NbE adapter
--- will be checked.
-baselineNormalise :: Term -> Type -> TCM Term
-baselineNormalise term ty = do
-  ty' <- reduce ty
-  etaTerm <- isEtaRecordType ty' >>= \case
-    Nothing -> pure term
-    Just (recordName, parameters) -> do
-      recordDef <- fromMaybe __IMPOSSIBLE__ <$> isRecord recordName
-      expansion <- etaExpandRecord_ recordName parameters recordDef term
-      pure $ etaExpansionTerm term expansion
-  normalise etaTerm
-
--- Agda 2.8 returned the eta expansion directly, while Agda 2.9 wraps failure
--- in Maybe.  Keeping this tiny compatibility layer lets the standalone
--- vertical slice compile against 2.8 and the pinned delivery tree use 2.9.
-class EtaExpansionResult result where
-  etaExpansionTerm :: Term -> result -> Term
-
-instance EtaExpansionResult (telescope, ConHead, ConInfo, Internal.Args) where
-  etaExpansionTerm _ (_, con, info, args) = mkCon con info args
-
-instance EtaExpansionResult (Maybe (telescope, ConHead, ConInfo, Internal.Args)) where
-  etaExpansionTerm fallback = \case
-    Nothing -> fallback
-    Just (_, con, info, args) -> mkCon con info args
-
-writeProgram :: ChezOptions -> IsMain -> Map.Map TopLevelModuleName ChezModule -> TCM ()
-writeProgram opts _ modules = do
-  let defs = concat (Map.elems modules)
-      outputDirectory = chezOutputDirectory opts
-      schemePath = outputDirectory </> "program.ss"
-      dumpPath = outputDirectory </> "treeless.txt"
-      stagingPath = outputDirectory </> "staging.txt"
-      residualPath = outputDirectory </> "typed-residual.txt"
-      defaultPacketPath = outputDirectory </> "typed-residual.bin"
-      stageTimingsPath = outputDirectory </> stageTimingsName
-      staticShellPath = outputDirectory </> residualStaticShellName
-      groundBridgePath = outputDirectory </> typedHoleGroundBridgeName
-      packetPath = fromMaybe defaultPacketPath (chezPacketFile opts)
-  liftIO $ do
-    createDirectoryIfMissing True outputDirectory
-    removeIfExists schemePath
-    removeIfExists residualPath
-    removeIfExists defaultPacketPath
-    removeIfExists stageTimingsPath
-    removeIfExists staticShellPath
-    removeIfExists groundBridgePath
-    removePacketIfExists packetPath
-    clearResidualHolePackets outputDirectory
-  entry <- either (backendAbortWith EntryRejected) pure (findEntry opts defs)
-  case compiledTypedResidual entry of
-    Just residual -> do
-      liftIO $ writeFile stagingPath
-        (renderStaging opts entry StaticClosureNotApplicable)
-      runTimedPublication stageTimingsPath entry "residualization" $
-        handleTypedResidual opts residualPath packetPath entry residual
-    Nothing -> runTimedPublication
-      stageTimingsPath entry "scheme-codegen-publication" $
-        case proveStaticClosure defs entry of
-          Left failure -> do
-            liftIO $ do
-              writeFile dumpPath $ renderDump
-                (staticClosureFailureDefinitions failure)
-                (staticClosureFailureUnresolved failure)
-              writeFile stagingPath $ renderStaging opts entry $
-                StaticClosureIncomplete
-                  (length $ staticClosureFailureDefinitions failure)
-                  (staticClosureFailureUnresolved failure)
-                  (staticClosureFailureBlockers failure)
-                  (staticClosureFailureUnknownCubical failure)
-                  (staticClosureFailureReason failure)
-                  (staticClosureFailureLowering failure)
-            backendAbortWith (staticClosureFailureClass failure)
-              (staticClosureFailureProblem failure)
-          Right closure -> liftIO $ do
-            writeFile dumpPath
-              (renderDump (staticClosureDefinitions closure) [])
-            writeFile stagingPath $ renderStaging opts entry $
-              StaticClosureComplete (length $ staticClosureDefinitions closure)
-            writeFile schemePath (staticClosureProgram closure)
-
-runTimedPublication
-  :: FilePath
-  -> CompiledDef
-  -> String
-  -> TCM ()
-  -> TCM ()
-runTimedPublication stageTimingsPath entry publicationStage action = do
-  (outcome, publicationNanoseconds) <- measureTcmStage $
-    (Right <$> action) `catchError` (pure . Left)
-  liftIO $ writeFile stageTimingsPath $
-    renderStageTimings entry publicationStage publicationNanoseconds
-  either throwError pure outcome
-
-renderStageTimings :: CompiledDef -> String -> Word64 -> String
-renderStageTimings entry publicationStage publicationNanoseconds = unlines $
-  [ "stage\telapsed_nanoseconds\tstatus"
-  , numeric "engine-total" $ compiledEngineTotalNanoseconds entry
-  , optional "nbe-evaluation" $ compiledNbeEvaluationNanoseconds entry
-  , optional "nbe-readback" $ compiledNbeReadbackNanoseconds entry
-  , numeric "engine-result-admission" $
-      compiledResultAdmissionNanoseconds entry
-  , numeric "internal-semantic-audit" $
-      compiledInternalAuditNanoseconds entry
-  , numeric "treeless-conversion" $ compiledTreelessNanoseconds entry
-  , publication "residualization"
-  , publication "scheme-codegen-publication"
-  ]
-  where
-    numeric stage nanoseconds =
-      stage ++ "\t" ++ show nanoseconds ++ "\tmeasured"
-    optional stage = \case
-      Just nanoseconds -> numeric stage nanoseconds
-      Nothing -> stage ++ "\t-\tnot-applicable"
-    publication stage
-      | stage == publicationStage = numeric stage publicationNanoseconds
-      | otherwise = stage ++ "\t-\tnot-applicable"
-
--- | Prove every condition required before the type-erased Chez path can be
--- published.  The result is deliberately a capability rather than a Boolean:
--- only a successful proof carries rendered Scheme to the writer.
-proveStaticClosure
-  :: [CompiledDef]
-  -> CompiledDef
-  -> Either StaticClosureFailure StaticClosure
-proveStaticClosure defs entry
-  | compiledBindingTime entry /= BindingStatic =
-      failure [] "binding-time-not-static" "not-run"
-        "static closure requested for a non-static entry"
-  | Just _ <- compiledTypedResidual entry =
-      failure [] "typed-residual-present" "not-run"
-        "static closure requested for a typed residual"
-  | not (null closureRuntimeBlockers) =
-      failure [] "reachable-runtime-blockers" "not-run"
-        "static closure contains reachable runtime blockers"
-  | not (null closureUnknownCubical) =
-      failure [] "reachable-unknown-cubical-primitive" "not-run"
-        "static closure contains unknown Cubical primitives"
-  | missing : _ <- unresolved =
-      failure unresolved "unresolved-definitions" "not-run" $
-        "unsupported unresolved definition " ++ prettyShow missing
-  | Left problem <- renderedProgram =
-      failure [] "scheme-lowering-rejected" "rejected" problem
-  | Right scheme <- renderedProgram =
-      Right StaticClosure
-        { staticClosureDefinitions = reachable
-        , staticClosureProgram = scheme
-        }
-  where
-    (reachable, unresolved) = reachableDefinitions defs entry
-    renderedProgram = renderProgram entry reachable
-    closureRuntimeBlockers = Set.toList $ Set.fromList $
-      compiledRuntimeBlockers entry
-        ++ concatMap (typedTreelessBlockers . compiledTerm) reachable
-    closureUnknownCubical = Set.toList $ Set.fromList $
-      compiledUnknownCubicalPrimitives entry
-        ++ concatMap (typedTreelessUnknownCubical . compiledTerm) reachable
-    failure missing reason lowering problem = Left StaticClosureFailure
-      { staticClosureFailureDefinitions = reachable
-      , staticClosureFailureUnresolved = missing
-      , staticClosureFailureBlockers = closureRuntimeBlockers
-      , staticClosureFailureUnknownCubical = closureUnknownCubical
-      , staticClosureFailureReason = reason
-      , staticClosureFailureLowering = lowering
-      , staticClosureFailureProblem = problem
-      }
-
-staticClosureFailureClass :: StaticClosureFailure -> BackendFailureClass
-staticClosureFailureClass failure
-  | staticClosureFailureReason failure == "scheme-lowering-rejected" =
-      SchemeLoweringFailed
-  | otherwise = UnsupportedProgram
-
-handleTypedResidual
-  :: ChezOptions
-  -> FilePath
-  -> FilePath
-  -> CompiledDef
-  -> TypedResidual
-  -> TCM ()
-handleTypedResidual opts manifestPath packetPath entry residual = do
-  let problem =
-        "typed residual required for "
-          ++ prettyShow (compiledName entry)
-          ++ "; blockers: "
-          ++ renderBlockers (compiledRuntimeBlockers entry)
-  when (compiledBindingTime entry == BindingUnsupported) $ do
-    when (chezResidualPolicy opts == "manifest") $ do
-      checkedClosure <- validateTypedResidualContract
-        (testResidualContract residual)
-      slicePlan <- buildResidualSlicePlan entry $
-        residualClosurePayload checkedClosure
-      liftIO $ writeFile manifestPath
-        (renderTypedResidual
-          "unsupported-diagnostic" entry checkedClosure slicePlan)
-    backendAbortWith UnsupportedProgram $ case compiledBindingReason entry of
-      UnknownCubicalPrimitive ->
-        "unsupported unknown Cubical primitive for "
-          ++ prettyShow (compiledName entry)
-          ++ "; primitives: "
-          ++ renderBlockers (compiledUnknownCubicalPrimitives entry)
-      _ ->
-        "unsupported binding-time classification for "
-          ++ prettyShow (compiledName entry)
-          ++ "; Internal and Treeless blocker audits disagree"
-  case chezResidualPolicy opts of
-    "reject" -> backendAbortWith ResidualRequired problem
-    "manifest" -> do
-      checkedResidual <- validateTypedResidualContract
-        (testResidualContract residual)
-      slicePlan <- buildResidualSlicePlan entry $
-        residualClosurePayload checkedResidual
-      _ <- buildResidualStaticShell entry slicePlan
-      liftIO $ writeFile manifestPath
-        (renderTypedResidual "manifest-only" entry checkedResidual slicePlan)
-      backendAbortWith ResidualRequired problem
-    "packet" -> do
-      checkedResidual <- validateTypedResidualContract $
-        testPacketResidual (testResidualContract residual)
-      slicePlan <- buildResidualSlicePlan entry $
-        residualClosurePayload checkedResidual
-      staticShell <- buildResidualStaticShell entry slicePlan
-      bytes <- encodeRuntimePacket checkedResidual
-      verifyRuntimePacket checkedResidual bytes
-      holePackets <- encodeResidualHolePackets opts slicePlan
-      liftIO $ do
-        writeFile manifestPath
-          (renderTypedResidual "packet-v2" entry checkedResidual slicePlan)
-        forM_ holePackets $ \(path, holeBytes) ->
-          ByteString.writeFile path holeBytes
-        forM_ staticShell $ \shell ->
-          do
-            writeFile
-              (chezOutputDirectory opts </> residualStaticShellName)
-              shell
-            writeFile
-              (chezOutputDirectory opts </> typedHoleGroundBridgeName)
-              typedHoleGroundBridgeScript
-        writePacketBytes packetPath bytes
-    policy -> backendAbortWith InvalidConfiguration $
-      "unknown typed residual policy " ++ show policy
-
-ensurePortableTerm :: Term -> Type -> TCM ()
-ensurePortableTerm term ty = do
-  unless (closed (term, ty)) $
-    backendAbortWith ResidualizationFailed
-      "only closed Terms can cross the process boundary"
-  unless (noMetas (term, ty)) $
-    backendAbortWith ResidualizationFailed
-      "typed residual still contains process-local metavariables"
-
--- | The v2 packet carries only the checked Internal payload. QName definitions
--- stay in the consumer's already-loaded signature, whose top-level module and
--- full interface hash are part of the packet envelope. Keeping a derived
--- direct-dependency inventory makes this boundary observable and prevents a
--- future producer from publishing a payload whose declared requirements drift
--- from the serialized Term/Type pair.
-validateTypedResidualContract :: TypedResidual -> TCM ResidualClosure
-validateTypedResidualContract residual = do
-  let term = residualTerm residual
-      ty = residualType residual
-      derivedDependencies = residualDependencyNames term ty
-  unless (residualDirectDependencies residual == derivedDependencies) $
-    backendAbortWith ResidualizationFailed
-      "typed residual dependency inventory does not match its Term/Type payload"
-  ensurePortableTerm term ty
-  (do
-      CheckInternal.checkType ty
-      CheckInternal.checkInternal term CmpLeq ty
-      pure ()
-    ) `catchError` \_ ->
-      backendAbortWith ResidualizationFailed
-        "typed residual Term/Type pair was rejected by Agda before publication"
-  resolveResidualClosure residual
-
-residualClosureLimit :: Int
-residualClosureLimit = 10000
-
-resolveResidualClosure :: TypedResidual -> TCM ResidualClosure
-resolveResidualClosure residual = do
-  graph <- resolveDependencyGraph (residualDirectDependencies residual)
-  pure ResidualClosure
-    { residualClosurePayload = residual
-    , residualClosureResolvedDependencies = dependencyGraphResolved graph
-    , residualClosureExpandedDefinitions = dependencyGraphExpanded graph
-    , residualClosureSignatureLeaves = dependencyGraphLeaves graph
-    , residualClosureExcludedPresentationDependencies =
-        dependencyGraphExcludedPresentation graph
-    }
-
-resolveDependencyGraph :: [QName] -> TCM DependencyGraph
-resolveDependencyGraph = go Set.empty [] [] Set.empty
-  where
-    go seen expanded leaves excludedPresentation pending = case pending of
-      [] -> pure DependencyGraph
-        { dependencyGraphResolved = Set.toList seen
-        , dependencyGraphExpanded = reverse expanded
-        , dependencyGraphLeaves = reverse leaves
-        , dependencyGraphExcludedPresentation = Set.toList $
-            Set.difference excludedPresentation seen
-        }
-      name : rest
-        | name `Set.member` seen ->
-            go seen expanded leaves excludedPresentation rest
-        | Set.size seen >= residualClosureLimit ->
-            backendAbortWith ResidualizationFailed $
-              "typed residual dependency closure exceeds "
-              ++ show residualClosureLimit
-              ++ " resolved QNames"
-        | otherwise -> do
-            definitionResult <- lookupResidualDefinition name
-            definition <- case definitionResult of
-              Left _ -> backendAbortWith ResidualizationFailed $
-                "typed residual dependency is unavailable in the current signature: "
-                ++ prettyShow name
-              Right checkedDefinition -> pure checkedDefinition
-            let seen' = Set.insert name seen
-            if isResidualSignatureLeaf name
-              then go seen' expanded (name : leaves) excludedPresentation rest
-              else do
-                let exactDependencies =
-                      residualDefinitionDependencyNames definition
-                    discovered = testResidualDefinitionDependencies
-                      definition exactDependencies
-                    allDefinitionNames =
-                      namesIn definition :: Set.Set QName
-                    presentationOnly = Set.delete name $
-                      Set.difference allDefinitionNames exactDependencies
-                unless (discovered == exactDependencies) $
-                  backendAbortWith ResidualizationFailed
-                    "typed residual definition dependency slice does not match its checked type/body"
-                go seen' (name : expanded) leaves
-                  (Set.union excludedPresentation presentationOnly)
-                  (Set.toList discovered ++ rest)
-
-buildResidualSlicePlan :: CompiledDef -> TypedResidual -> TCM ResidualSlicePlan
-buildResidualSlicePlan entry residual = case compiledBindingTime entry of
-  BindingMixed -> do
-    let seeds = testResidualHoleSeeds $
-          collectResidualHoleSeeds [] (compiledTerm entry)
-        plannedBlockers = Set.fromList $
-          concatMap residualHoleSeedBlockers seeds
-        expectedBlockers = Set.fromList (compiledTreelessBlockers entry)
-    when (null seeds) $
-      backendAbortWith ResidualizationFailed
-        "mixed residual slice plan found no blocker-headed typed hole"
-    unless (plannedBlockers == expectedBlockers) $
-      backendAbortWith ResidualizationFailed
-        "mixed residual slice plan does not cover every Treeless blocker"
-    candidates <- testResidualHoleCandidates <$>
-      collectResidualHoleCandidates residual
-    ResidualSlicePlanned <$> traverse (materializeHole candidates) seeds
-  BindingDynamic -> pure $ ResidualSliceNotApplicable "whole-entry-dynamic"
-  BindingStatic -> pure $ ResidualSliceNotApplicable "static-entry"
-  BindingUnsupported -> pure $ ResidualSliceNotApplicable "unsupported-entry"
-  where
-    materializeHole candidates seed = case matchingCandidates of
-      [candidate] -> do
-        let term = residualHoleCandidateTerm candidate
-            ty = residualHoleCandidateType candidate
-            sourceClosed = residualHoleCandidateSourceClosed candidate
-            environmentArity =
-              residualHoleCandidateEnvironmentArity candidate
-            typedResidual = TypedResidual
-              { residualTerm = term
-              , residualType = ty
-              , residualDirectDependencies = residualDependencyNames term ty
-              }
-        unless
-          ( (sourceClosed && environmentArity == 0)
-            || ( not sourceClosed
-                 && environmentArity > 0
-                 && environmentArity <= residualHoleEnvironmentLimit
-               )
-          ) $
-          backendAbortWith ResidualizationFailed $
-            "mixed residual hole environment arity is outside 1.."
-              ++ show residualHoleEnvironmentLimit
-        closure <- validateTypedResidualContract typedResidual
-        callableAbi <- classifyResidualHoleCallableAbi environmentArity ty
-        pure ResidualHolePlan
-          { residualHoleId = residualHoleSeedId seed
-          , residualHolePath = residualHoleSeedPath seed
-          , residualHoleBlockers = residualHoleSeedBlockers seed
-          , residualHoleClosure = closure
-          , residualHoleCallableAbi = callableAbi
-          , residualHoleSourceClosed =
-              residualHoleCandidateSourceClosed candidate
-          , residualHoleEnvironmentArity =
-              residualHoleCandidateEnvironmentArity candidate
-          }
-      [] -> backendAbortWith ResidualizationFailed $
-        "mixed residual hole "
-          ++ residualHoleSeedId seed
-          ++ " has no unique checked Internal Term/Type match"
-      _ -> backendAbortWith ResidualizationFailed $
-        "mixed residual hole "
-          ++ residualHoleSeedId seed
-          ++ " has multiple checked Internal Term/Type matches"
-      where
-        matchingCandidates = filter matches candidates
-        matches candidate =
-          residualHoleCandidateTreeless candidate
-            == residualHoleSeedTreeless seed
-          && Set.fromList (residualHoleSeedBlockers seed)
-            `Set.isSubsetOf` Set.fromList
-              (typedInternalBlockers $ residualHoleCandidateTerm candidate)
-
-classifyResidualHoleCallableAbi
-  :: Int
-  -> Type
-  -> TCM ResidualHoleCallableAbi
-classifyResidualHoleCallableAbi environmentArity ty
-  | environmentArity > 1 = do
-      codecs <- classifyOrderedGroundEnvironment environmentArity ty
-      case codecs of
-        Just orderedCodecs -> pure $
-          ResidualHoleOrderedGroundEnvironmentElimination orderedCodecs
-        Nothing -> do
-          dependent <-
-            classifyDependentGroundEnvironment environmentArity ty
-          pure $ if dependent
-            then ResidualHoleDependentGroundEnvironmentElimination
-            else ResidualHoleObservationOnly
-  | otherwise = classifyUnary ty
-  where
-    classifyUnary unaryType = do
-      reducedType <- reduce unaryType
-      registry <- residualGroundCodecRegistry
-      case Internal.unEl reducedType of
-        Internal.Pi domain _
-          | getHiding domain == NotHidden -> do
-              reducedDomain <- reduce (Internal.unDom domain)
-              pure $ case Internal.unEl reducedDomain of
-                Internal.Def actual [] ->
-                  maybe
-                    ResidualHoleObservationOnly
-                    ResidualHoleUnaryGroundElimination
-                    (lookupResidualGroundCodec registry actual)
-                _ -> ResidualHoleObservationOnly
-        _ -> pure ResidualHoleObservationOnly
-
-classifyOrderedGroundEnvironment
-  :: Int
-  -> Type
-  -> TCM (Maybe [ResidualGroundCodec])
-classifyOrderedGroundEnvironment arity ty = do
-  registry <- residualGroundCodecRegistry
-  go registry arity ty
-  where
-    go _ 0 _ = pure $ Just []
-    go registry remaining currentType = do
-      reducedType <- reduce currentType
-      case Internal.unEl reducedType of
-        Internal.Pi domain codomain
-          | getHiding domain == NotHidden -> do
-              reducedDomain <- reduce (Internal.unDom domain)
-              let codec = case Internal.unEl reducedDomain of
-                    Internal.Def actual [] ->
-                      lookupResidualGroundCodec registry actual
-                    _ -> Nothing
-              if not (closed reducedDomain)
-                then pure Nothing
-                else case codec of
-                  Nothing -> pure Nothing
-                  Just groundCodec -> underAbstraction domain codomain $ \body -> do
-                    rest <- go registry (remaining - 1) body
-                    pure $ (groundCodec :) <$> rest
-        _ -> pure Nothing
-
--- | A visible telescope with at least two slots and at least one domain that
--- depends on an earlier slot. Closed domains must be builtin
--- Bool/Nat/Word64/Char/Int; open
--- domains are admitted only as dependent candidates. At runtime every actual
--- value must still be representable as Bool/Nat/Word64/Char/Int, and Agda checks the complete
--- dependent application after all literals have been supplied.
-classifyDependentGroundEnvironment :: Int -> Type -> TCM Bool
-classifyDependentGroundEnvironment arity ty = do
-  registry <- residualGroundCodecRegistry
-  if arity < 2
-    then pure False
-    else go registry arity False ty
-  where
-    go _ 0 sawDependent _ = pure sawDependent
-    go registry remaining sawDependent currentType = do
-      reducedType <- reduce currentType
-      case Internal.unEl reducedType of
-        Internal.Pi domain codomain
-          | getHiding domain == NotHidden -> do
-              reducedDomain <- reduce (Internal.unDom domain)
-              let domainClosed = closed reducedDomain
-                  closedGround = case Internal.unEl reducedDomain of
-                    Internal.Def actual [] ->
-                      case lookupResidualGroundCodec registry actual of
-                        Just _ -> True
-                        Nothing -> False
-                    _ -> False
-              if domainClosed && not closedGround
-                then pure False
-                else underAbstraction domain codomain $ \body ->
-                  go registry (remaining - 1)
-                    (sawDependent || not domainClosed) body
-        _ -> pure False
-
--- | Re-run Agda's Internal checker with an observation-only action. The
--- checker, not Treeless, supplies the expected Type and current telescope for
--- each subterm. Closed candidates stay unchanged. An open/meta-free candidate
--- is lambda-lifted over that telescope, producing a closed Term/Type packet;
--- the explicit environment arguments remain typed and are never reconstructed
--- from erased Treeless syntax.
-collectResidualHoleCandidates
-  :: TypedResidual
-  -> TCM [ResidualHoleCandidate]
-collectResidualHoleCandidates residual = do
-  observed <- liftIO $ newIORef []
-  let term = residualTerm residual
-      ty = residualType residual
-      capture subtermType subterm = do
-        let sourceClosed = closed (subterm, subtermType)
-        when
-          ( not (null $ typedInternalBlockers subterm)
-            && noMetas (subterm, subtermType)
-          ) $ do
-          context <- getContextTelescope
-          let environmentArity =
-                if sourceClosed then 0 else length (telToList context)
-              candidateTerm =
-                if sourceClosed then subterm else teleLam context subterm
-              candidateType =
-                if sourceClosed then subtermType else telePi context subtermType
-          when (closed (candidateTerm, candidateType)) $
-            liftIO $ modifyIORef' observed
-              (( candidateTerm
-               , candidateType
-               , sourceClosed
-               , environmentArity
-               ) :)
-        pure subterm
-      action = CheckInternal.defaultAction
-        { CheckInternal.postAction = capture
-        }
-  (do
-      _ <- CheckInternal.checkInternal' action term CmpLeq ty
-      pure ()
-    ) `catchError` \_ ->
-      backendAbortWith ResidualizationFailed
-        "mixed residual Internal subterm discovery was rejected by Agda"
-  pairs <- liftIO $ readIORef observed
-  let uniquePairs = Map.elems $ Map.fromList
-        [ ( ( prettyShow candidateTerm
-            , prettyShow candidateType
-            , sourceClosed
-            , environmentArity
-            )
-          , ( candidateTerm
-            , candidateType
-            , sourceClosed
-            , environmentArity
-            )
-          )
-        | (candidateTerm, candidateType, sourceClosed, environmentArity) <- pairs
-        ]
-  forM uniquePairs $
-      \(candidateTerm, candidateType, sourceClosed, environmentArity) -> do
-    liftedTreeless <- compileClosedTerm candidateTerm
-    candidateTreeless <- case stripTreelessEnvironment
-      environmentArity liftedTreeless of
-        Just body -> pure body
-        Nothing -> backendAbortWith ResidualizationFailed
-          "lambda-lifted mixed hole did not preserve its environment arity"
-    pure ResidualHoleCandidate
-      { residualHoleCandidateTerm = candidateTerm
-      , residualHoleCandidateType = candidateType
-      , residualHoleCandidateTreeless = candidateTreeless
-      , residualHoleCandidateSourceClosed = sourceClosed
-      , residualHoleCandidateEnvironmentArity = environmentArity
-      }
-
-stripTreelessEnvironment :: Int -> TTerm -> Maybe TTerm
-stripTreelessEnvironment arity term
-  | arity <= 0 = Just term
-stripTreelessEnvironment arity (TLam body) =
-  stripTreelessEnvironment (arity - 1) body
-stripTreelessEnvironment _ _ = Nothing
-
-residualHoleEnvironmentLimit :: Int
-residualHoleEnvironmentLimit = 64
-
-collectResidualHoleSeeds :: [String] -> TTerm -> [ResidualHoleSeed]
-collectResidualHoleSeeds path term
-  | runtimeBlockerAtHead term =
-      [ ResidualHoleSeed
-          { residualHoleSeedId = "typed-hole@" ++ renderResidualHolePath path
-          , residualHoleSeedPath = renderResidualHolePath path
-          , residualHoleSeedBlockers = typedTreelessBlockers term
-          , residualHoleSeedTreeless = term
-          }
-      ]
-  | otherwise = case term of
-      TVar _ -> []
-      TPrim _ -> []
-      TDef _ -> []
-      TApp function arguments ->
-        collectResidualHoleSeeds (path ++ ["app-function"]) function
-          ++ concat
-            [ collectResidualHoleSeeds
-                (path ++ ["app-argument-" ++ show index])
-                argument
-            | (index, argument) <- zip [(0 :: Int) ..] arguments
-            ]
-      TLam body -> collectResidualHoleSeeds (path ++ ["lambda-body"]) body
-      TLit _ -> []
-      TCon _ -> []
-      TLet value body ->
-        collectResidualHoleSeeds (path ++ ["let-value"]) value
-          ++ collectResidualHoleSeeds (path ++ ["let-body"]) body
-      TCase _ _ fallback alternatives ->
-        collectResidualHoleSeeds (path ++ ["case-fallback"]) fallback
-          ++ concat
-            [ collectResidualAlternativeSeeds
-                (path ++ ["case-alternative-" ++ show index])
-                alternative
-            | (index, alternative) <- zip [(0 :: Int) ..] alternatives
-            ]
-      TUnit -> []
-      TSort -> []
-      TErased -> []
-      TCoerce coerced ->
-        collectResidualHoleSeeds (path ++ ["coerce-body"]) coerced
-      TError _ -> []
-
-collectResidualAlternativeSeeds :: [String] -> TAlt -> [ResidualHoleSeed]
-collectResidualAlternativeSeeds path = \case
-  TACon _ _ body ->
-    collectResidualHoleSeeds (path ++ ["constructor-body"]) body
-  TAGuard guard body ->
-    collectResidualHoleSeeds (path ++ ["guard-test"]) guard
-      ++ collectResidualHoleSeeds (path ++ ["guard-body"]) body
-  TALit _ body -> collectResidualHoleSeeds (path ++ ["literal-body"]) body
-
-renderResidualHolePath :: [String] -> String
-renderResidualHolePath = \case
-  [] -> "root"
-  segments -> joinWithDot segments
-  where
-    joinWithDot = foldr1 (\left right -> left ++ "." ++ right)
-
-testResidualHoleSeeds :: [ResidualHoleSeed] -> [ResidualHoleSeed]
-#if defined(CUBICAL_CHEZ_TEST_RESIDUAL_SLICE_NO_HOLES)
-testResidualHoleSeeds _ = []
-#else
-testResidualHoleSeeds = id
-#endif
-
-testResidualHoleCandidates
-  :: [ResidualHoleCandidate]
-  -> [ResidualHoleCandidate]
-#if defined(CUBICAL_CHEZ_TEST_RESIDUAL_SLICE_NO_TYPED_MATCH)
-testResidualHoleCandidates _ = []
-#else
-testResidualHoleCandidates = id
-#endif
-
-lookupResidualDefinition :: QName -> TCM (Either SigError Definition)
-lookupResidualDefinition name =
-#if defined(CUBICAL_CHEZ_TEST_RESIDUAL_UNRESOLVED_DEPENDENCY)
-  if isResidualSignatureLeaf name
-    then getConstInfo' name
-    else backendAbortWith ResidualizationFailed $
-      "typed residual dependency is unavailable in the current signature: "
-      ++ prettyShow name
-#else
-  getConstInfo' name
-#endif
-
-isResidualSignatureLeaf :: QName -> Bool
-isResidualSignatureLeaf name =
-  "Agda.Builtin." `isPrefixOf` rendered
-    || "Agda.Primitive." `isPrefixOf` rendered
-  where
-    rendered = prettyShow name
-
-residualDependencyNames :: Term -> Type -> [QName]
-residualDependencyNames term ty = Set.toList $ Set.union
-  (namesIn term :: Set.Set QName)
-  (namesIn ty :: Set.Set QName)
-
--- | Only checked type and definition-body names can affect checking or
--- normalization of the residual payload. Definition display forms are
--- presentation metadata: record them for audit, but never let them enlarge
--- the executable signature slice.
-residualDefinitionDependencyNames :: Definition -> Set.Set QName
-residualDefinitionDependencyNames definition = Set.union
-  (namesIn (defType definition) :: Set.Set QName)
-  (namesIn (theDef definition) :: Set.Set QName)
-
--- Compile-time-only regression fault. It restores the former broad
--- @NamesIn Definition@ traversal so the gate proves presentation metadata
--- cannot silently become an executable dependency again.
-testResidualDefinitionDependencies
-  :: Definition
-  -> Set.Set QName
-  -> Set.Set QName
-#if defined(CUBICAL_CHEZ_TEST_RESIDUAL_PRESENTATION_DEPENDENCY_LEAK)
-testResidualDefinitionDependencies definition _ =
-  namesIn definition :: Set.Set QName
-#else
-testResidualDefinitionDependencies _ = id
-#endif
-
--- Compile-time-only inventory fault. It proves that dependency evidence is a
--- checked producer contract, not decorative manifest text.
-testResidualContract :: TypedResidual -> TypedResidual
-#if defined(CUBICAL_CHEZ_TEST_RESIDUAL_DEPENDENCY_MISMATCH)
-testResidualContract residual = residual {residualDirectDependencies = []}
-#else
-testResidualContract = id
-#endif
-
--- Test-only producer faults exercise the portability gates before bytes are
--- published.  Production and ordinary verification builds use the checked
--- residual unchanged.
-testPacketResidual :: TypedResidual -> TypedResidual
-#if defined(CUBICAL_CHEZ_TEST_OPEN_TERM)
-testPacketResidual residual = residual
-  { residualTerm = Internal.Var 0 []
-  , residualDirectDependencies = residualDependencyNames
-      (Internal.Var 0 [])
-      (residualType residual)
-  }
-#elif defined(CUBICAL_CHEZ_TEST_UNRESOLVED_META)
-testPacketResidual residual = residual
-  { residualTerm = Internal.MetaV (MetaId 0 noModuleNameHash) []
-  , residualDirectDependencies = residualDependencyNames
-      (Internal.MetaV (MetaId 0 noModuleNameHash) [])
-      (residualType residual)
-  }
-#else
-testPacketResidual = id
-#endif
-
-encodeRuntimePacket :: ResidualClosure -> TCM ByteString.ByteString
-#if defined(CUBICAL_CHEZ_AGDA_29)
-encodeRuntimePacket closure = do
-  iface <- curIF
-  let residual = residualClosurePayload closure
-  let term = residualTerm residual
-      ty = residualType residual
-  let packet :: RuntimePacket
-      packet =
-        ( runtimePacketMagic
-        , ( runtimePacketVersion
-          , ( iFullHash iface
-            , ( prettyShow $ iTopLevelModuleName iface
-              , (term, ty)
-              )
-            )
-          )
-        )
-  encoded <- Serialise.encode packet
-  liftIO $ RawSerialise.serialize encoded
-#else
-encodeRuntimePacket _ = backendAbortWith ResidualizationFailed $
-  "packet output requires an Agda 2.9 build with CUBICAL_CHEZ_AGDA_29 enabled"
-#endif
-
--- | Decode and recheck the exact bytes before publishing them.  This does not
--- replace the consumer's independent checks; it prevents producing a corrupt
--- packet in the first place.
-verifyRuntimePacket :: ResidualClosure -> ByteString.ByteString -> TCM ()
-#if defined(CUBICAL_CHEZ_AGDA_29)
-verifyRuntimePacket expectedClosure bytes = do
-  encoded <- liftIO $ deserializeEncoded bytes
-  decoded <- runMaybeT (Serialise.decode encoded :: MaybeT TCM RuntimePacket)
-  packet <- maybe
-    (backendAbortWith ResidualizationFailed
-      "packet self-check could not decode its own bytes")
-    pure
-    decoded
-  let (magic, (version, (_, (_, (term, ty))))) = packet
-  unless (magic == expectedRuntimePacketMagic) $
-    backendAbortWith ResidualizationFailed
-      "packet self-check found the wrong magic header"
-  unless (version == expectedRuntimePacketVersion) $
-    backendAbortWith ResidualizationFailed
-      "packet self-check found the wrong format version"
-  unless
-    ( residualDependencyNames term ty
-        == residualDirectDependencies
-          (residualClosurePayload expectedClosure)
-    ) $
-    backendAbortWith ResidualizationFailed
-      "packet self-check found a changed residual dependency inventory"
-  ensurePortableTerm term ty
-  CheckInternal.checkType ty
-  CheckInternal.checkInternal term CmpLeq ty
-#else
-verifyRuntimePacket _ _ = backendAbortWith ResidualizationFailed $
-  "packet verification requires an Agda 2.9 build with CUBICAL_CHEZ_AGDA_29 enabled"
-#endif
-
-encodeResidualHolePackets
-  :: ChezOptions
-  -> ResidualSlicePlan
-  -> TCM [(FilePath, ByteString.ByteString)]
-encodeResidualHolePackets opts = \case
-  ResidualSliceNotApplicable _ -> pure []
-  ResidualSlicePlanned holes -> forM
-    (zip [(1 :: Int) ..] holes) $ \(index, hole) -> do
-      let closure = residualHoleClosure hole
-          path = chezOutputDirectory opts </> residualHolePacketName index
-      bytes <- encodeRuntimePacket closure
-      verifyRuntimePacket closure bytes
-      pure (path, bytes)
-
-#if defined(CUBICAL_CHEZ_AGDA_29)
-deserializeEncoded :: ByteString.ByteString -> IO Serialise.Encoded
-deserializeEncoded = RawSerialise.deserialize
-#endif
-
-removeIfExists :: FilePath -> IO ()
-removeIfExists path = do
-  exists <- doesFileExist path
-  if exists then removeFile path else pure ()
-
-clearPublishedArtifacts :: ChezOptions -> IO ()
-clearPublishedArtifacts opts = do
-  let outputDirectory = chezOutputDirectory opts
-  removeIfExists (outputDirectory </> "program.ss")
-  removeIfExists (outputDirectory </> "treeless.txt")
-  removeIfExists (outputDirectory </> "staging.txt")
-  removeIfExists (outputDirectory </> stageTimingsName)
-  removeIfExists (outputDirectory </> "typed-residual.txt")
-  removeIfExists (outputDirectory </> "typed-residual.bin")
-  removeIfExists (outputDirectory </> residualStaticShellName)
-  clearResidualHolePackets outputDirectory
-  maybe (pure ()) removePacketIfExists (chezPacketFile opts)
-
-clearResidualHolePackets :: FilePath -> IO ()
-clearResidualHolePackets outputDirectory = do
-  exists <- doesDirectoryExist outputDirectory
-  when exists $ do
-    names <- listDirectory outputDirectory
-    forM_ names $ \name ->
-      when
-        ( "typed-residual-hole-" `isPrefixOf` name
-          && ".bin" `isSuffixOf` name
-        ) $
-        removeIfExists (outputDirectory </> name)
-
-removePacketIfExists :: FilePath -> IO ()
-removePacketIfExists "-" = pure ()
-removePacketIfExists path = removeIfExists path
-
-writePacketBytes :: FilePath -> ByteString.ByteString -> IO ()
-writePacketBytes "-" bytes = do
-  hSetBinaryMode stdout True
-  ByteString.hPut stdout bytes
-  hFlush stdout
-writePacketBytes path bytes = ByteString.writeFile path bytes
-
-renderStaging :: ChezOptions -> CompiledDef -> StaticClosureReport -> String
-renderStaging opts entry closureReport = unlines $
-  [ "backend: CubicalChez 0.1.0-dev"
-  , "engine: " ++ compiledEffectiveEngine entry
-  , "engine-requested: " ++ compiledRequestedEngine entry
-  , "engine-effective: " ++ compiledEffectiveEngine entry
-  , "nbe-fallback-policy: " ++ compiledNbeFallbackPolicy entry
-  , "nbe-fallback-used: " ++ renderBoolean (compiledNbeFallbackUsed entry)
-  , "nbe-fallback-reason: " ++ compiledNbeFallbackReason entry
-  , "requested-entry: " ++ chezEntry opts
-  , "entry: " ++ prettyShow (compiledName entry)
-  ]
-  ++ renderNbeSpikeEvidence entry
-  ++ renderChezCoreAbiManifest
-  ++
-  [ "engine-result-closed: true"
-  , "engine-result-meta-free: true"
-  , "engine-result-agda-checked: true"
-  , "packet-destination: " ++ case chezPacketFile opts of
-      Nothing -> "default"
-      Just "-" -> "stdout"
-      Just path -> path
-  , "internal-term-blockers: " ++ renderBlockers (compiledInternalTermBlockers entry)
-  , "internal-type-blockers: " ++ renderBlockers (compiledInternalTypeBlockers entry)
-  , "internal-term-catalog-blockers: "
-      ++ renderBlockers (compiledInternalTermCatalogBlockers entry)
-  , "internal-type-catalog-blockers: "
-      ++ renderBlockers (compiledInternalTypeCatalogBlockers entry)
-  , "internal-term-semantic-sources: "
-      ++ renderSemanticSources (compiledInternalTermSemanticSources entry)
-  , "internal-type-semantic-sources: "
-      ++ renderSemanticSources (compiledInternalTypeSemanticSources entry)
-  , "internal-term-semantic-catalog-disagreements: "
-      ++ renderBlockers
-        (compiledInternalTermSemanticCatalogDisagreements entry)
-  , "internal-type-semantic-catalog-disagreements: "
-      ++ renderBlockers
-        (compiledInternalTypeSemanticCatalogDisagreements entry)
-  , "internal-term-semantic-catalog-status: "
-      ++ semanticCatalogStatus
-        (compiledInternalTermSemanticCatalogDisagreements entry)
-  , "internal-type-semantic-catalog-status: "
-      ++ semanticCatalogStatus
-        (compiledInternalTypeSemanticCatalogDisagreements entry)
-  , "treeless-blockers: " ++ renderBlockers (compiledTreelessBlockers entry)
-  , "internal-term-unknown-cubical-primitives: "
-      ++ renderBlockers (compiledInternalTermUnknownCubical entry)
-  , "internal-type-unknown-cubical-primitives: "
-      ++ renderBlockers (compiledInternalTypeUnknownCubical entry)
-  , "treeless-unknown-cubical-primitives: "
-      ++ renderBlockers (compiledTreelessUnknownCubical entry)
-  , "binding-time: " ++ renderBindingTime (compiledBindingTime entry)
-  , "binding-time-scope: whole-entry"
-  , "binding-time-reason: " ++ bindingTimeReason (compiledBindingReason entry)
-  , "binding-time-action: " ++ bindingTimeAction (compiledBindingTime entry)
-  , "static-closure: " ++ staticClosureState closureReport
-  , "static-closure-reason: " ++ staticClosureReportReason closureReport
-  , "static-closure-reachable-definitions: "
-      ++ staticClosureReachableCount closureReport
-  , "static-closure-unresolved-definitions: "
-      ++ staticClosureUnresolvedDefinitions closureReport
-  , "static-closure-runtime-blockers: "
-      ++ staticClosureRuntimeBlockers closureReport
-  , "static-closure-unknown-cubical-primitives: "
-      ++ staticClosureUnknownCubicalPrimitives closureReport
-  , "static-closure-scheme-lowering: "
-      ++ staticClosureLoweringStatus closureReport
-  , "type-erasure-authorized: " ++ typeErasureAuthorized closureReport
-  , "decision: " ++ stagingDecision entry closureReport
-  ]
-
-renderNbeSpikeEvidence :: CompiledDef -> [String]
-renderNbeSpikeEvidence entry
-  | "nbe-adapter-implementation: agda-specific-in-process-v1"
-      `elem` compiledEngineEvidence entry =
-      [ "nbe-adapter-status: " ++
-          if compiledEffectiveEngine entry == "nbe"
-            then "production-candidate-selected"
-            else "experimental-test-only"
-      , "nbe-adapter-production-readiness: candidate-not-accepted"
-      , "nbe-adapter-profile: ordinary-closures-data-record-universe-primitive-cubical-glue-ua-hit-v36"
-      , "nbe-term-normalizer: environment-closure-data-record+primitive+neutral-cubical-glue-ua-hit-eval-readback-v35"
-      , "nbe-type-normalizer: semantic-type+sort+level+alias-eval-readback-v1"
-      , "nbe-postulated-sort-policy: reject-v1"
-      , "nbe-primitive-registry: agda-primitive-id-v4"
-      , "nbe-cofibration-normalizer: endpoint+neutral-identities-v1"
-      , "nbe-constant-family-transport: exact-builtin-nat+nat-to-nat+universe-v3"
-      , "nbe-path-application-policy: closure+constructor+definition+primitive+comp-beta-v3"
-      , "nbe-glue-normalizer: introduction-elimination-cancellation+canonical-ua-bidirectional+double-composition+probe-hcomp-v6"
-      , "nbe-pi-transport-normalizer: canonical-domain+stable+semantic-constant+canonical+self-path+bidirectional-singleton+bidirectional-nested-singleton+probe-shell-identity+dependent-alias+per-layer-stable-identity+parameterized-stable-identity+metadata-constructor-stable-identity+closed-function-readback+closed-pi-type-readback+outer-parameter-indexed-pi-field+ground-payload-indexed-pi-field+fieldwise-bidirectional-bounded-sigma-spine-codomain+opaque-binder+isomorphism-proof-roundtrip-v19"
-      , "nbe-structured-transport-normalizer: builtin-sigma-stable-second+list-parameter-map-v1"
-      , "nbe-hit-pattern-policy: exact-definition-or-primitive-head+checked-subpatterns-v2"
-      ]
-      ++ compiledEngineEvidence entry
-  | otherwise = []
-
-renderBoolean :: Bool -> String
-renderBoolean True = "true"
-renderBoolean False = "false"
-
-staticClosureState :: StaticClosureReport -> String
-staticClosureState = \case
-  StaticClosureNotApplicable -> "not-applicable"
-  StaticClosureComplete _ -> "complete"
-  StaticClosureIncomplete {} -> "incomplete"
-
-staticClosureReportReason :: StaticClosureReport -> String
-staticClosureReportReason = \case
-  StaticClosureNotApplicable -> "typed-residual-or-unsupported"
-  StaticClosureComplete _ -> "reachable-closure-and-lowering-verified"
-  StaticClosureIncomplete _ _ _ _ reason _ -> reason
-
-staticClosureReachableCount :: StaticClosureReport -> String
-staticClosureReachableCount = \case
-  StaticClosureNotApplicable -> "not-applicable"
-  StaticClosureComplete count -> show count
-  StaticClosureIncomplete count _ _ _ _ _ -> show count
-
-staticClosureUnresolvedDefinitions :: StaticClosureReport -> String
-staticClosureUnresolvedDefinitions = \case
-  StaticClosureNotApplicable -> "not-applicable"
-  StaticClosureComplete _ -> "none"
-  StaticClosureIncomplete _ unresolved _ _ _ _ -> renderBlockers unresolved
-
-staticClosureRuntimeBlockers :: StaticClosureReport -> String
-staticClosureRuntimeBlockers = \case
-  StaticClosureNotApplicable -> "not-applicable"
-  StaticClosureComplete _ -> "none"
-  StaticClosureIncomplete _ _ blockers _ _ _ -> renderBlockers blockers
-
-staticClosureUnknownCubicalPrimitives :: StaticClosureReport -> String
-staticClosureUnknownCubicalPrimitives = \case
-  StaticClosureNotApplicable -> "not-applicable"
-  StaticClosureComplete _ -> "none"
-  StaticClosureIncomplete _ _ _ unknown _ _ -> renderBlockers unknown
-
-staticClosureLoweringStatus :: StaticClosureReport -> String
-staticClosureLoweringStatus = \case
-  StaticClosureNotApplicable -> "not-run"
-  StaticClosureComplete _ -> "checked"
-  StaticClosureIncomplete _ _ _ _ _ lowering -> lowering
-
-typeErasureAuthorized :: StaticClosureReport -> String
-typeErasureAuthorized = \case
-  StaticClosureComplete _ -> "true"
-  _ -> "false"
-
-stagingDecision :: CompiledDef -> StaticClosureReport -> String
-stagingDecision entry = \case
-  StaticClosureIncomplete {} -> "unsupported"
-  _ -> bindingTimeDecision (compiledBindingTime entry)
-
-renderTypedResidual
-  :: String
-  -> CompiledDef
-  -> ResidualClosure
-  -> ResidualSlicePlan
-  -> String
-renderTypedResidual artifact entry closure slicePlan = unlines $
-  [ "entry: " ++ prettyShow (compiledName entry)
-  , "artifact: " ++ artifact
-  ]
-  ++ renderChezCoreAbiManifest
-  ++
-  [ "residual-contract: whole-entry-same-interface-v1"
-  , "residual-scope: whole-entry"
-  , "residual-payload: internal-term+type"
-  , "residual-signature-identity: top-level-module+full-interface-hash"
-  , "residual-dependency-closure: exact-consumer-interface"
-  , "residual-dependency-slice: checked-type+definition-body-v1"
-  , "residual-presentation-metadata: excluded-from-executable-slice"
-  , "residual-direct-dependency-count: "
-      ++ show (length $ residualDirectDependencies residual)
-  , "residual-direct-dependencies: "
-      ++ renderBlockers (residualDirectDependencies residual)
-  , "residual-closure-complete: true"
-  , "residual-resolved-dependency-count: "
-      ++ show (length $ residualClosureResolvedDependencies closure)
-  , "residual-resolved-dependencies: "
-      ++ renderBlockers (residualClosureResolvedDependencies closure)
-  , "residual-expanded-definition-count: "
-      ++ show (length $ residualClosureExpandedDefinitions closure)
-  , "residual-expanded-definitions: "
-      ++ renderBlockers (residualClosureExpandedDefinitions closure)
-  , "residual-signature-leaf-count: "
-      ++ show (length $ residualClosureSignatureLeaves closure)
-  , "residual-signature-leaves: "
-      ++ renderBlockers (residualClosureSignatureLeaves closure)
-  , "residual-excluded-presentation-dependency-count: "
-      ++ show
-        (length $ residualClosureExcludedPresentationDependencies closure)
-  , "residual-excluded-presentation-dependencies: "
-      ++ renderBlockers
-        (residualClosureExcludedPresentationDependencies closure)
-  , "residual-unresolved-dependencies: none"
-  , "residual-embedded-definitions: none"
-  , "residual-whole-signature-embedded: false"
-  , "residual-slice-plan: " ++ residualSlicePlanState slicePlan
-  , "residual-slice-static-shell: "
-      ++ residualSliceStaticShell artifact slicePlan
-  , "residual-slice-static-shell-artifact: "
-      ++ residualSliceStaticShellArtifact artifact slicePlan
-  , "residual-slice-static-shell-bridge-artifact: "
-      ++ residualSliceStaticShellBridgeArtifact artifact slicePlan
-  , "residual-slice-static-shell-import-contract: "
-      ++ residualSliceStaticShellImportContract slicePlan
-  , "residual-slice-static-shell-hole-forcing: "
-      ++ residualSliceStaticShellHoleForcing slicePlan
-  , "residual-slice-static-shell-callable-elimination: "
-      ++ residualSliceStaticShellCallableElimination slicePlan
-  , "residual-slice-static-shell-typed-value-proxy: "
-      ++ residualSliceStaticShellTypedValueProxy slicePlan
-  , "residual-slice-static-shell-proxy-composition: "
-      ++ residualSliceStaticShellProxyComposition slicePlan
-  , "residual-slice-static-shell-typed-value-carrier: "
-      ++ residualSliceStaticShellTypedValueCarrier slicePlan
-  , "residual-slice-static-shell-proxy-mapping: "
-      ++ residualSliceStaticShellProxyMapping slicePlan
-  , "residual-slice-static-shell-proxy-store-quota: "
-      ++ residualSliceStaticShellProxyStoreQuota slicePlan
-  , "residual-slice-static-shell-proxy-publication-lock: "
-      ++ residualSliceStaticShellProxyPublicationLock slicePlan
-  , "residual-slice-static-shell-proxy-state-transactions: "
-      ++ residualSliceStaticShellProxyStateTransactions slicePlan
-  , "residual-slice-open-hole-closure-conversion: "
-      ++ residualSliceOpenHoleClosureConversion slicePlan
-  , "residual-slice-static-shell-environment-binding: "
-      ++ residualSliceStaticShellEnvironmentBinding slicePlan
-  , "residual-slice-open-hole-environment-arity-limit: "
-      ++ show residualHoleEnvironmentLimit
-  , "residual-slice-typed-source: " ++ residualSliceTypedSource slicePlan
-  , "residual-slice-hole-count: " ++ show (residualSliceHoleCount slicePlan)
-  , "residual-slice-hole-ids: " ++ residualSliceHoleIds slicePlan
-  , "residual-slice-independent-artifacts: "
-      ++ residualSliceIndependentArtifacts artifact slicePlan
-  , "residual-slice-execution: "
-      ++ residualSliceExecution artifact slicePlan
-  , "packet-format: " ++ runtimePacketMagic ++ "/v" ++ show runtimePacketVersion
-  , "packet-codec: " ++ packetCodecName
-  , "ground-codec-registry-version: ground-codec-registry-v1"
-  , "ground-codec-registry: " ++ renderResidualGroundCodecRegistry
-  , "ground-codec-descriptor-version: ground-codec-descriptor-v1"
-  , "ground-codec-descriptor-fields: codec,unary-abi,cli-prefix,validator,argument-reifier,entry-parser,value-reifier"
-  , "blockers: " ++ renderBlockers (compiledRuntimeBlockers entry)
-  , "internal-term-blockers: " ++ renderBlockers (compiledInternalTermBlockers entry)
-  , "internal-type-blockers: " ++ renderBlockers (compiledInternalTypeBlockers entry)
-  , "internal-term-catalog-blockers: "
-      ++ renderBlockers (compiledInternalTermCatalogBlockers entry)
-  , "internal-type-catalog-blockers: "
-      ++ renderBlockers (compiledInternalTypeCatalogBlockers entry)
-  , "internal-term-semantic-sources: "
-      ++ renderSemanticSources (compiledInternalTermSemanticSources entry)
-  , "internal-type-semantic-sources: "
-      ++ renderSemanticSources (compiledInternalTypeSemanticSources entry)
-  , "internal-term-semantic-catalog-disagreements: "
-      ++ renderBlockers
-        (compiledInternalTermSemanticCatalogDisagreements entry)
-  , "internal-type-semantic-catalog-disagreements: "
-      ++ renderBlockers
-        (compiledInternalTypeSemanticCatalogDisagreements entry)
-  , "internal-term-semantic-catalog-status: "
-      ++ semanticCatalogStatus
-        (compiledInternalTermSemanticCatalogDisagreements entry)
-  , "internal-type-semantic-catalog-status: "
-      ++ semanticCatalogStatus
-        (compiledInternalTypeSemanticCatalogDisagreements entry)
-  , "treeless-blockers: " ++ renderBlockers (compiledTreelessBlockers entry)
-  , "internal-term-unknown-cubical-primitives: "
-      ++ renderBlockers (compiledInternalTermUnknownCubical entry)
-  , "internal-type-unknown-cubical-primitives: "
-      ++ renderBlockers (compiledInternalTypeUnknownCubical entry)
-  , "treeless-unknown-cubical-primitives: "
-      ++ renderBlockers (compiledTreelessUnknownCubical entry)
-  , "binding-time: " ++ renderBindingTime (compiledBindingTime entry)
-  , "binding-time-scope: whole-entry"
-  , "binding-time-reason: " ++ bindingTimeReason (compiledBindingReason entry)
-  , "binding-time-action: " ++ bindingTimeAction (compiledBindingTime entry)
-  , "type:"
-  , "  " ++ prettyShow (residualType residual)
-  , "term:"
-  , "  " ++ prettyShow (residualTerm residual)
-  ] ++ renderResidualHoles artifact slicePlan
-  where
-    residual = residualClosurePayload closure
-
-residualSlicePlanState :: ResidualSlicePlan -> String
-residualSlicePlanState = \case
-  ResidualSliceNotApplicable reason -> "not-applicable-" ++ reason
-  ResidualSlicePlanned _ -> "materialized-checked-internal"
-
-residualSliceStaticShell :: String -> ResidualSlicePlan -> String
-residualSliceStaticShell artifact = \case
-  ResidualSliceNotApplicable _ -> "not-applicable"
-  ResidualSlicePlanned _
-    | artifact == "packet-v2" -> "emitted-ground-call-chez"
-    | otherwise -> "validated-not-published"
-
-residualSliceStaticShellArtifact :: String -> ResidualSlicePlan -> String
-residualSliceStaticShellArtifact artifact = \case
-  ResidualSlicePlanned _
-    | artifact == "packet-v2" -> residualStaticShellName
-  _ -> "none"
-
-residualSliceStaticShellBridgeArtifact :: String -> ResidualSlicePlan -> String
-residualSliceStaticShellBridgeArtifact artifact = \case
-  ResidualSlicePlanned _
-    | artifact == "packet-v2" -> typedHoleGroundBridgeName
-  _ -> "none"
-
-residualSliceStaticShellImportContract :: ResidualSlicePlan -> String
-residualSliceStaticShellImportContract = \case
-  ResidualSliceNotApplicable _ -> "not-applicable"
-  ResidualSlicePlanned holes
-    | any (not . residualHoleSourceClosed) holes ->
-        "opaque-lambda-lifted-import-v1"
-    | otherwise -> "opaque-import-v1"
-
-residualSliceStaticShellHoleForcing :: ResidualSlicePlan -> String
-residualSliceStaticShellHoleForcing = \case
-  ResidualSliceNotApplicable _ -> "not-applicable"
-  ResidualSlicePlanned holes
-    | any (not . residualHoleSourceClosed) holes ->
-        "lambda-lifted-explicit-environment-observation-by-id-v1"
-    | otherwise -> "closed-hole-ground-observation-by-id-v1"
-
-residualSliceStaticShellCallableElimination :: ResidualSlicePlan -> String
-residualSliceStaticShellCallableElimination = \case
-  ResidualSliceNotApplicable _ -> "not-applicable"
-  ResidualSlicePlanned holes
-    | any residualHoleSupportsAutomaticDependentGroundEnvironment holes ->
-        "lambda-lifted-explicit+lexical-dependent-ground-elimination-v1"
-    | any residualHoleSupportsAutomaticOrderedGroundEnvironment holes ->
-        "lambda-lifted-explicit+lexical-ordered-ground-elimination-v1"
-    | any (not . residualHoleSourceClosed) holes
-    , any ((/= ResidualHoleObservationOnly) . residualHoleCallableAbi) holes ->
-        "lambda-lifted-explicit-environment-ground-unary-elimination-v1"
-    | any ((/= ResidualHoleObservationOnly) . residualHoleCallableAbi) holes ->
-        "closed-ground-unary-elimination-v1"
-    | otherwise -> "none"
-
-residualSliceStaticShellTypedValueProxy :: ResidualSlicePlan -> String
-residualSliceStaticShellTypedValueProxy = \case
-  ResidualSliceNotApplicable _ -> "not-applicable"
-  ResidualSlicePlanned holes
-    | any residualHoleSupportsPersistentTypedValueProxy holes ->
-        "persistent-typed-packet-v1"
-    | otherwise -> "none"
-
-residualSliceStaticShellProxyComposition :: ResidualSlicePlan -> String
-residualSliceStaticShellProxyComposition = \case
-  ResidualSliceNotApplicable _ -> "not-applicable"
-  ResidualSlicePlanned holes
-    | any residualHoleSupportsPersistentTypedValueProxy holes ->
-        "parent-retained-recursive-gc-v1"
-    | otherwise -> "none"
-
-residualSliceStaticShellTypedValueCarrier :: ResidualSlicePlan -> String
-residualSliceStaticShellTypedValueCarrier = \case
-  ResidualSliceNotApplicable _ -> "not-applicable"
-  ResidualSlicePlanned holes
-    | any residualHoleSupportsPersistentTypedValueProxy holes ->
-        "checked-packet-reference-v1"
-    | otherwise -> "none"
-
-residualSliceStaticShellProxyMapping :: ResidualSlicePlan -> String
-residualSliceStaticShellProxyMapping = \case
-  ResidualSliceNotApplicable _ -> "not-applicable"
-  ResidualSlicePlanned holes
-    | any residualHoleSupportsPersistentTypedValueProxy holes ->
-        "named-checked-function-v1"
-    | otherwise -> "none"
-
-residualSliceStaticShellProxyStoreQuota :: ResidualSlicePlan -> String
-residualSliceStaticShellProxyStoreQuota = \case
-  ResidualSliceNotApplicable _ -> "not-applicable"
-  ResidualSlicePlanned holes
-    | any residualHoleSupportsPersistentTypedValueProxy holes ->
-        "count-256+bytes-67108864-v1"
-    | otherwise -> "none"
-
-residualSliceStaticShellProxyPublicationLock :: ResidualSlicePlan -> String
-residualSliceStaticShellProxyPublicationLock = \case
-  ResidualSliceNotApplicable _ -> "not-applicable"
-  ResidualSlicePlanned holes
-    | any residualHoleSupportsPersistentTypedValueProxy holes ->
-        "atomic-mkdir-v1"
-    | otherwise -> "none"
-
-residualSliceStaticShellProxyStateTransactions :: ResidualSlicePlan -> String
-residualSliceStaticShellProxyStateTransactions = \case
-  ResidualSliceNotApplicable _ -> "not-applicable"
-  ResidualSlicePlanned holes
-    | any residualHoleSupportsPersistentTypedValueProxy holes ->
-        "store-lock+atomic-state-v1"
-    | otherwise -> "none"
-
-residualSliceOpenHoleClosureConversion :: ResidualSlicePlan -> String
-residualSliceOpenHoleClosureConversion = \case
-  ResidualSliceNotApplicable _ -> "not-applicable"
-  ResidualSlicePlanned holes
-    | any (not . residualHoleSourceClosed) holes ->
-        "lambda-lifted-explicit-environment-v1"
-    | otherwise -> "none"
-
-residualSliceStaticShellEnvironmentBinding :: ResidualSlicePlan -> String
-residualSliceStaticShellEnvironmentBinding = \case
-  ResidualSliceNotApplicable _ -> "not-applicable"
-  ResidualSlicePlanned holes
-    | any residualHoleSupportsAutomaticDependentGroundEnvironment holes ->
-        "dependent-ground-chez-lexical-binding-v1"
-    | any residualHoleSupportsAutomaticOrderedGroundEnvironment holes ->
-        "ordered-ground-chez-lexical-binding-v1"
-    | not (null singleCodecs) ->
-        "single-"
-          ++ intercalate "+" singleCodecs
-          ++ "-chez-lexical-binding-v1"
-    | otherwise -> "none"
-    where
-      singleCodecs =
-        [ renderResidualGroundCodec codec
-        | codec <- allResidualGroundCodecs
-        , any ((== Just codec) . residualHoleAutomaticSingleGroundCodec) holes
-        ]
-
-residualSliceTypedSource :: ResidualSlicePlan -> String
-residualSliceTypedSource = \case
-  ResidualSliceNotApplicable _ -> "whole-entry-internal-term+type"
-  ResidualSlicePlanned holes
-    | any (not . residualHoleSourceClosed) holes ->
-        "checked-internal-subterm+telescope+type"
-    | otherwise -> "checked-internal-subterm+type"
-
-residualSliceHoleCount :: ResidualSlicePlan -> Int
-residualSliceHoleCount = \case
-  ResidualSliceNotApplicable _ -> 0
-  ResidualSlicePlanned holes -> length holes
-
-residualSliceHoleIds :: ResidualSlicePlan -> String
-residualSliceHoleIds = \case
-  ResidualSliceNotApplicable _ -> "none"
-  ResidualSlicePlanned holes -> commaSeparated (map residualHoleId holes)
-
-residualSliceIndependentArtifacts
-  :: String
-  -> ResidualSlicePlan
-  -> String
-residualSliceIndependentArtifacts artifact = \case
-  ResidualSlicePlanned (_ : _) | artifact == "packet-v2" -> "true"
-  _ -> "false"
-
-residualSliceExecution :: String -> ResidualSlicePlan -> String
-residualSliceExecution artifact = \case
-  ResidualSlicePlanned holes
-    | artifact == "packet-v2"
-    , any residualHoleSupportsAutomaticDependentGroundEnvironment holes ->
-        "split-explicit-and-dependent-ground-lexical-environment-observation-by-id-whole-entry-reference"
-    | artifact == "packet-v2"
-    , any residualHoleSupportsAutomaticOrderedGroundEnvironment holes ->
-        "split-explicit-and-ordered-ground-lexical-environment-observation-by-id-whole-entry-reference"
-    | artifact == "packet-v2"
-    , any residualHoleSupportsAutomaticGroundEnvironment holes ->
-        "split-explicit-and-single-ground-lexical-environment-observation-by-id-whole-entry-reference"
-    | artifact == "packet-v2"
-    , any (not . residualHoleSourceClosed) holes ->
-        "split-explicit-environment-observation-by-id-whole-entry-reference"
-    | artifact == "packet-v2" ->
-        "split-ground-observation-by-id-whole-entry-reference"
-  _ -> "whole-entry"
-
-residualHolePacketName :: Int -> FilePath
-residualHolePacketName index =
-  "typed-residual-hole-" ++ show index ++ ".bin"
-
-residualStaticShellName :: FilePath
-residualStaticShellName = "residual-static-shell.ss"
-
-typedHoleGroundBridgeName :: FilePath
-typedHoleGroundBridgeName = "typed-hole-ground-bridge.sh"
-
-stageTimingsName :: FilePath
-stageTimingsName = "stage-timings.tsv"
-
-buildResidualStaticShell
-  :: CompiledDef
-  -> ResidualSlicePlan
-  -> TCM (Maybe String)
-buildResidualStaticShell entry slicePlan =
-  either
-    (backendAbortWith SchemeLoweringFailed)
-    pure
-    (renderResidualStaticShell entry slicePlan)
-
-renderResidualStaticShell
-  :: CompiledDef
-  -> ResidualSlicePlan
-  -> Either String (Maybe String)
-renderResidualStaticShell _ (ResidualSliceNotApplicable _) = Right Nothing
-renderResidualStaticShell entry slicePlan@(ResidualSlicePlanned holes) = do
-  validateChezCoreAbi
-  unless (not $ null holes) $
-    Left "mixed residual static shell has no typed-hole imports"
-  unless (Map.size imports == length holes) $
-    Left "mixed residual static shell has duplicate typed-hole paths"
-  unless (Map.size effectiveImports == Map.size imports) $
-    Left "mixed residual static shell import inventory is incomplete"
-  body <- compileTermWithHoleImports effectiveImports [] [] 0 $
-    compiledTerm entry
-  pure $ Just $ unlines
-    [ "; Generated by CubicalChez 0.1.0-dev."
-    , "; Mixed residual static shell; typed holes start as opaque imports."
-    , "; Chez core ABI: " ++ chezCoreAbiVersion declaredChezCoreAbi ++ "."
-    , "; " ++ residualSliceStaticShellHoleForcing slicePlan
-        ++ " calls the checked v2 runtime."
-    , "#!chezscheme"
-    , "(define cubical-chez-artifact-directory"
-    , "  (let* ((script (car (command-line)))"
-    , "         (absolute (if (path-absolute? script)"
-    , "                       script"
-    , "                       (path-build (current-directory) script))))"
-    , "    (path-parent absolute)))"
-    , "(define (cubical-chez-absolute-artifact path)"
-    , "  (if (path-absolute? path)"
-    , "      path"
-    , "      (path-build cubical-chez-artifact-directory path)))"
-    , "(define (cubical-chez-shell-quote value)"
-    , "  (let loop ((chars (string->list value)) (pieces '()))"
-    , "    (if (null? chars)"
-    , "        (string-append \"'\" (apply string-append (reverse pieces)) \"'\")"
-    , "        (loop (cdr chars)"
-    , "              (cons (if (char=? (car chars) (integer->char 39))"
-    , "                        \"'\\\"'\\\"'\""
-    , "                        (string (car chars)))"
-    , "                    pieces)))))"
-    , "(define (cubical-chez-bridge-fail code detail)"
-    , "  (error 'cubical-chez-typed-hole (string-append code \"; \" detail)))"
-    , "(define (cubical-chez-decode-ground datum status)"
-    , "  (unless (and (list? status) (= (length status) 2)"
-    , "               (eq? (car status) 'ccz-bridge-status-v1)"
-    , "               (integer? (cadr status)) (exact? (cadr status))"
-    , "               (>= (cadr status) 0))"
-    , "    (cubical-chez-bridge-fail"
-    , "      \"CCZ-TYPED-BRIDGE-PROTOCOL\" \"invalid bridge exit status\"))"
-    , "  (cond"
-    , "    ((and (list? datum) (= (length datum) 3)"
-    , "          (eq? (car datum) 'ccz-ground-v1))"
-    , "     (unless (= (cadr status) 0)"
-    , "       (cubical-chez-bridge-fail"
-    , "         \"CCZ-TYPED-BRIDGE-PROTOCOL\" \"result with nonzero exit\"))"
-    , "     (case (cadr datum)"
-    , "       ((bool)"
-    , "        (case (caddr datum)"
-    , "          ((true) (vector 'agda_Agda_2e_Builtin_2e_Bool_2e_Bool_2e_true))"
-    , "          ((false) (vector 'agda_Agda_2e_Builtin_2e_Bool_2e_Bool_2e_false))"
-    , "          (else (cubical-chez-bridge-fail"
-    , "                  \"CCZ-TYPED-BRIDGE-PROTOCOL\" \"invalid Bool payload\"))))"
-    , "       ((nat)"
-    , "        (if (and (integer? (caddr datum)) (exact? (caddr datum))"
-    , "                 (>= (caddr datum) 0))"
-    , "            (caddr datum)"
-    , "            (cubical-chez-bridge-fail"
-    , "              \"CCZ-TYPED-BRIDGE-PROTOCOL\" \"invalid Nat payload\")))"
-    , "       (else (cubical-chez-bridge-fail"
-    , "               \"CCZ-TYPED-BRIDGE-PROTOCOL\" \"unknown ground type\"))))"
-    , "    ((and (list? datum) (= (length datum) 3)"
-    , "          (eq? (car datum) 'ccz-proxy-v1)"
-    , "          (string? (cadr datum)) (string? (caddr datum)))"
-    , "     (unless (= (cadr status) 0)"
-    , "       (cubical-chez-bridge-fail"
-    , "         \"CCZ-TYPED-BRIDGE-PROTOCOL\" \"proxy with nonzero exit\"))"
-    , "     (vector 'cubical-chez-typed-value-proxy-v1"
-    , "             (cadr datum) (caddr datum)))"
-    , "    ((and (list? datum) (= (length datum) 3)"
-    , "          (eq? (car datum) 'ccz-bridge-error-v1)"
-    , "          (symbol? (cadr datum)))"
-    , "     (when (= (cadr status) 0)"
-    , "       (cubical-chez-bridge-fail"
-    , "         \"CCZ-TYPED-BRIDGE-PROTOCOL\" \"error with zero exit\"))"
-    , "     (cubical-chez-bridge-fail"
-    , "       (symbol->string (cadr datum)) (format \"~a\" (caddr datum))))"
-    , "    (else (cubical-chez-bridge-fail"
-    , "            \"CCZ-TYPED-BRIDGE-PROTOCOL\" \"invalid bridge response\"))))"
-    , "(define cubical-chez-ordered-ground-capability-prefix"
-    , "  \"ordered-\")"
-    , renderSchemeGroundCodecRegistry
-    , "(define cubical-chez-ground-codec-registry-fingerprint-v1"
-    , "  " ++ schemeString renderResidualGroundCodecRegistry ++ ")"
-    , "(define (cubical-chez-ground-codec-registry-fragment codecs)"
-    , "  (let loop ((rest codecs) (fragment \"\"))"
-    , "    (if (null? rest)"
-    , "        fragment"
-    , "        (loop (cdr rest)"
-    , "          (string-append fragment"
-    , "            (if (string=? fragment \"\") \"\" \",\")"
-    , "            (car rest))))))"
-    , "(define (cubical-chez-valid-ground-codec-registry? codecs)"
-    , "  (and (list? codecs)"
-    , "       (= (length codecs) " ++ show (length allResidualGroundCodecs) ++ ")"
-    , "       (let loop ((rest codecs) (seen '()))"
-    , "         (or (null? rest)"
-    , "             (and (string? (car rest))"
-    , "                  (> (string-length (car rest)) 0)"
-    , "                  (not (member (car rest) seen))"
-    , "                  (loop (cdr rest) (cons (car rest) seen)))))"
-    , "       (string=?"
-    , "         (cubical-chez-ground-codec-registry-fragment codecs)"
-    , "         cubical-chez-ground-codec-registry-fingerprint-v1)))"
-    , "(unless (cubical-chez-valid-ground-codec-registry?"
-    , "          cubical-chez-ground-codec-registry-v1)"
-    , "  (cubical-chez-bridge-fail"
-    , "    \"CCZ-TYPED-BRIDGE-PROTOCOL\""
-    , "    \"generated ground codec registry failed self-check\"))"
-    , "(define (cubical-chez-ground-unary-capability codec)"
-    , "  (string-append codec \"-unary-ground-elimination-v1\"))"
-    , "(define (cubical-chez-valid-ground-unary-capability? capability)"
-    , "  (and (string? capability)"
-    , "       (let loop ((codecs cubical-chez-ground-codec-registry-v1))"
-    , "         (and (pair? codecs)"
-    , "              (or (string=? capability"
-    , "                    (cubical-chez-ground-unary-capability (car codecs)))"
-    , "                  (loop (cdr codecs)))))))"
-    , "(define (cubical-chez-valid-ground-codec? codec)"
-    , "  (and (string? codec)"
-    , "       (member codec cubical-chez-ground-codec-registry-v1)))"
-    , "(define (cubical-chez-valid-ground-codecs? codecs)"
-    , "  (and (vector? codecs)"
-    , "       (>= (vector-length codecs) 2)"
-    , "       (<= (vector-length codecs) 64)"
-    , "       (let loop ((index 0))"
-    , "         (or (= index (vector-length codecs))"
-    , "             (and (cubical-chez-valid-ground-codec?"
-    , "                    (vector-ref codecs index))"
-    , "                  (loop (+ index 1)))))))"
-    , "(define (cubical-chez-ground-codecs-fragment codecs)"
-    , "  (unless (cubical-chez-valid-ground-codecs? codecs)"
-    , "    (cubical-chez-bridge-fail"
-    , "      \"CCZ-TYPED-BRIDGE-ENVIRONMENT\""
-    , "      \"ordered environment requires 2..64 Bool/Nat/Word64/Char/Int codecs\"))"
-    , "  (let loop ((index 0) (fragment \"\"))"
-    , "    (if (= index (vector-length codecs))"
-    , "        fragment"
-    , "        (loop (+ index 1)"
-    , "          (string-append fragment"
-    , "            (if (= index 0) \"\" \"+\")"
-    , "            (vector-ref codecs index))))))"
-    , "(define (cubical-chez-ground-codecs-capability codecs)"
-    , "  (string-append \"ordered-\""
-    , "    (cubical-chez-ground-codecs-fragment codecs)"
-    , "    \"-ground-environment-elimination-v1\"))"
-    , "(define (cubical-chez-ordered-ground-capability? capability)"
-    , "  (and (string? capability)"
-    , "       (> (string-length capability)"
-    , "          (string-length cubical-chez-ordered-ground-capability-prefix))"
-    , "       (string=?"
-    , "         (substring capability 0"
-    , "           (string-length cubical-chez-ordered-ground-capability-prefix))"
-    , "         cubical-chez-ordered-ground-capability-prefix)))"
-    , "(define (cubical-chez-valid-typed-hole-handle? handle)"
-    , "  (and (vector? handle) (= (vector-length handle) 4)"
-    , "               (eq? (vector-ref handle 0)"
-    , "                    'cubical-chez-typed-hole-import-v1)"
-    , "               (string? (vector-ref handle 1))"
-    , "               (string? (vector-ref handle 2))"
-    , "               (or (string=? (vector-ref handle 3) \"none\")"
-    , "                 (cubical-chez-valid-ground-unary-capability?"
-    , "                   (vector-ref handle 3))"
-    , "                 (string=? (vector-ref handle 3)"
-    , "                   \"dependent-ground-environment-elimination-v1\")"
-    , "                 (cubical-chez-ordered-ground-capability?"
-    , "                   (vector-ref handle 3)))))"
-    , "(define (cubical-chez-agda-bool-literal value)"
-    , "  (unless (and (vector? value) (= (vector-length value) 1))"
-    , "    (cubical-chez-bridge-fail"
-    , "      \"CCZ-TYPED-BRIDGE-ENVIRONMENT\" \"expected Chez Agda Bool\"))"
-    , "  (case (vector-ref value 0)"
-    , "    ((agda_Agda_2e_Builtin_2e_Bool_2e_Bool_2e_true) \"true\")"
-    , "    ((agda_Agda_2e_Builtin_2e_Bool_2e_Bool_2e_false) \"false\")"
-    , "    (else"
-    , "      (cubical-chez-bridge-fail"
-    , "        \"CCZ-TYPED-BRIDGE-ENVIRONMENT\""
-    , "        \"unknown Chez Agda Bool constructor\"))))"
-    , "(define (cubical-chez-valid-bound-bool-hole? value)"
-    , "  (and (vector? value) (= (vector-length value) 3)"
-    , "       (eq? (vector-ref value 0)"
-    , "            'cubical-chez-typed-hole-bound-bool-v1)"
-    , "       (cubical-chez-valid-typed-hole-handle? (vector-ref value 1))"
-    , "       (member (vector-ref value 2) '(\"true\" \"false\"))))"
-    , "(define (cubical-chez-bind-bool-environment handle value)"
-    , "  (unless (and (cubical-chez-valid-typed-hole-handle? handle)"
-    , "               (string=? (vector-ref handle 3)"
-    , "                 \"bool-unary-ground-elimination-v1\"))"
-    , "    (cubical-chez-bridge-fail"
-    , "      \"CCZ-TYPED-BRIDGE-ENVIRONMENT\""
-    , "      \"typed hole does not accept one Bool environment\"))"
-    , "  (vector 'cubical-chez-typed-hole-bound-bool-v1"
-    , "          handle (cubical-chez-agda-bool-literal value)))"
-    , "(define (cubical-chez-valid-bound-nat-hole? value)"
-    , "  (and (vector? value) (= (vector-length value) 3)"
-    , "       (eq? (vector-ref value 0)"
-    , "            'cubical-chez-typed-hole-bound-nat-v1)"
-    , "       (cubical-chez-valid-typed-hole-handle? (vector-ref value 1))"
-    , "       (integer? (vector-ref value 2))"
-    , "       (exact? (vector-ref value 2))"
-    , "       (>= (vector-ref value 2) 0)"
-    , "       (<= (vector-ref value 2) 4294967295)))"
-    , "(define (cubical-chez-bind-nat-environment handle value)"
-    , "  (unless (and (cubical-chez-valid-typed-hole-handle? handle)"
-    , "               (string=? (vector-ref handle 3)"
-    , "                 \"nat-unary-ground-elimination-v1\"))"
-    , "    (cubical-chez-bridge-fail"
-    , "      \"CCZ-TYPED-BRIDGE-ENVIRONMENT\""
-    , "      \"typed hole does not accept one Nat environment\"))"
-    , "  (unless (and (integer? value) (exact? value)"
-    , "               (>= value 0) (<= value 4294967295))"
-    , "    (cubical-chez-bridge-fail"
-    , "      \"CCZ-TYPED-BRIDGE-ENVIRONMENT\""
-    , "      \"expected bounded Chez Agda Nat\"))"
-    , "  (vector 'cubical-chez-typed-hole-bound-nat-v1 handle value))"
-    , "(define (cubical-chez-valid-bound-word64-hole? value)"
-    , "  (and (vector? value) (= (vector-length value) 3)"
-    , "       (eq? (vector-ref value 0)"
-    , "            'cubical-chez-typed-hole-bound-word64-v1)"
-    , "       (cubical-chez-valid-typed-hole-handle? (vector-ref value 1))"
-    , "       (integer? (vector-ref value 2))"
-    , "       (exact? (vector-ref value 2))"
-    , "       (>= (vector-ref value 2) 0)"
-    , "       (<= (vector-ref value 2) 18446744073709551615)))"
-    , "(define (cubical-chez-bind-word64-environment handle value)"
-    , "  (unless (and (cubical-chez-valid-typed-hole-handle? handle)"
-    , "               (string=? (vector-ref handle 3)"
-    , "                 \"word64-unary-ground-elimination-v1\"))"
-    , "    (cubical-chez-bridge-fail"
-    , "      \"CCZ-TYPED-BRIDGE-ENVIRONMENT\""
-    , "      \"typed hole does not accept one Word64 environment\"))"
-    , "  (unless (and (integer? value) (exact? value)"
-    , "               (>= value 0)"
-    , "               (<= value 18446744073709551615))"
-    , "    (cubical-chez-bridge-fail"
-    , "      \"CCZ-TYPED-BRIDGE-ENVIRONMENT\""
-    , "      \"expected bounded Chez Agda Word64\"))"
-    , "  (vector 'cubical-chez-typed-hole-bound-word64-v1 handle value))"
-    , "(define (cubical-chez-valid-char-codepoint? value)"
-    , "  (and (integer? value) (exact? value)"
-    , "       (>= value 0) (<= value 1114111)"
-    , "       (not (and (>= value 55296) (<= value 57343)))))"
-    , "(define (cubical-chez-valid-bound-char-hole? value)"
-    , "  (and (vector? value) (= (vector-length value) 3)"
-    , "       (eq? (vector-ref value 0)"
-    , "            'cubical-chez-typed-hole-bound-char-v1)"
-    , "       (cubical-chez-valid-typed-hole-handle? (vector-ref value 1))"
-    , "       (cubical-chez-valid-char-codepoint? (vector-ref value 2))))"
-    , "(define (cubical-chez-bind-char-environment handle value)"
-    , "  (unless (and (cubical-chez-valid-typed-hole-handle? handle)"
-    , "               (string=? (vector-ref handle 3)"
-    , "                 \"char-unary-ground-elimination-v1\"))"
-    , "    (cubical-chez-bridge-fail"
-    , "      \"CCZ-TYPED-BRIDGE-ENVIRONMENT\""
-    , "      \"typed hole does not accept one Char environment\"))"
-    , "  (unless (char? value)"
-    , "    (cubical-chez-bridge-fail"
-    , "      \"CCZ-TYPED-BRIDGE-ENVIRONMENT\""
-    , "      \"expected Chez Agda Char\"))"
-    , "  (vector 'cubical-chez-typed-hole-bound-char-v1"
-    , "          handle (char->integer value)))"
-    , "(define (cubical-chez-valid-int64? value)"
-    , "  (and (integer? value) (exact? value)"
-    , "       (>= value -9223372036854775808)"
-    , "       (<= value 9223372036854775807)))"
-    , "(define cubical-chez-agda-int-pos-tag"
-    , "  'agda_Agda_2e_Builtin_2e_Int_2e_Int_2e_pos)"
-    , "(define cubical-chez-agda-int-negsuc-tag"
-    , "  'agda_Agda_2e_Builtin_2e_Int_2e_Int_2e_negsuc)"
-    , "(define (cubical-chez-valid-agda-int? value)"
-    , "  (and (vector? value) (= (vector-length value) 2)"
-    , "       (let ((tag (vector-ref value 0)) (magnitude (vector-ref value 1)))"
-    , "         (and (or (eq? tag cubical-chez-agda-int-pos-tag)"
-    , "                  (eq? tag cubical-chez-agda-int-negsuc-tag))"
-    , "              (integer? magnitude) (exact? magnitude)"
-    , "              (>= magnitude 0)"
-    , "              (<= magnitude 9223372036854775807)))))"
-    , "(define (cubical-chez-agda-int->integer value)"
-    , "  (unless (cubical-chez-valid-agda-int? value)"
-    , "    (cubical-chez-bridge-fail"
-    , "      \"CCZ-TYPED-BRIDGE-ENVIRONMENT\""
-    , "      \"expected signed-64 Chez Agda Int\"))"
-    , "  (let ((magnitude (vector-ref value 1)))"
-    , "    (if (eq? (vector-ref value 0) cubical-chez-agda-int-pos-tag)"
-    , "        magnitude (- (+ magnitude 1)))))"
-    , "(define (cubical-chez-integer->agda-int value)"
-    , "  (unless (cubical-chez-valid-int64? value)"
-    , "    (cubical-chez-bridge-fail"
-    , "      \"CCZ-TYPED-BRIDGE-ENVIRONMENT\""
-    , "      \"Int argument must be within signed 64-bit range\"))"
-    , "  (if (>= value 0)"
-    , "      (vector cubical-chez-agda-int-pos-tag value)"
-    , "      (vector cubical-chez-agda-int-negsuc-tag (- (- value) 1))))"
-    , "(define (cubical-chez-int-term value)"
-    , "  (unless (cubical-chez-valid-int64? value)"
-    , "    (cubical-chez-bridge-fail"
-    , "      \"CCZ-TYPED-BRIDGE-CALL\""
-    , "      \"Int argument must be within signed 64-bit range\"))"
-    , "  (if (>= value 0)"
-    , "      (string-append \"(Agda.Builtin.Int.pos \""
-    , "        (number->string value) \" )\")"
-    , "      (string-append \"(Agda.Builtin.Int.negsuc \""
-    , "        (number->string (- (- value) 1)) \" )\")))"
-    , "(define (cubical-chez-valid-bound-int-hole? value)"
-    , "  (and (vector? value) (= (vector-length value) 3)"
-    , "       (eq? (vector-ref value 0)"
-    , "            'cubical-chez-typed-hole-bound-int-v1)"
-    , "       (cubical-chez-valid-typed-hole-handle? (vector-ref value 1))"
-    , "       (cubical-chez-valid-int64? (vector-ref value 2))))"
-    , "(define (cubical-chez-bind-int-environment handle value)"
-    , "  (unless (and (cubical-chez-valid-typed-hole-handle? handle)"
-    , "               (string=? (vector-ref handle 3)"
-    , "                 \"int-unary-ground-elimination-v1\"))"
-    , "    (cubical-chez-bridge-fail"
-    , "      \"CCZ-TYPED-BRIDGE-ENVIRONMENT\""
-    , "      \"typed hole does not accept one Int environment\"))"
-    , "  (vector 'cubical-chez-typed-hole-bound-int-v1 handle"
-    , "          (cubical-chez-agda-int->integer value)))"
-    , "(define (cubical-chez-ground-literal codec value)"
-    , "  (cubical-chez-ground-codec-value-literal codec value))"
-    , "(define (cubical-chez-valid-dependent-ground-value? value)"
-    , "  (or"
-    , "    (and (vector? value) (= (vector-length value) 1)"
-    , "         (member (vector-ref value 0)"
-    , "           '(agda_Agda_2e_Builtin_2e_Bool_2e_Bool_2e_true"
-    , "             agda_Agda_2e_Builtin_2e_Bool_2e_Bool_2e_false)))"
-    , "    (char? value)"
-    , "    (cubical-chez-valid-agda-int? value)"
-    , "    (and (integer? value) (exact? value)"
-    , "         (>= value -9223372036854775808)"
-    , "         (<= value 18446744073709551615))))"
-    , "(define (cubical-chez-bind-ground-environment handle codecs values)"
-    , "  (unless (and (cubical-chez-valid-typed-hole-handle? handle)"
-    , "               (cubical-chez-valid-ground-codecs? codecs)"
-    , "               (vector? values)"
-    , "               (= (vector-length values) (vector-length codecs))"
-    , "               (string=? (vector-ref handle 3)"
-    , "                 (cubical-chez-ground-codecs-capability codecs)))"
-    , "    (cubical-chez-bridge-fail"
-    , "      \"CCZ-TYPED-BRIDGE-ENVIRONMENT\""
-    , "      \"typed hole does not accept the ordered ground environment\"))"
-    , "  (let ((literals (make-vector (vector-length codecs))))"
-    , "    (let loop ((index 0))"
-    , "      (unless (= index (vector-length codecs))"
-    , "        (vector-set! literals index"
-    , "          (cubical-chez-ground-literal"
-    , "            (vector-ref codecs index) (vector-ref values index)))"
-    , "        (loop (+ index 1))))"
-    , "    (vector 'cubical-chez-typed-hole-bound-ground-environment-v1"
-    , "            handle codecs literals)))"
-    , "(define (cubical-chez-bind-dependent-ground-environment handle arity values)"
-    , "  (unless (and (cubical-chez-valid-typed-hole-handle? handle)"
-    , "               (string=? (vector-ref handle 3)"
-    , "                 \"dependent-ground-environment-elimination-v1\")"
-    , "               (integer? arity) (exact? arity)"
-    , "               (>= arity 2) (<= arity 64)"
-    , "               (vector? values) (= (vector-length values) arity))"
-    , "    (cubical-chez-bridge-fail"
-    , "      \"CCZ-TYPED-BRIDGE-ENVIRONMENT\""
-    , "      \"typed hole does not accept this dependent environment arity\"))"
-    , "  (let loop ((index 0))"
-    , "    (unless (= index arity)"
-    , "      (unless (cubical-chez-valid-dependent-ground-value?"
-    , "                (vector-ref values index))"
-    , "        (cubical-chez-bridge-fail"
-    , "          \"CCZ-TYPED-BRIDGE-ENVIRONMENT\""
-    , "          \"dependent environment value is not Bool/Nat/Word64 ground\"))"
-    , "      (loop (+ index 1))))"
-    , "  (vector"
-    , "    'cubical-chez-typed-hole-bound-dependent-ground-environment-v1"
-    , "    handle values))"
-    , "(define (cubical-chez-force-typed-hole handle)"
-    , "  (unless (cubical-chez-valid-typed-hole-handle? handle)"
-    , "    (cubical-chez-bridge-fail"
-    , "      \"CCZ-TYPED-BRIDGE-PROTOCOL\" \"invalid opaque import handle\"))"
-    , "  (putenv \"CUBICAL_CHEZ_TYPED_HOLE_ID\" (vector-ref handle 1))"
-    , "  (putenv \"CUBICAL_CHEZ_TYPED_PACKET\""
-    , "          (cubical-chez-absolute-artifact (vector-ref handle 2)))"
-    , "  (let ((command"
-    , "          (string-append"
-    , "            \"/bin/sh \""
-    , "            (cubical-chez-shell-quote"
-    , "              (path-build cubical-chez-artifact-directory"
-    , "                          \"typed-hole-ground-bridge.sh\"))"
-    , "            \"; cubical_chez_status=$?; \""
-    , "            \"printf '(ccz-bridge-status-v1 %s)\\\\n' \""
-    , "            \"\\\"$cubical_chez_status\\\"\")))"
-    , "    (call-with-values"
-    , "      (lambda () (open-process-ports command 'block (native-transcoder)))"
-    , "      (lambda (to-stdin from-stdout from-stderr process-id)"
-    , "        (close-output-port to-stdin)"
-    , "        (let* ((datum (read from-stdout))"
-    , "              (status (read from-stdout))"
-    , "              (tail (read from-stdout))"
-    , "              (dirty-error (get-string-all from-stderr)))"
-    , "          (close-input-port from-stdout)"
-    , "          (close-input-port from-stderr)"
-    , "          (unless (eof-object? tail)"
-    , "            (cubical-chez-bridge-fail"
-    , "              \"CCZ-TYPED-BRIDGE-PROTOCOL\" \"multiple bridge responses\"))"
-    , "          (unless (eof-object? dirty-error)"
-    , "            (cubical-chez-bridge-fail"
-    , "              \"CCZ-TYPED-BRIDGE-PROTOCOL\" \"bridge wrote stderr\"))"
-    , "          (cubical-chez-decode-ground datum status))))))"
-    , "(define cubical-chez-typed-holes '())"
-    , "(define (cubical-chez-register-typed-hole id packet callable-abi)"
-    , "  (let ((handle"
-    , "          (vector 'cubical-chez-typed-hole-import-v1"
-    , "                  id packet callable-abi)))"
-    , "    (unless (cubical-chez-valid-typed-hole-handle? handle)"
-    , "      (cubical-chez-bridge-fail"
-    , "        \"CCZ-TYPED-BRIDGE-PROTOCOL\" \"invalid typed-hole capability\"))"
-    , "    (when (assoc id cubical-chez-typed-holes)"
-    , "      (cubical-chez-bridge-fail"
-    , "        \"CCZ-TYPED-BRIDGE-PROTOCOL\" \"duplicate typed-hole id\"))"
-    , "    (set! cubical-chez-typed-holes"
-    , "          (cons (cons id handle) cubical-chez-typed-holes))"
-    , "    handle))"
-    , unlines
-        [ "(cubical-chez-register-typed-hole "
-            ++ schemeString (residualHoleId hole)
-            ++ " "
-            ++ schemeString (residualHolePacketName index)
-            ++ " "
-            ++ schemeString
-              (renderResidualHoleCallableAbi $ residualHoleCallableAbi hole)
-            ++ ")"
-        | (index, hole) <- zip [(1 :: Int) ..] holes
-        ]
-    , "(define (cubical-chez-typed-hole-reference id)"
-    , "  (let ((entry (assoc id cubical-chez-typed-holes)))"
-    , "    (if entry"
-    , "        (cdr entry)"
-    , "        (cubical-chez-bridge-fail"
-    , "          \"CCZ-TYPED-BRIDGE-PROTOCOL\""
-    , "          (string-append \"unregistered typed-hole id: \" id)))))"
-    , "(define " ++ mangleQName (compiledName entry) ++ " " ++ body ++ ")"
-    , "(define cubical-chez-planned-hole-ids"
-    , "  (list "
-        ++ unwords (map (schemeString . residualHoleId) holes)
-        ++ "))"
-    , "(define (cubical-chez-string-prefix? prefix value)"
-    , "  (let ((prefix-length (string-length prefix)))"
-    , "    (and (>= (string-length value) prefix-length)"
-    , "         (string=? (substring value 0 prefix-length) prefix))))"
-    , "(define cubical-chez-force-hole-prefix \"--force-hole=\")"
-    , "(define (cubical-chez-force-hole-argument? argument)"
-    , "  (cubical-chez-string-prefix? cubical-chez-force-hole-prefix argument))"
-    , "(define (cubical-chez-requested-hole-ids arguments)"
-    , "  (cond"
-    , "    ((null? arguments) '())"
-    , "    ((cubical-chez-force-hole-argument? (car arguments))"
-    , "     (cons (substring (car arguments)"
-    , "                      (string-length cubical-chez-force-hole-prefix)"
-    , "                      (string-length (car arguments)))"
-    , "           (cubical-chez-requested-hole-ids (cdr arguments))))"
-    , "    (else (cubical-chez-requested-hole-ids (cdr arguments)))))"
-    , "(define (cubical-chez-select-typed-hole arguments)"
-    , "  (let ((ids (cubical-chez-requested-hole-ids arguments))"
-    , "        (force-first? (member \"--force-first-hole\" arguments)))"
-    , "    (when (or (> (length ids) 1) (and force-first? (pair? ids)))"
-    , "      (cubical-chez-bridge-fail"
-    , "        \"CCZ-TYPED-BRIDGE-HOLE-SELECTION\""
-    , "        \"choose exactly one forcing selector\"))"
-    , "    (cond"
-    , "      ((pair? ids)"
-    , "       (when (string=? (car ids) \"\")"
-    , "         (cubical-chez-bridge-fail"
-    , "           \"CCZ-TYPED-BRIDGE-HOLE-SELECTION\" \"empty hole id\"))"
-    , "       (let ((entry (assoc (car ids) cubical-chez-typed-holes)))"
-    , "         (if entry"
-    , "             (cdr entry)"
-    , "             (cubical-chez-bridge-fail"
-    , "               \"CCZ-TYPED-BRIDGE-HOLE-SELECTION\""
-    , "               (string-append \"unknown hole id: \" (car ids))))))"
-    , "      (force-first?"
-    , "       (if (pair? cubical-chez-planned-hole-ids)"
-    , "           (cdr (assoc (car cubical-chez-planned-hole-ids)"
-    , "                       cubical-chez-typed-holes))"
-    , "           (cubical-chez-bridge-fail"
-    , "             \"CCZ-TYPED-BRIDGE-HOLE-SELECTION\""
-    , "             \"static shell has no hole\")))"
-    , "      (else #f))))"
-    , "(define cubical-chez-hole-consumer-prefix \"--hole-consumer=\")"
-    , "(define (cubical-chez-string-index value wanted start)"
-    , "  (let loop ((index start))"
-    , "    (cond"
-    , "      ((>= index (string-length value)) #f)"
-    , "      ((char=? (string-ref value index) wanted) index)"
-    , "      (else (loop (+ index 1))))))"
-    , "(define (cubical-chez-parse-hole-consumer argument)"
-    , "  (let* ((prefix-length"
-    , "           (string-length cubical-chez-hole-consumer-prefix))"
-    , "         (payload (substring argument prefix-length"
-    , "                             (string-length argument)))"
-    , "         (separator (cubical-chez-string-index payload #\\= 0)))"
-    , "    (unless (and separator (> separator 0)"
-    , "                 (< separator (- (string-length payload) 1)))"
-    , "      (cubical-chez-bridge-fail"
-    , "        \"CCZ-TYPED-BRIDGE-OBSERVATION\""
-    , "        \"hole consumer must be ID=QNAME\"))"
-    , "    (cons (substring payload 0 separator)"
-    , "          (substring payload (+ separator 1)"
-    , "                     (string-length payload)))))"
-    , "(define (cubical-chez-requested-hole-consumers arguments)"
-    , "  (cond"
-    , "    ((null? arguments) '())"
-    , "    ((cubical-chez-string-prefix? cubical-chez-hole-consumer-prefix"
-    , "                                   (car arguments))"
-    , "     (cons (cubical-chez-parse-hole-consumer (car arguments))"
-    , "           (cubical-chez-requested-hole-consumers (cdr arguments))))"
-    , "    (else (cubical-chez-requested-hole-consumers (cdr arguments)))))"
-    , "(define (cubical-chez-validate-hole-consumers mappings)"
-    , "  (let loop ((pending mappings) (validated '()))"
-    , "    (if (null? pending)"
-    , "        (begin"
-    , "          (for-each"
-    , "            (lambda (id)"
-    , "              (unless (assoc id validated)"
-    , "                (cubical-chez-bridge-fail"
-    , "                  \"CCZ-TYPED-BRIDGE-OBSERVATION\""
-    , "                  (string-append \"missing consumer for \" id))))"
-    , "            cubical-chez-planned-hole-ids)"
-    , "          validated)"
-    , "        (let ((mapping (car pending)))"
-    , "          (when (assoc (car mapping) validated)"
-    , "            (cubical-chez-bridge-fail"
-    , "              \"CCZ-TYPED-BRIDGE-OBSERVATION\""
-    , "              (string-append \"duplicate consumer for \""
-    , "                             (car mapping))))"
-    , "          (unless (assoc (car mapping) cubical-chez-typed-holes)"
-    , "            (cubical-chez-bridge-fail"
-    , "              \"CCZ-TYPED-BRIDGE-OBSERVATION\""
-    , "              (string-append \"consumer for unknown hole \""
-    , "                             (car mapping))))"
-    , "          (loop (cdr pending) (cons mapping validated))))))"
-    , "(define (cubical-chez-observe-all-ground mappings)"
-    , "  (list->vector"
-    , "    (cons 'cubical-chez-ground-observations-v1"
-    , "      (map"
-    , "        (lambda (id)"
-    , "          (let ((hole (assoc id cubical-chez-typed-holes))"
-    , "                (consumer (assoc id mappings)))"
-    , "            (putenv \"CUBICAL_CHEZ_TYPED_CONSUMER\" (cdr consumer))"
-    , "            (vector id"
-    , "                    (cubical-chez-force-typed-hole (cdr hole)))))"
-    , "        cubical-chez-planned-hole-ids))))"
-    , "(define cubical-chez-call-bool-hole-prefix \"--call-bool-hole=\")"
-    , "(define cubical-chez-call-bool-argument-prefix \"--bool-argument=\")"
-    , "(define cubical-chez-call-nat-hole-prefix \"--call-nat-hole=\")"
-    , "(define cubical-chez-call-nat-argument-prefix \"--nat-argument=\")"
-    , "(define cubical-chez-call-word64-hole-prefix \"--call-word64-hole=\")"
-    , "(define cubical-chez-call-word64-argument-prefix \"--word64-argument=\")"
-    , "(define cubical-chez-call-char-hole-prefix \"--call-char-hole=\")"
-    , "(define cubical-chez-call-char-argument-prefix \"--char-codepoint=\")"
-    , "(define cubical-chez-call-int-hole-prefix \"--call-int-hole=\")"
-    , "(define cubical-chez-call-int-argument-prefix \"--int-argument=\")"
-    , "(define cubical-chez-call-ground-hole-prefix \"--call-ground-hole=\")"
-    , "(define cubical-chez-call-ground-argument-prefix"
-    , "  \"--ground-argument=\")"
-    , "(define cubical-chez-call-hole-type-prefix \"--call-hole-type=\")"
-    , "(define cubical-chez-call-result-consumer-prefix"
-    , "  \"--call-result-consumer=\")"
-    , "(define cubical-chez-call-proxy-id-prefix \"--call-proxy-id=\")"
-    , "(define (cubical-chez-call-argument? argument)"
-    , "  (or"
-    , "    (cubical-chez-string-prefix?"
-    , "      cubical-chez-call-bool-hole-prefix argument)"
-    , "    (cubical-chez-string-prefix?"
-    , "      cubical-chez-call-bool-argument-prefix argument)"
-    , "    (cubical-chez-string-prefix?"
-    , "      cubical-chez-call-nat-hole-prefix argument)"
-    , "    (cubical-chez-string-prefix?"
-    , "      cubical-chez-call-nat-argument-prefix argument)"
-    , "    (cubical-chez-string-prefix?"
-    , "      cubical-chez-call-word64-hole-prefix argument)"
-    , "    (cubical-chez-string-prefix?"
-    , "      cubical-chez-call-word64-argument-prefix argument)"
-    , "    (cubical-chez-string-prefix?"
-    , "      cubical-chez-call-char-hole-prefix argument)"
-    , "    (cubical-chez-string-prefix?"
-    , "      cubical-chez-call-char-argument-prefix argument)"
-    , "    (cubical-chez-string-prefix?"
-    , "      cubical-chez-call-int-hole-prefix argument)"
-    , "    (cubical-chez-string-prefix?"
-    , "      cubical-chez-call-int-argument-prefix argument)"
-    , "    (cubical-chez-string-prefix?"
-    , "      cubical-chez-call-ground-hole-prefix argument)"
-    , "    (cubical-chez-string-prefix?"
-    , "      cubical-chez-call-ground-argument-prefix argument)"
-    , "    (cubical-chez-string-prefix?"
-    , "      cubical-chez-call-hole-type-prefix argument)"
-    , "    (cubical-chez-string-prefix?"
-    , "      cubical-chez-call-result-consumer-prefix argument)"
-    , "    (cubical-chez-string-prefix?"
-    , "      cubical-chez-call-proxy-id-prefix argument)))"
-    , "(define (cubical-chez-call-requested? arguments)"
-    , "  (cond"
-    , "    ((null? arguments) #f)"
-    , "    ((cubical-chez-call-argument? (car arguments)) #t)"
-    , "    (else (cubical-chez-call-requested? (cdr arguments)))))"
-    , "(define (cubical-chez-prefixed-values prefix arguments)"
-    , "  (cond"
-    , "    ((null? arguments) '())"
-    , "    ((cubical-chez-string-prefix? prefix (car arguments))"
-    , "     (cons"
-    , "       (substring (car arguments) (string-length prefix)"
-    , "                  (string-length (car arguments)))"
-    , "       (cubical-chez-prefixed-values prefix (cdr arguments))))"
-    , "    (else (cubical-chez-prefixed-values prefix (cdr arguments)))))"
-    , "(define (cubical-chez-exactly-one-call-value prefix label arguments)"
-    , "  (let ((values (cubical-chez-prefixed-values prefix arguments)))"
-    , "    (unless (= (length values) 1)"
-    , "      (cubical-chez-bridge-fail"
-    , "        \"CCZ-TYPED-BRIDGE-CALL\""
-    , "        (string-append \"call requires exactly one \" label)))"
-    , "    (when (string=? (car values) \"\")"
-    , "      (cubical-chez-bridge-fail"
-    , "        \"CCZ-TYPED-BRIDGE-CALL\""
-    , "        (string-append \"empty \" label)))"
-    , "    (car values)))"
-    , "(define (cubical-chez-safe-qname? value)"
-    , "  (and (> (string-length value) 0)"
-    , "       (let loop ((characters (string->list value)))"
-    , "         (or (null? characters)"
-    , "             (and"
-    , "               (let ((character (car characters)))"
-    , "                 (or (char-alphabetic? character)"
-    , "                     (char-numeric? character)"
-    , "                     (char=? character #\\.)"
-    , "                     (char=? character #\\_)"
-    , "                     (char=? character #\\-)"
-    , "                     (char=? character #\\')))"
-    , "               (loop (cdr characters)))))))"
-    , "(define (cubical-chez-valid-bool-argument? value)"
-    , "  (or (string=? value \"true\") (string=? value \"false\")))"
-    , "(define (cubical-chez-valid-nat-argument? value)"
-    , "  (and (> (string-length value) 0)"
-    , "       (<= (string-length value) 10)"
-    , "       (let loop ((characters (string->list value)))"
-    , "         (or (null? characters)"
-    , "             (and (char-numeric? (car characters))"
-    , "                  (loop (cdr characters)))))"
-    , "       (let ((number (string->number value)))"
-    , "         (and number (integer? number) (exact? number)"
-    , "              (>= number 0) (<= number 4294967295)))))"
-    , "(define (cubical-chez-valid-word64-argument? value)"
-    , "  (and (> (string-length value) 0)"
-    , "       (<= (string-length value) 20)"
-    , "       (let loop ((characters (string->list value)))"
-    , "         (or (null? characters)"
-    , "             (and (char-numeric? (car characters))"
-    , "                  (loop (cdr characters)))))"
-    , "       (let ((number (string->number value)))"
-    , "         (and number (integer? number) (exact? number)"
-    , "              (>= number 0)"
-    , "              (<= number 18446744073709551615)))))"
-    , "(define (cubical-chez-valid-char-argument? value)"
-    , "  (and (> (string-length value) 0)"
-    , "       (<= (string-length value) 7)"
-    , "       (let loop ((characters (string->list value)))"
-    , "         (or (null? characters)"
-    , "             (and (char-numeric? (car characters))"
-    , "                  (loop (cdr characters)))))"
-    , "       (let ((number (string->number value)))"
-    , "         (and number (cubical-chez-valid-char-codepoint? number)))))"
-    , "(define (cubical-chez-valid-int-argument? value)"
-    , "  (and (> (string-length value) 0)"
-    , "       (<= (string-length value) 20)"
-    , "       (let ((number (string->number value)))"
-    , "         (and number"
-    , "              (cubical-chez-valid-int64? number)"
-    , "              (string=? value (number->string number))))))"
-    , renderSchemeGroundCodecDescriptors
-    , "(define (cubical-chez-ground-codec-descriptor codec)"
-    , "  (let loop ((descriptors cubical-chez-ground-codec-descriptors-v1))"
-    , "    (cond"
-    , "      ((null? descriptors) #f)"
-    , "      ((string=? codec (vector-ref (car descriptors) 0))"
-    , "       (car descriptors))"
-    , "      (else (loop (cdr descriptors))))))"
-    , "(define (cubical-chez-valid-ground-codec-descriptors? descriptors codecs)"
-    , "  (and (list? descriptors) (list? codecs)"
-    , "       (= (length descriptors) (length codecs))"
-    , "       (let loop ((remaining descriptors) (names codecs))"
-    , "         (or (and (null? remaining) (null? names))"
-    , "             (and (pair? remaining) (pair? names)"
-    , "                  (let ((descriptor (car remaining))"
-    , "                        (codec (car names)))"
-    , "                    (and (vector? descriptor)"
-    , "                         (= (vector-length descriptor) 7)"
-    , "                         (string=? (vector-ref descriptor 0) codec)"
-    , "                         (string=? (vector-ref descriptor 1)"
-    , "                           (cubical-chez-ground-unary-capability codec))"
-    , "                         (string=? (vector-ref descriptor 2)"
-    , "                           (string-append codec \":\"))"
-    , "                         (procedure? (vector-ref descriptor 3))"
-    , "                         (procedure? (vector-ref descriptor 4))"
-    , "                         (procedure? (vector-ref descriptor 5))"
-    , "                         (procedure? (vector-ref descriptor 6))"
-    , "                         (loop (cdr remaining) (cdr names)))))))))"
-    , "(unless (cubical-chez-valid-ground-codec-descriptors?"
-    , "          cubical-chez-ground-codec-descriptors-v1"
-    , "          cubical-chez-ground-codec-registry-v1)"
-    , "  (cubical-chez-bridge-fail"
-    , "    \"CCZ-TYPED-BRIDGE-PROTOCOL\""
-    , "    \"generated ground codec descriptors failed self-check\"))"
-    , "(define (cubical-chez-ground-spec-descriptor spec failure-code detail)"
-    , "  (let loop ((descriptors cubical-chez-ground-codec-descriptors-v1))"
-    , "    (if (null? descriptors)"
-    , "        (cubical-chez-bridge-fail failure-code detail)"
-    , "        (let* ((descriptor (car descriptors))"
-    , "               (prefix (vector-ref descriptor 2)))"
-    , "          (if (cubical-chez-string-prefix? prefix spec)"
-    , "              descriptor"
-    , "              (loop (cdr descriptors)))))))"
-    , "(define (cubical-chez-ground-codec-valid-argument? codec literal)"
-    , "  (let ((descriptor (cubical-chez-ground-codec-descriptor codec)))"
-    , "    (and descriptor ((vector-ref descriptor 3) literal))))"
-    , "(define (cubical-chez-ground-codec-argument-literal codec literal)"
-    , "  (let ((descriptor (cubical-chez-ground-codec-descriptor codec)))"
-    , "    (unless (and descriptor ((vector-ref descriptor 3) literal))"
-    , "      (cubical-chez-bridge-fail"
-    , "        \"CCZ-TYPED-BRIDGE-CALL\""
-    , "        (string-append \"invalid \" codec \" argument\")))"
-    , "    ((vector-ref descriptor 4) literal)))"
-    , "(define (cubical-chez-ground-codec-entry-value codec literal)"
-    , "  (let ((descriptor (cubical-chez-ground-codec-descriptor codec)))"
-    , "    (unless descriptor"
-    , "      (cubical-chez-bridge-fail"
-    , "        \"CCZ-TYPED-BRIDGE-ENVIRONMENT\" \"unknown entry ground codec\"))"
-    , "    ((vector-ref descriptor 5) literal)))"
-    , "(define (cubical-chez-ground-codec-value-literal codec value)"
-    , "  (let ((descriptor (cubical-chez-ground-codec-descriptor codec)))"
-    , "    (unless descriptor"
-    , "      (cubical-chez-bridge-fail"
-    , "        \"CCZ-TYPED-BRIDGE-ENVIRONMENT\""
-    , "        \"unknown ordered environment codec\"))"
-    , "    ((vector-ref descriptor 6) value)))"
-    , "(define (cubical-chez-call-action arguments)"
-    , "  (let ((consumers"
-    , "          (cubical-chez-prefixed-values"
-    , "            cubical-chez-call-result-consumer-prefix arguments))"
-    , "        (proxy-ids"
-    , "          (cubical-chez-prefixed-values"
-    , "            cubical-chez-call-proxy-id-prefix arguments)))"
-    , "    (cond"
-    , "      ((and (= (length consumers) 1) (null? proxy-ids)"
-    , "            (not (string=? (car consumers) \"\")))"
-    , "       (vector 'consume (car consumers)))"
-    , "      ((and (= (length proxy-ids) 1) (null? consumers)"
-    , "            (not (string=? (car proxy-ids) \"\")))"
-    , "       (vector 'proxy (car proxy-ids)))"
-    , "      (else"
-    , "        (cubical-chez-bridge-fail"
-    , "          \"CCZ-TYPED-BRIDGE-CALL\""
-    , "          \"select exactly one call result consumer or proxy ID\")))))"
-    , "(define (cubical-chez-call-ground-spec-codec spec)"
-    , "  (vector-ref"
-    , "    (cubical-chez-ground-spec-descriptor spec"
-    , "      \"CCZ-TYPED-BRIDGE-CALL\" \"unknown ground argument codec\")"
-    , "    0))"
-    , "(define (cubical-chez-call-ground-spec-literal spec)"
-    , "  (let* ((descriptor"
-    , "           (cubical-chez-ground-spec-descriptor spec"
-    , "             \"CCZ-TYPED-BRIDGE-CALL\" \"unknown ground argument codec\"))"
-    , "         (codec (vector-ref descriptor 0))"
-    , "         (prefix (vector-ref descriptor 2))"
-    , "         (literal"
-    , "           (substring spec (string-length prefix) (string-length spec))))"
-    , "    (cubical-chez-ground-codec-argument-literal codec literal)))"
-    , "(define (cubical-chez-call-ground-arguments arguments)"
-    , "  (let ((specs"
-    , "          (cubical-chez-prefixed-values"
-    , "            cubical-chez-call-ground-argument-prefix arguments)))"
-    , "    (unless (and (>= (length specs) 2) (<= (length specs) 64))"
-    , "      (cubical-chez-bridge-fail"
-    , "        \"CCZ-TYPED-BRIDGE-CALL\""
-    , "        \"explicit ground call requires 2..64 arguments\"))"
-    , "    (vector"
-    , "      (list->vector (map cubical-chez-call-ground-spec-codec specs))"
-    , "      (list->vector (map cubical-chez-call-ground-spec-literal specs)))))"
-    , "(define (cubical-chez-ordered-ground-call-abi codecs)"
-    , "  (let loop ((index 0) (joined \"\"))"
-    , "    (if (= index (vector-length codecs))"
-    , "        (string-append"
-    , "          \"ordered-\" joined \"-ground-environment-elimination-v1\")"
-    , "        (loop (+ index 1)"
-    , "          (string-append"
-    , "            joined (if (= index 0) \"\" \"+\")"
-    , "            (vector-ref codecs index))))))"
-    , "(define (cubical-chez-call-mode arguments)"
-    , "  (let ((bool-holes"
-    , "          (cubical-chez-prefixed-values"
-    , "            cubical-chez-call-bool-hole-prefix arguments))"
-    , "        (bool-arguments"
-    , "          (cubical-chez-prefixed-values"
-    , "            cubical-chez-call-bool-argument-prefix arguments))"
-    , "        (nat-holes"
-    , "          (cubical-chez-prefixed-values"
-    , "            cubical-chez-call-nat-hole-prefix arguments))"
-    , "        (nat-arguments"
-    , "          (cubical-chez-prefixed-values"
-    , "            cubical-chez-call-nat-argument-prefix arguments))"
-    , "        (word64-holes"
-    , "          (cubical-chez-prefixed-values"
-    , "            cubical-chez-call-word64-hole-prefix arguments))"
-    , "        (word64-arguments"
-    , "          (cubical-chez-prefixed-values"
-    , "            cubical-chez-call-word64-argument-prefix arguments))"
-    , "        (char-holes"
-    , "          (cubical-chez-prefixed-values"
-    , "            cubical-chez-call-char-hole-prefix arguments))"
-    , "        (char-arguments"
-    , "          (cubical-chez-prefixed-values"
-    , "            cubical-chez-call-char-argument-prefix arguments))"
-    , "        (int-holes"
-    , "          (cubical-chez-prefixed-values"
-    , "            cubical-chez-call-int-hole-prefix arguments))"
-    , "        (int-arguments"
-    , "          (cubical-chez-prefixed-values"
-    , "            cubical-chez-call-int-argument-prefix arguments))"
-    , "        (ground-holes"
-    , "          (cubical-chez-prefixed-values"
-    , "            cubical-chez-call-ground-hole-prefix arguments))"
-    , "        (ground-arguments"
-    , "          (cubical-chez-prefixed-values"
-    , "            cubical-chez-call-ground-argument-prefix arguments)))"
-    , "    (cond"
-    , "      ((and (= (length bool-holes) 1)"
-    , "            (= (length bool-arguments) 1)"
-    , "            (null? nat-holes) (null? nat-arguments)"
-    , "            (null? word64-holes) (null? word64-arguments)"
-    , "            (null? char-holes) (null? char-arguments)"
-    , "            (null? int-holes) (null? int-arguments)"
-    , "            (null? ground-holes) (null? ground-arguments))"
-    , "       \"bool\")"
-    , "      ((and (= (length nat-holes) 1)"
-    , "            (= (length nat-arguments) 1)"
-    , "            (null? bool-holes) (null? bool-arguments)"
-    , "            (null? word64-holes) (null? word64-arguments)"
-    , "            (null? char-holes) (null? char-arguments)"
-    , "            (null? int-holes) (null? int-arguments)"
-    , "            (null? ground-holes) (null? ground-arguments))"
-    , "       \"nat\")"
-    , "      ((and (= (length word64-holes) 1)"
-    , "            (= (length word64-arguments) 1)"
-    , "            (null? bool-holes) (null? bool-arguments)"
-    , "            (null? nat-holes) (null? nat-arguments)"
-    , "            (null? char-holes) (null? char-arguments)"
-    , "            (null? int-holes) (null? int-arguments)"
-    , "            (null? ground-holes) (null? ground-arguments))"
-    , "       \"word64\")"
-    , "      ((and (= (length char-holes) 1)"
-    , "            (= (length char-arguments) 1)"
-    , "            (null? bool-holes) (null? bool-arguments)"
-    , "            (null? nat-holes) (null? nat-arguments)"
-    , "            (null? word64-holes) (null? word64-arguments)"
-    , "            (null? int-holes) (null? int-arguments)"
-    , "            (null? ground-holes) (null? ground-arguments))"
-    , "       \"char\")"
-    , "      ((and (= (length int-holes) 1)"
-    , "            (= (length int-arguments) 1)"
-    , "            (null? bool-holes) (null? bool-arguments)"
-    , "            (null? nat-holes) (null? nat-arguments)"
-    , "            (null? word64-holes) (null? word64-arguments)"
-    , "            (null? char-holes) (null? char-arguments)"
-    , "            (null? ground-holes) (null? ground-arguments))"
-    , "       \"int\")"
-    , "      ((and (= (length ground-holes) 1)"
-    , "            (>= (length ground-arguments) 2)"
-    , "            (<= (length ground-arguments) 64)"
-    , "            (null? bool-holes) (null? bool-arguments)"
-    , "            (null? nat-holes) (null? nat-arguments)"
-    , "            (null? word64-holes) (null? word64-arguments)"
-    , "            (null? char-holes) (null? char-arguments)"
-    , "            (null? int-holes) (null? int-arguments))"
-    , "       \"ground\")"
-    , "      (else"
-    , "        (cubical-chez-bridge-fail"
-    , "          \"CCZ-TYPED-BRIDGE-CALL\""
-    , "          \"select one unary codec or one 2..64 ground vector\")))))"
-    , "(define (cubical-chez-call-ground-hole config)"
-    , "  (let* ((codec (vector-ref config 0))"
-    , "         (id (vector-ref config 1))"
-    , "         (argument (vector-ref config 2))"
-    , "         (hole-type (vector-ref config 3))"
-    , "         (action (vector-ref config 4))"
-    , "         (entry (assoc id cubical-chez-typed-holes)))"
-    , "    (unless entry"
-    , "      (cubical-chez-bridge-fail"
-    , "        \"CCZ-TYPED-BRIDGE-CALL\""
-    , "        (string-append \"unknown callable hole: \" id)))"
-    , "    (let ((handle (cdr entry)))"
-    , "      (unless (cubical-chez-valid-typed-hole-handle? handle)"
-    , "        (cubical-chez-bridge-fail"
-    , "          \"CCZ-TYPED-BRIDGE-CALL\""
-    , "          \"selected call handle is invalid\"))"
-    , "      (unless (cubical-chez-safe-qname? hole-type)"
-    , "        (cubical-chez-bridge-fail"
-    , "          \"CCZ-TYPED-BRIDGE-CALL\""
-    , "          \"call hole type must be a safe QName\"))"
-    , "      (unless"
-    , "        (and (vector? action) (= (vector-length action) 2)"
-    , "             (or"
-    , "               (and (eq? (vector-ref action 0) 'consume)"
-    , "                    (cubical-chez-safe-qname? (vector-ref action 1)))"
-    , "               (and (eq? (vector-ref action 0) 'proxy)"
-    , "                    (cubical-chez-safe-proxy-id?"
-    , "                      (vector-ref action 1)))))"
-    , "        (cubical-chez-bridge-fail"
-    , "          \"CCZ-TYPED-BRIDGE-CALL\""
-    , "          \"call completion action is invalid\"))"
-    , "      (if (string=? codec \"ground\")"
-    , "          (let* ((codecs (vector-ref argument 0))"
-    , "                 (literals (vector-ref argument 1))"
-    , "                 (callable-abi (vector-ref handle 3))"
-    , "                 (ordered-abi"
-    , "                   (cubical-chez-ordered-ground-call-abi codecs)))"
-    , "            (unless"
-    , "              (or (string=? callable-abi ordered-abi)"
-    , "                  (string=? callable-abi"
-    , "                    \"dependent-ground-environment-elimination-v1\"))"
-    , "              (cubical-chez-bridge-fail"
-    , "                \"CCZ-TYPED-BRIDGE-CALL\""
-    , "                \"ground vector disagrees with callable capability\"))"
-    , "            (cubical-chez-complete-bound-application"
-    , "              handle hole-type"
-    , "              (cubical-chez-apply-agda-literals"
-    , "                \"cubicalChezHole\" literals)"
-    , "              action))"
-    , "          (begin"
-    , "            (unless"
-    , "              (string=? (vector-ref handle 3)"
-    , "                (string-append codec"
-    , "                  \"-unary-ground-elimination-v1\"))"
-    , "              (cubical-chez-bridge-fail"
-    , "                \"CCZ-TYPED-BRIDGE-CALL\""
-    , "                \"selected hole does not support the unary codec\"))"
-    , "            (unless"
-    , "              (cubical-chez-ground-codec-valid-argument? codec argument)"
-    , "              (cubical-chez-bridge-fail"
-    , "                \"CCZ-TYPED-BRIDGE-CALL\""
-    , "                (string-append \"invalid \" codec \" argument\")))"
-    , "            (cubical-chez-complete-bound-application"
-    , "              handle hole-type"
-    , "              (string-append"
-    , "                \"(cubicalChezHole \""
-    , "                (cubical-chez-ground-codec-argument-literal codec argument)"
-    , "                \")\")"
-    , "              action))))))"
-    , "(define cubical-chez-auto-bind-bool-hole-prefix"
-    , "  \"--auto-bind-bool-hole=\")"
-    , "(define cubical-chez-entry-bool-argument-prefix"
-    , "  \"--entry-bool-argument=\")"
-    , "(define cubical-chez-auto-bind-nat-hole-prefix"
-    , "  \"--auto-bind-nat-hole=\")"
-    , "(define cubical-chez-entry-nat-argument-prefix"
-    , "  \"--entry-nat-argument=\")"
-    , "(define cubical-chez-auto-bind-word64-hole-prefix"
-    , "  \"--auto-bind-word64-hole=\")"
-    , "(define cubical-chez-entry-word64-argument-prefix"
-    , "  \"--entry-word64-argument=\")"
-    , "(define cubical-chez-auto-bind-char-hole-prefix"
-    , "  \"--auto-bind-char-hole=\")"
-    , "(define cubical-chez-entry-char-argument-prefix"
-    , "  \"--entry-char-codepoint=\")"
-    , "(define cubical-chez-auto-bind-int-hole-prefix"
-    , "  \"--auto-bind-int-hole=\")"
-    , "(define cubical-chez-entry-int-argument-prefix"
-    , "  \"--entry-int-argument=\")"
-    , "(define cubical-chez-auto-bind-ground-hole-prefix"
-    , "  \"--auto-bind-ground-hole=\")"
-    , "(define cubical-chez-entry-ground-argument-prefix"
-    , "  \"--entry-ground-argument=\")"
-    , "(define cubical-chez-auto-bind-hole-type-prefix"
-    , "  \"--auto-bind-hole-type=\")"
-    , "(define cubical-chez-auto-bind-result-consumer-prefix"
-    , "  \"--auto-bind-result-consumer=\")"
-    , "(define cubical-chez-auto-bind-proxy-id-prefix"
-    , "  \"--auto-bind-proxy-id=\")"
-    , "(define (cubical-chez-auto-bind-argument? argument)"
-    , "  (or"
-    , "    (cubical-chez-string-prefix?"
-    , "      cubical-chez-auto-bind-bool-hole-prefix argument)"
-    , "    (cubical-chez-string-prefix?"
-    , "      cubical-chez-entry-bool-argument-prefix argument)"
-    , "    (cubical-chez-string-prefix?"
-    , "      cubical-chez-auto-bind-nat-hole-prefix argument)"
-    , "    (cubical-chez-string-prefix?"
-    , "      cubical-chez-entry-nat-argument-prefix argument)"
-    , "    (cubical-chez-string-prefix?"
-    , "      cubical-chez-auto-bind-word64-hole-prefix argument)"
-    , "    (cubical-chez-string-prefix?"
-    , "      cubical-chez-entry-word64-argument-prefix argument)"
-    , "    (cubical-chez-string-prefix?"
-    , "      cubical-chez-auto-bind-char-hole-prefix argument)"
-    , "    (cubical-chez-string-prefix?"
-    , "      cubical-chez-entry-char-argument-prefix argument)"
-    , "    (cubical-chez-string-prefix?"
-    , "      cubical-chez-auto-bind-int-hole-prefix argument)"
-    , "    (cubical-chez-string-prefix?"
-    , "      cubical-chez-entry-int-argument-prefix argument)"
-    , "    (cubical-chez-string-prefix?"
-    , "      cubical-chez-auto-bind-ground-hole-prefix argument)"
-    , "    (cubical-chez-string-prefix?"
-    , "      cubical-chez-entry-ground-argument-prefix argument)"
-    , "    (cubical-chez-string-prefix?"
-    , "      cubical-chez-auto-bind-hole-type-prefix argument)"
-    , "    (cubical-chez-string-prefix?"
-    , "      cubical-chez-auto-bind-result-consumer-prefix argument)"
-    , "    (cubical-chez-string-prefix?"
-    , "      cubical-chez-auto-bind-proxy-id-prefix argument)))"
-    , "(define (cubical-chez-auto-bind-requested? arguments)"
-    , "  (cond"
-    , "    ((null? arguments) #f)"
-    , "    ((cubical-chez-auto-bind-argument? (car arguments)) #t)"
-    , "    (else (cubical-chez-auto-bind-requested? (cdr arguments)))))"
-    , "(define (cubical-chez-auto-bind-mode arguments)"
-    , "  (let ((bool-holes"
-    , "          (cubical-chez-prefixed-values"
-    , "            cubical-chez-auto-bind-bool-hole-prefix arguments))"
-    , "        (bool-arguments"
-    , "          (cubical-chez-prefixed-values"
-    , "            cubical-chez-entry-bool-argument-prefix arguments))"
-    , "        (nat-holes"
-    , "          (cubical-chez-prefixed-values"
-    , "            cubical-chez-auto-bind-nat-hole-prefix arguments))"
-    , "        (nat-arguments"
-    , "          (cubical-chez-prefixed-values"
-    , "            cubical-chez-entry-nat-argument-prefix arguments))"
-    , "        (word64-holes"
-    , "          (cubical-chez-prefixed-values"
-    , "            cubical-chez-auto-bind-word64-hole-prefix arguments))"
-    , "        (word64-arguments"
-    , "          (cubical-chez-prefixed-values"
-    , "            cubical-chez-entry-word64-argument-prefix arguments))"
-    , "        (char-holes"
-    , "          (cubical-chez-prefixed-values"
-    , "            cubical-chez-auto-bind-char-hole-prefix arguments))"
-    , "        (char-arguments"
-    , "          (cubical-chez-prefixed-values"
-    , "            cubical-chez-entry-char-argument-prefix arguments))"
-    , "        (int-holes"
-    , "          (cubical-chez-prefixed-values"
-    , "            cubical-chez-auto-bind-int-hole-prefix arguments))"
-    , "        (int-arguments"
-    , "          (cubical-chez-prefixed-values"
-    , "            cubical-chez-entry-int-argument-prefix arguments))"
-    , "        (ground-holes"
-    , "          (cubical-chez-prefixed-values"
-    , "            cubical-chez-auto-bind-ground-hole-prefix arguments))"
-    , "        (ground-arguments"
-    , "          (cubical-chez-prefixed-values"
-    , "            cubical-chez-entry-ground-argument-prefix arguments)))"
-    , "    (cond"
-    , "      ((and (= (length ground-holes) 1)"
-    , "            (>= (length ground-arguments) 2)"
-    , "            (<= (length ground-arguments) 64)"
-    , "            (null? bool-holes) (null? bool-arguments)"
-    , "            (null? nat-holes) (null? nat-arguments)"
-    , "            (null? word64-holes) (null? word64-arguments)"
-    , "            (null? char-holes) (null? char-arguments)"
-    , "            (null? int-holes) (null? int-arguments))"
-    , "       \"ordered-ground\")"
-    , "      ((and (= (length bool-holes) 1)"
-    , "            (= (length bool-arguments) 1)"
-    , "            (null? nat-holes) (null? nat-arguments)"
-    , "            (null? word64-holes) (null? word64-arguments)"
-    , "            (null? char-holes) (null? char-arguments)"
-    , "            (null? int-holes) (null? int-arguments)"
-    , "            (null? ground-holes) (null? ground-arguments))"
-    , "       \"bool\")"
-    , "      ((and (= (length nat-holes) 1)"
-    , "            (= (length nat-arguments) 1)"
-    , "            (null? bool-holes) (null? bool-arguments)"
-    , "            (null? word64-holes) (null? word64-arguments)"
-    , "            (null? char-holes) (null? char-arguments)"
-    , "            (null? int-holes) (null? int-arguments)"
-    , "            (null? ground-holes) (null? ground-arguments))"
-    , "       \"nat\")"
-    , "      ((and (= (length word64-holes) 1)"
-    , "            (= (length word64-arguments) 1)"
-    , "            (null? bool-holes) (null? bool-arguments)"
-    , "            (null? nat-holes) (null? nat-arguments)"
-    , "            (null? char-holes) (null? char-arguments)"
-    , "            (null? int-holes) (null? int-arguments)"
-    , "            (null? ground-holes) (null? ground-arguments))"
-    , "       \"word64\")"
-    , "      ((and (= (length char-holes) 1)"
-    , "            (= (length char-arguments) 1)"
-    , "            (null? bool-holes) (null? bool-arguments)"
-    , "            (null? nat-holes) (null? nat-arguments)"
-    , "            (null? word64-holes) (null? word64-arguments)"
-    , "            (null? int-holes) (null? int-arguments)"
-    , "            (null? ground-holes) (null? ground-arguments))"
-    , "       \"char\")"
-    , "      ((and (= (length int-holes) 1)"
-    , "            (= (length int-arguments) 1)"
-    , "            (null? bool-holes) (null? bool-arguments)"
-    , "            (null? nat-holes) (null? nat-arguments)"
-    , "            (null? word64-holes) (null? word64-arguments)"
-    , "            (null? char-holes) (null? char-arguments)"
-    , "            (null? ground-holes) (null? ground-arguments))"
-    , "       \"int\")"
-    , "      (else"
-    , "        (cubical-chez-bridge-fail"
-    , "          \"CCZ-TYPED-BRIDGE-ENVIRONMENT\""
-    , "          \"select one single or ordered Bool/Nat/Word64/Char/Int environment codec\")))))"
-    , "(define (cubical-chez-exactly-one-auto-bind-value"
-    , "          prefix label arguments)"
-    , "  (let ((values (cubical-chez-prefixed-values prefix arguments)))"
-    , "    (unless (= (length values) 1)"
-    , "      (cubical-chez-bridge-fail"
-    , "        \"CCZ-TYPED-BRIDGE-ENVIRONMENT\""
-    , "        (string-append"
-    , "          \"automatic binding requires exactly one \" label)))"
-    , "    (when (string=? (car values) \"\")"
-    , "      (cubical-chez-bridge-fail"
-    , "        \"CCZ-TYPED-BRIDGE-ENVIRONMENT\""
-    , "        (string-append \"empty \" label)))"
-    , "    (car values)))"
-    , "(define (cubical-chez-auto-bind-action arguments)"
-    , "  (let ((consumers"
-    , "          (cubical-chez-prefixed-values"
-    , "            cubical-chez-auto-bind-result-consumer-prefix arguments))"
-    , "        (proxy-ids"
-    , "          (cubical-chez-prefixed-values"
-    , "            cubical-chez-auto-bind-proxy-id-prefix arguments)))"
-    , "    (cond"
-    , "      ((and (= (length consumers) 1) (null? proxy-ids)"
-    , "            (not (string=? (car consumers) \"\")))"
-    , "       (vector 'consume (car consumers)))"
-    , "      ((and (= (length proxy-ids) 1) (null? consumers)"
-    , "            (not (string=? (car proxy-ids) \"\")))"
-    , "       (vector 'proxy (car proxy-ids)))"
-    , "      (else"
-    , "        (cubical-chez-bridge-fail"
-    , "          \"CCZ-TYPED-BRIDGE-ENVIRONMENT\""
-    , "          \"select exactly one result consumer or proxy ID\")))))"
-    , "(define (cubical-chez-entry-ground-spec-value spec)"
-    , "  (let* ((descriptor"
-    , "           (cubical-chez-ground-spec-descriptor spec"
-    , "             \"CCZ-TYPED-BRIDGE-ENVIRONMENT\""
-    , "             \"unknown entry ground codec\"))"
-    , "         (prefix (vector-ref descriptor 2))"
-    , "         (literal"
-    , "           (substring spec (string-length prefix) (string-length spec))))"
-    , "    ((vector-ref descriptor 5) literal)))"
-    , "(define (cubical-chez-entry-ground-spec-codec spec)"
-    , "  (vector-ref"
-    , "    (cubical-chez-ground-spec-descriptor spec"
-    , "      \"CCZ-TYPED-BRIDGE-ENVIRONMENT\""
-    , "      \"unknown entry ground codec\")"
-    , "    0))"
-    , "(define (cubical-chez-entry-ground-values arguments)"
-    , "  (let ((specs"
-    , "          (cubical-chez-prefixed-values"
-    , "            cubical-chez-entry-ground-argument-prefix arguments)))"
-    , "    (unless (and (>= (length specs) 2) (<= (length specs) 64))"
-    , "      (cubical-chez-bridge-fail"
-    , "        \"CCZ-TYPED-BRIDGE-ENVIRONMENT\""
-    , "        \"ordered environment requires 2..64 entry arguments\"))"
-    , "    (vector"
-    , "      (list->vector (map cubical-chez-entry-ground-spec-codec specs))"
-    , "      (map cubical-chez-entry-ground-spec-value specs))))"
-    , "(define (cubical-chez-agda-bool-value literal)"
-    , "  (cond"
-    , "    ((string=? literal \"true\")"
-    , "     (vector 'agda_Agda_2e_Builtin_2e_Bool_2e_Bool_2e_true))"
-    , "    ((string=? literal \"false\")"
-    , "     (vector 'agda_Agda_2e_Builtin_2e_Bool_2e_Bool_2e_false))"
-    , "    (else"
-    , "      (cubical-chez-bridge-fail"
-    , "        \"CCZ-TYPED-BRIDGE-ENVIRONMENT\""
-    , "        \"entry Bool argument must be true or false\"))))"
-    , "(define (cubical-chez-collect-bound-bool-holes value wanted-id)"
-    , "  (cond"
-    , "    ((cubical-chez-valid-bound-bool-hole? value)"
-    , "     (if (string=? (vector-ref (vector-ref value 1) 1) wanted-id)"
-    , "         (list value)"
-    , "         '()))"
-    , "    ((vector? value)"
-    , "     (let loop ((index 0) (found '()))"
-    , "       (if (= index (vector-length value))"
-    , "           found"
-    , "           (loop (+ index 1)"
-    , "             (append found"
-    , "               (cubical-chez-collect-bound-bool-holes"
-    , "                 (vector-ref value index) wanted-id))))))"
-    , "    ((pair? value)"
-    , "     (append"
-    , "       (cubical-chez-collect-bound-bool-holes (car value) wanted-id)"
-    , "       (cubical-chez-collect-bound-bool-holes (cdr value) wanted-id)))"
-    , "    (else '())))"
-    , "(define (cubical-chez-complete-bound-application"
-    , "          handle hole-type application action)"
-    , "  (unless"
-    , "    (and (vector? action) (= (vector-length action) 2)"
-    , "         (member (vector-ref action 0) '(consume proxy))"
-    , "         (string? (vector-ref action 1)))"
-    , "    (cubical-chez-bridge-fail"
-    , "      \"CCZ-TYPED-BRIDGE-ENVIRONMENT\""
-    , "      \"invalid automatic binding completion action\"))"
-    , "  (case (vector-ref action 0)"
-    , "    ((consume)"
-    , "     (unless (and (cubical-chez-safe-qname? hole-type)"
-    , "                  (cubical-chez-safe-qname? (vector-ref action 1)))"
-    , "       (cubical-chez-bridge-fail"
-    , "         \"CCZ-TYPED-BRIDGE-ENVIRONMENT\""
-    , "         \"bound hole type and consumer must be safe QNames\"))"
-    , "     (putenv \"CUBICAL_CHEZ_TYPED_MODE\" \"ground\")"
-    , "     (putenv"
-    , "       \"CUBICAL_CHEZ_TYPED_CONSUMER\""
-    , "       (string-append"
-    , "         \"(Œª (cubicalChezHole : \" hole-type \") ‚Üí \""
-    , "         (vector-ref action 1) \" \" application \")\"))"
-    , "     (cubical-chez-force-typed-hole handle))"
-    , "    ((proxy)"
-    , "     (cubical-chez-materialize-application-proxy"
-    , "       handle hole-type application (vector-ref action 1)))))"
-    , "(define (cubical-chez-force-bound-bool-hole"
-    , "          bound-hole hole-type action)"
-    , "  (unless (cubical-chez-valid-bound-bool-hole? bound-hole)"
-    , "    (cubical-chez-bridge-fail"
-    , "      \"CCZ-TYPED-BRIDGE-ENVIRONMENT\" \"invalid bound Bool hole\"))"
-    , "  (let ((handle (vector-ref bound-hole 1))"
-    , "        (environment (vector-ref bound-hole 2)))"
-    , "    (cubical-chez-complete-bound-application"
-    , "      handle hole-type"
-    , "      (string-append"
-    , "        \"(cubicalChezHole Agda.Builtin.Bool.\" environment \")\")"
-    , "      action)))"
-    , "(define (cubical-chez-auto-observe-bound-bool config entry)"
-    , "  (unless (procedure? entry)"
-    , "    (cubical-chez-bridge-fail"
-    , "      \"CCZ-TYPED-BRIDGE-ENVIRONMENT\""
-    , "      \"entry is not callable with one Bool environment\"))"
-    , "  (let* ((id (vector-ref config 1))"
-    , "         (entry-argument (vector-ref config 2))"
-    , "         (hole-type (vector-ref config 3))"
-    , "         (action (vector-ref config 4))"
-    , "         (entry-result"
-    , "           (entry (cubical-chez-agda-bool-value entry-argument)))"
-    , "         (matches"
-    , "           (cubical-chez-collect-bound-bool-holes entry-result id)))"
-    , "    (unless (= (length matches) 1)"
-    , "      (cubical-chez-bridge-fail"
-    , "        \"CCZ-TYPED-BRIDGE-ENVIRONMENT\""
-    , "        \"entry result must contain exactly one selected bound hole\"))"
-    , "    (cubical-chez-force-bound-bool-hole"
-    , "      (car matches) hole-type action)))"
-    , "(define (cubical-chez-agda-nat-value literal)"
-    , "  (unless (cubical-chez-valid-nat-argument? literal)"
-    , "    (cubical-chez-bridge-fail"
-    , "      \"CCZ-TYPED-BRIDGE-ENVIRONMENT\""
-    , "      \"entry Nat argument must be within 0..4294967295\"))"
-    , "  (string->number literal))"
-    , "(define (cubical-chez-agda-word64-value literal)"
-    , "  (unless (cubical-chez-valid-word64-argument? literal)"
-    , "    (cubical-chez-bridge-fail"
-    , "      \"CCZ-TYPED-BRIDGE-ENVIRONMENT\""
-    , "      \"entry Word64 argument must be within 0..18446744073709551615\"))"
-    , "  (string->number literal))"
-    , "(define (cubical-chez-agda-char-value literal)"
-    , "  (unless (cubical-chez-valid-char-argument? literal)"
-    , "    (cubical-chez-bridge-fail"
-    , "      \"CCZ-TYPED-BRIDGE-ENVIRONMENT\""
-    , "      \"entry Char codepoint must be a Unicode scalar\"))"
-    , "  (integer->char (string->number literal)))"
-    , "(define (cubical-chez-agda-int-value literal)"
-    , "  (unless (cubical-chez-valid-int-argument? literal)"
-    , "    (cubical-chez-bridge-fail"
-    , "      \"CCZ-TYPED-BRIDGE-ENVIRONMENT\""
-    , "      \"entry Int argument must be within signed 64-bit range\"))"
-    , "  (cubical-chez-integer->agda-int (string->number literal)))"
-    , "(define (cubical-chez-collect-bound-nat-holes value wanted-id)"
-    , "  (cond"
-    , "    ((cubical-chez-valid-bound-nat-hole? value)"
-    , "     (if (string=? (vector-ref (vector-ref value 1) 1) wanted-id)"
-    , "         (list value)"
-    , "         '()))"
-    , "    ((vector? value)"
-    , "     (let loop ((index 0) (found '()))"
-    , "       (if (= index (vector-length value))"
-    , "           found"
-    , "           (loop (+ index 1)"
-    , "             (append found"
-    , "               (cubical-chez-collect-bound-nat-holes"
-    , "                 (vector-ref value index) wanted-id))))))"
-    , "    ((pair? value)"
-    , "     (append"
-    , "       (cubical-chez-collect-bound-nat-holes (car value) wanted-id)"
-    , "       (cubical-chez-collect-bound-nat-holes (cdr value) wanted-id)))"
-    , "    (else '())))"
-    , "(define (cubical-chez-force-bound-nat-hole"
-    , "          bound-hole hole-type action)"
-    , "  (unless (cubical-chez-valid-bound-nat-hole? bound-hole)"
-    , "    (cubical-chez-bridge-fail"
-    , "      \"CCZ-TYPED-BRIDGE-ENVIRONMENT\" \"invalid bound Nat hole\"))"
-    , "  (let ((handle (vector-ref bound-hole 1))"
-    , "        (environment (number->string (vector-ref bound-hole 2))))"
-    , "    (cubical-chez-complete-bound-application"
-    , "      handle hole-type"
-    , "      (string-append \"(cubicalChezHole \" environment \")\")"
-    , "      action)))"
-    , "(define (cubical-chez-auto-observe-bound-nat config entry)"
-    , "  (unless (procedure? entry)"
-    , "    (cubical-chez-bridge-fail"
-    , "      \"CCZ-TYPED-BRIDGE-ENVIRONMENT\""
-    , "      \"entry is not callable with one Nat environment\"))"
-    , "  (let* ((id (vector-ref config 1))"
-    , "         (entry-argument (vector-ref config 2))"
-    , "         (hole-type (vector-ref config 3))"
-    , "         (action (vector-ref config 4))"
-    , "         (entry-result"
-    , "           (entry (cubical-chez-agda-nat-value entry-argument)))"
-    , "         (matches"
-    , "           (cubical-chez-collect-bound-nat-holes entry-result id)))"
-    , "    (unless (= (length matches) 1)"
-    , "      (cubical-chez-bridge-fail"
-    , "        \"CCZ-TYPED-BRIDGE-ENVIRONMENT\""
-    , "        \"entry result must contain exactly one selected bound hole\"))"
-    , "    (cubical-chez-force-bound-nat-hole"
-    , "      (car matches) hole-type action)))"
-    , "(define (cubical-chez-collect-bound-word64-holes value wanted-id)"
-    , "  (cond"
-    , "    ((cubical-chez-valid-bound-word64-hole? value)"
-    , "     (if (string=? (vector-ref (vector-ref value 1) 1) wanted-id)"
-    , "         (list value)"
-    , "         '()))"
-    , "    ((vector? value)"
-    , "     (let loop ((index 0) (found '()))"
-    , "       (if (= index (vector-length value))"
-    , "           found"
-    , "           (loop (+ index 1)"
-    , "             (append found"
-    , "               (cubical-chez-collect-bound-word64-holes"
-    , "                 (vector-ref value index) wanted-id))))))"
-    , "    ((pair? value)"
-    , "     (append"
-    , "       (cubical-chez-collect-bound-word64-holes (car value) wanted-id)"
-    , "       (cubical-chez-collect-bound-word64-holes (cdr value) wanted-id)))"
-    , "    (else '())))"
-    , "(define (cubical-chez-force-bound-word64-hole"
-    , "          bound-hole hole-type action)"
-    , "  (unless (cubical-chez-valid-bound-word64-hole? bound-hole)"
-    , "    (cubical-chez-bridge-fail"
-    , "      \"CCZ-TYPED-BRIDGE-ENVIRONMENT\" \"invalid bound Word64 hole\"))"
-    , "  (let ((handle (vector-ref bound-hole 1))"
-    , "        (environment (number->string (vector-ref bound-hole 2))))"
-    , "    (cubical-chez-complete-bound-application"
-    , "      handle hole-type"
-    , "      (string-append"
-    , "        \"(cubicalChezHole (Agda.Builtin.Word.primWord64FromNat \""
-    , "        environment \" ))\")"
-    , "      action)))"
-    , "(define (cubical-chez-auto-observe-bound-word64 config entry)"
-    , "  (unless (procedure? entry)"
-    , "    (cubical-chez-bridge-fail"
-    , "      \"CCZ-TYPED-BRIDGE-ENVIRONMENT\""
-    , "      \"entry is not callable with one Word64 environment\"))"
-    , "  (let* ((id (vector-ref config 1))"
-    , "         (entry-argument (vector-ref config 2))"
-    , "         (hole-type (vector-ref config 3))"
-    , "         (action (vector-ref config 4))"
-    , "         (entry-result"
-    , "           (entry (cubical-chez-agda-word64-value entry-argument)))"
-    , "         (matches"
-    , "           (cubical-chez-collect-bound-word64-holes entry-result id)))"
-    , "    (unless (= (length matches) 1)"
-    , "      (cubical-chez-bridge-fail"
-    , "        \"CCZ-TYPED-BRIDGE-ENVIRONMENT\""
-    , "        \"entry result must contain exactly one selected bound hole\"))"
-    , "    (cubical-chez-force-bound-word64-hole"
-    , "      (car matches) hole-type action)))"
-    , "(define (cubical-chez-collect-bound-char-holes value wanted-id)"
-    , "  (cond"
-    , "    ((cubical-chez-valid-bound-char-hole? value)"
-    , "     (if (string=? (vector-ref (vector-ref value 1) 1) wanted-id)"
-    , "         (list value)"
-    , "         '()))"
-    , "    ((vector? value)"
-    , "     (let loop ((index 0) (found '()))"
-    , "       (if (= index (vector-length value))"
-    , "           found"
-    , "           (loop (+ index 1)"
-    , "             (append found"
-    , "               (cubical-chez-collect-bound-char-holes"
-    , "                 (vector-ref value index) wanted-id))))))"
-    , "    ((pair? value)"
-    , "     (append"
-    , "       (cubical-chez-collect-bound-char-holes (car value) wanted-id)"
-    , "       (cubical-chez-collect-bound-char-holes (cdr value) wanted-id)))"
-    , "    (else '())))"
-    , "(define (cubical-chez-force-bound-char-hole"
-    , "          bound-hole hole-type action)"
-    , "  (unless (cubical-chez-valid-bound-char-hole? bound-hole)"
-    , "    (cubical-chez-bridge-fail"
-    , "      \"CCZ-TYPED-BRIDGE-ENVIRONMENT\" \"invalid bound Char hole\"))"
-    , "  (let ((handle (vector-ref bound-hole 1))"
-    , "        (codepoint (number->string (vector-ref bound-hole 2))))"
-    , "    (cubical-chez-complete-bound-application"
-    , "      handle hole-type"
-    , "      (string-append"
-    , "        \"(cubicalChezHole (Agda.Builtin.Char.primNatToChar \""
-    , "        codepoint \" ))\")"
-    , "      action)))"
-    , "(define (cubical-chez-auto-observe-bound-char config entry)"
-    , "  (unless (procedure? entry)"
-    , "    (cubical-chez-bridge-fail"
-    , "      \"CCZ-TYPED-BRIDGE-ENVIRONMENT\""
-    , "      \"entry is not callable with one Char environment\"))"
-    , "  (let* ((id (vector-ref config 1))"
-    , "         (entry-argument (vector-ref config 2))"
-    , "         (hole-type (vector-ref config 3))"
-    , "         (action (vector-ref config 4))"
-    , "         (entry-result"
-    , "           (entry (cubical-chez-agda-char-value entry-argument)))"
-    , "         (matches"
-    , "           (cubical-chez-collect-bound-char-holes entry-result id)))"
-    , "    (unless (= (length matches) 1)"
-    , "      (cubical-chez-bridge-fail"
-    , "        \"CCZ-TYPED-BRIDGE-ENVIRONMENT\""
-    , "        \"entry result must contain exactly one selected bound hole\"))"
-    , "    (cubical-chez-force-bound-char-hole"
-    , "      (car matches) hole-type action)))"
-    , "(define (cubical-chez-collect-bound-int-holes value wanted-id)"
-    , "  (cond"
-    , "    ((cubical-chez-valid-bound-int-hole? value)"
-    , "     (if (string=? (vector-ref (vector-ref value 1) 1) wanted-id)"
-    , "         (list value) '()))"
-    , "    ((vector? value)"
-    , "     (let loop ((index 0) (found '()))"
-    , "       (if (= index (vector-length value))"
-    , "           found"
-    , "           (loop (+ index 1)"
-    , "             (append found"
-    , "               (cubical-chez-collect-bound-int-holes"
-    , "                 (vector-ref value index) wanted-id))))))"
-    , "    ((pair? value)"
-    , "     (append"
-    , "       (cubical-chez-collect-bound-int-holes (car value) wanted-id)"
-    , "       (cubical-chez-collect-bound-int-holes (cdr value) wanted-id)))"
-    , "    (else '())))"
-    , "(define (cubical-chez-force-bound-int-hole"
-    , "          bound-hole hole-type action)"
-    , "  (unless (cubical-chez-valid-bound-int-hole? bound-hole)"
-    , "    (cubical-chez-bridge-fail"
-    , "      \"CCZ-TYPED-BRIDGE-ENVIRONMENT\" \"invalid bound Int hole\"))"
-    , "  (let ((handle (vector-ref bound-hole 1))"
-    , "        (environment (vector-ref bound-hole 2)))"
-    , "    (cubical-chez-complete-bound-application"
-    , "      handle hole-type"
-    , "      (string-append \"(cubicalChezHole \""
-    , "        (cubical-chez-int-term environment) \")\")"
-    , "      action)))"
-    , "(define (cubical-chez-auto-observe-bound-int config entry)"
-    , "  (unless (procedure? entry)"
-    , "    (cubical-chez-bridge-fail"
-    , "      \"CCZ-TYPED-BRIDGE-ENVIRONMENT\""
-    , "      \"entry is not callable with one Int environment\"))"
-    , "  (let* ((id (vector-ref config 1))"
-    , "         (entry-argument (vector-ref config 2))"
-    , "         (hole-type (vector-ref config 3))"
-    , "         (action (vector-ref config 4))"
-    , "         (entry-result"
-    , "           (entry (cubical-chez-agda-int-value entry-argument)))"
-    , "         (matches"
-    , "           (cubical-chez-collect-bound-int-holes entry-result id)))"
-    , "    (unless (= (length matches) 1)"
-    , "      (cubical-chez-bridge-fail"
-    , "        \"CCZ-TYPED-BRIDGE-ENVIRONMENT\""
-    , "        \"entry result must contain exactly one selected bound hole\"))"
-    , "    (cubical-chez-force-bound-int-hole"
-    , "      (car matches) hole-type action)))"
-    , "(define (cubical-chez-valid-bound-ground-environment? value)"
-    , "  (and (vector? value) (= (vector-length value) 4)"
-    , "       (eq? (vector-ref value 0)"
-    , "            'cubical-chez-typed-hole-bound-ground-environment-v1)"
-    , "       (cubical-chez-valid-typed-hole-handle? (vector-ref value 1))"
-    , "       (cubical-chez-valid-ground-codecs? (vector-ref value 2))"
-    , "       (vector? (vector-ref value 3))"
-    , "       (= (vector-length (vector-ref value 2))"
-    , "          (vector-length (vector-ref value 3)))"
-    , "       (let loop ((index 0))"
-    , "         (or (= index (vector-length (vector-ref value 3)))"
-    , "             (and (string? (vector-ref (vector-ref value 3) index))"
-    , "                  (loop (+ index 1)))))))"
-    , "(define (cubical-chez-valid-bound-dependent-ground-environment? value)"
-    , "  (and (vector? value) (= (vector-length value) 3)"
-    , "       (eq? (vector-ref value 0)"
-    , "            'cubical-chez-typed-hole-bound-dependent-ground-environment-v1)"
-    , "       (cubical-chez-valid-typed-hole-handle? (vector-ref value 1))"
-    , "       (string=? (vector-ref (vector-ref value 1) 3)"
-    , "         \"dependent-ground-environment-elimination-v1\")"
-    , "       (vector? (vector-ref value 2))"
-    , "       (>= (vector-length (vector-ref value 2)) 2)"
-    , "       (<= (vector-length (vector-ref value 2)) 64)"
-    , "       (let loop ((index 0))"
-    , "         (or (= index (vector-length (vector-ref value 2)))"
-    , "             (and (cubical-chez-valid-dependent-ground-value?"
-    , "                    (vector-ref (vector-ref value 2) index))"
-    , "                  (loop (+ index 1)))))))"
-    , "(define (cubical-chez-collect-bound-ground-environments value wanted-id)"
-    , "  (cond"
-    , "    ((or (cubical-chez-valid-bound-ground-environment? value)"
-    , "         (cubical-chez-valid-bound-dependent-ground-environment? value))"
-    , "     (if (string=? (vector-ref (vector-ref value 1) 1) wanted-id)"
-    , "         (list value)"
-    , "         '()))"
-    , "    ((vector? value)"
-    , "     (let loop ((index 0) (found '()))"
-    , "       (if (= index (vector-length value))"
-    , "           found"
-    , "           (loop (+ index 1)"
-    , "             (append found"
-    , "               (cubical-chez-collect-bound-ground-environments"
-    , "                 (vector-ref value index) wanted-id))))))"
-    , "    ((pair? value)"
-    , "     (append"
-    , "       (cubical-chez-collect-bound-ground-environments"
-    , "         (car value) wanted-id)"
-    , "       (cubical-chez-collect-bound-ground-environments"
-    , "         (cdr value) wanted-id)))"
-    , "    (else '())))"
-    , "(define (cubical-chez-apply-agda-literals function literals)"
-    , "  (let loop ((index 0) (application function))"
-    , "    (if (= index (vector-length literals))"
-    , "        application"
-    , "        (loop (+ index 1)"
-    , "          (string-append \"(\" application \" \""
-    , "            (vector-ref literals index) \")\")))))"
-    , "(define (cubical-chez-force-bound-ground-environment"
-    , "          bound-hole hole-type action)"
-    , "  (unless (cubical-chez-valid-bound-ground-environment? bound-hole)"
-    , "    (cubical-chez-bridge-fail"
-    , "      \"CCZ-TYPED-BRIDGE-ENVIRONMENT\""
-    , "      \"invalid bound ordered ground environment\"))"
-    , "  (let ((handle (vector-ref bound-hole 1))"
-    , "        (literals (vector-ref bound-hole 3)))"
-    , "    (cubical-chez-complete-bound-application"
-    , "      handle hole-type"
-    , "      (cubical-chez-apply-agda-literals"
-    , "        \"cubicalChezHole\" literals)"
-    , "      action)))"
-    , "(define (cubical-chez-dependent-ground-values-match? captured supplied)"
-    , "  (and (vector? captured) (list? supplied)"
-    , "       (= (vector-length captured) (length supplied))"
-    , "       (let loop ((index 0) (remaining supplied))"
-    , "         (or (= index (vector-length captured))"
-    , "             (and (pair? remaining)"
-    , "                  (equal? (vector-ref captured index) (car remaining))"
-    , "                  (loop (+ index 1) (cdr remaining)))))))"
-    , "(define (cubical-chez-dependent-ground-literals codecs values)"
-    , "  (unless (and (cubical-chez-valid-ground-codecs? codecs)"
-    , "               (vector? values)"
-    , "               (= (vector-length codecs) (vector-length values)))"
-    , "    (cubical-chez-bridge-fail"
-    , "      \"CCZ-TYPED-BRIDGE-ENVIRONMENT\""
-    , "      \"dependent ground codec/value arity mismatch\"))"
-    , "  (let ((literals (make-vector (vector-length codecs))))"
-    , "    (let loop ((index 0))"
-    , "      (unless (= index (vector-length codecs))"
-    , "        (vector-set! literals index"
-    , "          (cubical-chez-ground-literal"
-    , "            (vector-ref codecs index) (vector-ref values index)))"
-    , "        (loop (+ index 1))))"
-    , "    literals))"
-    , "(define (cubical-chez-force-bound-dependent-ground-environment"
-    , "          bound-hole entry-codecs entry-arguments hole-type action)"
-    , "  (unless (cubical-chez-valid-bound-dependent-ground-environment?"
-    , "            bound-hole)"
-    , "    (cubical-chez-bridge-fail"
-    , "      \"CCZ-TYPED-BRIDGE-ENVIRONMENT\""
-    , "      \"invalid bound dependent ground environment\"))"
-    , "  (let ((handle (vector-ref bound-hole 1))"
-    , "        (values (vector-ref bound-hole 2)))"
-    , "    (unless (cubical-chez-dependent-ground-values-match?"
-    , "              values entry-arguments)"
-    , "      (cubical-chez-bridge-fail"
-    , "        \"CCZ-TYPED-BRIDGE-ENVIRONMENT\""
-    , "        \"captured dependent values disagree with entry arguments\"))"
-    , "    (cubical-chez-complete-bound-application"
-    , "      handle hole-type"
-    , "      (cubical-chez-apply-agda-literals"
-    , "        \"cubicalChezHole\""
-    , "        (cubical-chez-dependent-ground-literals entry-codecs values))"
-    , "      action)))"
-    , "(define (cubical-chez-apply-entry-ground-arguments entry arguments)"
-    , "  (let loop ((current entry) (remaining arguments))"
-    , "    (if (null? remaining)"
-    , "        current"
-    , "        (begin"
-    , "          (unless (procedure? current)"
-    , "            (cubical-chez-bridge-fail"
-    , "              \"CCZ-TYPED-BRIDGE-ENVIRONMENT\""
-    , "              \"entry ground argument count exceeds callable arity\"))"
-    , "          (loop (current (car remaining)) (cdr remaining))))))"
-    , "(define (cubical-chez-auto-observe-bound-ground config entry)"
-    , "  (unless (procedure? entry)"
-    , "    (cubical-chez-bridge-fail"
-    , "      \"CCZ-TYPED-BRIDGE-ENVIRONMENT\""
-    , "      \"entry is not callable with an ordered ground environment\"))"
-    , "  (let* ((id (vector-ref config 1))"
-    , "         (entry-ground (vector-ref config 2))"
-    , "         (entry-codecs (vector-ref entry-ground 0))"
-    , "         (entry-arguments (vector-ref entry-ground 1))"
-    , "         (hole-type (vector-ref config 3))"
-    , "         (action (vector-ref config 4))"
-    , "         (entry-result"
-    , "           (cubical-chez-apply-entry-ground-arguments"
-    , "             entry entry-arguments))"
-    , "         (matches"
-    , "           (cubical-chez-collect-bound-ground-environments"
-    , "             entry-result id)))"
-    , "    (unless (= (length matches) 1)"
-    , "      (cubical-chez-bridge-fail"
-    , "        \"CCZ-TYPED-BRIDGE-ENVIRONMENT\""
-    , "        \"entry result must contain exactly one selected bound hole\"))"
-    , "    (if (cubical-chez-valid-bound-dependent-ground-environment?"
-    , "          (car matches))"
-    , "        (cubical-chez-force-bound-dependent-ground-environment"
-    , "          (car matches) entry-codecs entry-arguments hole-type action)"
-    , "        (begin"
-    , "          (unless (equal? entry-codecs (vector-ref (car matches) 2))"
-    , "            (cubical-chez-bridge-fail"
-    , "              \"CCZ-TYPED-BRIDGE-ENVIRONMENT\""
-    , "              \"entry ground codec vector disagrees with checked hole domains\"))"
-    , "          (cubical-chez-force-bound-ground-environment"
-    , "            (car matches) hole-type action)))))"
-    , "(define cubical-chez-materialize-bool-hole-prefix"
-    , "  \"--materialize-bool-hole=\")"
-    , "(define cubical-chez-materialize-bool-argument-prefix"
-    , "  \"--materialize-bool-argument=\")"
-    , "(define cubical-chez-materialize-nat-hole-prefix"
-    , "  \"--materialize-nat-hole=\")"
-    , "(define cubical-chez-materialize-nat-argument-prefix"
-    , "  \"--materialize-nat-argument=\")"
-    , "(define cubical-chez-materialize-hole-type-prefix"
-    , "  \"--materialize-hole-type=\")"
-    , "(define cubical-chez-proxy-id-prefix \"--proxy-id=\")"
-    , "(define cubical-chez-derive-proxy-prefix \"--derive-proxy=\")"
-    , "(define cubical-chez-derive-proxy-consumer-prefix"
-    , "  \"--derive-proxy-consumer=\")"
-    , "(define cubical-chez-consume-proxy-prefix \"--consume-proxy=\")"
-    , "(define cubical-chez-proxy-consumer-prefix \"--proxy-consumer=\")"
-    , "(define cubical-chez-map-proxy-prefix \"--map-proxy=\")"
-    , "(define cubical-chez-map-proxy-function-prefix"
-    , "  \"--map-proxy-function=\")"
-    , "(define cubical-chez-map-proxy-result-consumer-prefix"
-    , "  \"--map-proxy-result-consumer=\")"
-    , "(define cubical-chez-drop-proxy-prefix \"--drop-proxy=\")"
-    , "(define cubical-chez-gc-proxies-argument \"--gc-proxies\")"
-    , "(define (cubical-chez-proxy-argument? argument)"
-    , "  (or"
-    , "    (cubical-chez-string-prefix?"
-    , "      cubical-chez-materialize-bool-hole-prefix argument)"
-    , "    (cubical-chez-string-prefix?"
-    , "      cubical-chez-materialize-bool-argument-prefix argument)"
-    , "    (cubical-chez-string-prefix?"
-    , "      cubical-chez-materialize-nat-hole-prefix argument)"
-    , "    (cubical-chez-string-prefix?"
-    , "      cubical-chez-materialize-nat-argument-prefix argument)"
-    , "    (cubical-chez-string-prefix?"
-    , "      cubical-chez-materialize-hole-type-prefix argument)))"
-    , "(define (cubical-chez-proxy-requested? arguments)"
-    , "  (cond"
-    , "    ((null? arguments) #f)"
-    , "    ((cubical-chez-proxy-argument? (car arguments)) #t)"
-    , "    (else (cubical-chez-proxy-requested? (cdr arguments)))))"
-    , "(define (cubical-chez-prefix-requested? prefix arguments)"
-    , "  (cond"
-    , "    ((null? arguments) #f)"
-    , "    ((cubical-chez-string-prefix? prefix (car arguments)) #t)"
-    , "    (else (cubical-chez-prefix-requested? prefix (cdr arguments)))))"
-    , "(define (cubical-chez-exactly-one-proxy-value prefix label arguments)"
-    , "  (let ((values (cubical-chez-prefixed-values prefix arguments)))"
-    , "    (unless (= (length values) 1)"
-    , "      (cubical-chez-bridge-fail"
-    , "        \"CCZ-TYPED-BRIDGE-PROXY\""
-    , "        (string-append \"proxy operation requires exactly one \" label)))"
-    , "    (when (string=? (car values) \"\")"
-    , "      (cubical-chez-bridge-fail"
-    , "        \"CCZ-TYPED-BRIDGE-PROXY\""
-    , "        (string-append \"empty \" label)))"
-    , "    (car values)))"
-    , "(define (cubical-chez-zero-or-one-proxy-value prefix label arguments)"
-    , "  (let ((values (cubical-chez-prefixed-values prefix arguments)))"
-    , "    (when (> (length values) 1)"
-    , "      (cubical-chez-bridge-fail"
-    , "        \"CCZ-TYPED-BRIDGE-PROXY\""
-    , "        (string-append \"proxy operation accepts at most one \" label)))"
-    , "    (if (null? values)"
-    , "        #f"
-    , "        (begin"
-    , "          (when (string=? (car values) \"\")"
-    , "            (cubical-chez-bridge-fail"
-    , "              \"CCZ-TYPED-BRIDGE-PROXY\""
-    , "              (string-append \"empty \" label)))"
-    , "          (car values)))))"
-    , "(define (cubical-chez-safe-proxy-id? value)"
-    , "  (and (> (string-length value) 0) (<= (string-length value) 64)"
-    , "       (let loop ((characters (string->list value)))"
-    , "         (or (null? characters)"
-    , "             (let* ((character (car characters))"
-    , "                    (code (char->integer character)))"
-    , "               (and"
-    , "                 (or (and (>= code 48) (<= code 57))"
-    , "                     (and (>= code 65) (<= code 90))"
-    , "                     (and (>= code 97) (<= code 122))"
-    , "                     (char=? character #\\_)"
-    , "                     (char=? character #\\-))"
-    , "                 (loop (cdr characters))))))))"
-    , "(define (cubical-chez-proxy-packet-name proxy-id)"
-    , "  (string-append \"typed-proxy-\" proxy-id \".bin\"))"
-    , "(define (cubical-chez-proxy-meta-name proxy-id)"
-    , "  (string-append \"typed-proxy-\" proxy-id \".meta\"))"
-    , "(define (cubical-chez-string-suffix? suffix value)"
-    , "  (let ((suffix-length (string-length suffix))"
-    , "        (value-length (string-length value)))"
-    , "    (and (>= value-length suffix-length)"
-    , "         (string=?"
-    , "           (substring value (- value-length suffix-length) value-length)"
-    , "           suffix))))"
-    , "(define (cubical-chez-proxy-file-id filename suffix)"
-    , "  (let ((prefix \"typed-proxy-\"))"
-    , "    (and (cubical-chez-string-prefix? prefix filename)"
-    , "         (cubical-chez-string-suffix? suffix filename)"
-    , "         (let ((proxy-id"
-    , "                 (substring filename (string-length prefix)"
-    , "                   (- (string-length filename)"
-    , "                      (string-length suffix)))))"
-    , "           (and (cubical-chez-safe-proxy-id? proxy-id) proxy-id)))))"
-    , "(define (cubical-chez-proxy-ids suffix)"
-    , "  (let loop ((files (directory-list cubical-chez-artifact-directory))"
-    , "             (ids '()))"
-    , "    (if (null? files)"
-    , "        (reverse ids)"
-    , "        (let ((proxy-id"
-    , "                (cubical-chez-proxy-file-id (car files) suffix)))"
-    , "          (loop (cdr files)"
-    , "                (if proxy-id (cons proxy-id ids) ids))))))"
-    , "(define cubical-chez-proxy-store-lock"
-    , "  (cubical-chez-absolute-artifact \".typed-proxy-store.lock\"))"
-    , "(define cubical-chez-proxy-store-lock-owner"
-    , "  (path-build cubical-chez-proxy-store-lock \"owner\"))"
-    , "(define cubical-chez-proxy-store-lock-delay"
-    , "  (make-time 'time-duration 10000000 0))"
-    , "(define (cubical-chez-try-create-proxy-store-lock)"
-    , "  (guard (condition (else #f))"
-    , "    (mkdir cubical-chez-proxy-store-lock #o700)"
-    , "    #t))"
-    , "(define (cubical-chez-read-proxy-store-lock-owner)"
-    , "  (and (file-exists? cubical-chez-proxy-store-lock-owner)"
-    , "       (guard (condition (else #f))"
-    , "         (call-with-input-file cubical-chez-proxy-store-lock-owner"
-    , "           (lambda (port)"
-    , "             (let* ((owner (read port)) (tail (read port)))"
-    , "               (and (integer? owner) (exact? owner) (> owner 0)"
-    , "                    (eof-object? tail) owner)))))))"
-    , "(define (cubical-chez-proxy-store-owner-alive? owner)"
-    , "  (= (system (string-append \"kill -0 \" (number->string owner)"
-    , "                            \" 2>/dev/null\"))"
-    , "     0))"
-    , "(define (cubical-chez-remove-proxy-store-lock)"
-    , "  (when (file-exists? cubical-chez-proxy-store-lock-owner)"
-    , "    (guard (condition (else #f))"
-    , "      (delete-file cubical-chez-proxy-store-lock-owner)))"
-    , "  (when (file-directory? cubical-chez-proxy-store-lock)"
-    , "    (guard (condition (else #f))"
-    , "      (delete-directory cubical-chez-proxy-store-lock))))"
-    , "(define (cubical-chez-acquire-proxy-store-lock)"
-    , "  (let loop ((attempt 0))"
-    , "    (if (cubical-chez-try-create-proxy-store-lock)"
-    , "        (guard"
-    , "          (condition"
-    , "            (else"
-    , "              (cubical-chez-remove-proxy-store-lock)"
-    , "              (cubical-chez-bridge-fail"
-    , "                \"CCZ-TYPED-BRIDGE-TRANSACTION\" \"lock owner write\")))"
-    , "          (call-with-output-file"
-    , "            cubical-chez-proxy-store-lock-owner"
-    , "            (lambda (port)"
-    , "              (write (get-process-id) port) (newline port))"
-    , "            'error))"
-    , "        (let ((owner (cubical-chez-read-proxy-store-lock-owner)))"
-    , "          (cond"
-    , "            ((and owner"
-    , "                  (not (cubical-chez-proxy-store-owner-alive? owner)))"
-    , "             (cubical-chez-remove-proxy-store-lock)"
-    , "             (loop (+ attempt 1)))"
-    , "            ((and (not owner) (>= attempt 100))"
-    , "             (cubical-chez-remove-proxy-store-lock)"
-    , "             (loop (+ attempt 1)))"
-    , "            ((>= attempt 500)"
-    , "             (cubical-chez-bridge-fail"
-    , "               \"CCZ-TYPED-BRIDGE-TRANSACTION\" \"lock timeout\"))"
-    , "            (else"
-    , "              (sleep cubical-chez-proxy-store-lock-delay)"
-    , "              (loop (+ attempt 1))))))))"
-    , "(define (cubical-chez-release-proxy-store-lock)"
-    , "  (let ((owner (cubical-chez-read-proxy-store-lock-owner)))"
-    , "    (unless (and owner (= owner (get-process-id)))"
-    , "      (cubical-chez-bridge-fail"
-    , "        \"CCZ-TYPED-BRIDGE-TRANSACTION\" \"lock ownership lost\"))"
-    , "    (cubical-chez-remove-proxy-store-lock)))"
-    , "(define (cubical-chez-with-proxy-store-lock action)"
-    , "  (cubical-chez-acquire-proxy-store-lock)"
-    , "  (dynamic-wind"
-    , "    (lambda () #t)"
-    , "    action"
-    , "    cubical-chez-release-proxy-store-lock))"
-    , "(define (cubical-chez-read-proxy-meta proxy-id)"
-    , "  (let ((path"
-    , "          (cubical-chez-absolute-artifact"
-    , "            (cubical-chez-proxy-meta-name proxy-id))))"
-    , "    (unless (file-exists? path)"
-    , "      (cubical-chez-bridge-fail"
-    , "        \"CCZ-TYPED-BRIDGE-PROXY\" \"proxy metadata does not exist\"))"
-    , "    (call-with-input-file path"
-    , "      (lambda (port)"
-    , "        (let* ((meta (read port)) (tail (read port)))"
-    , "          (unless"
-    , "            (and (eof-object? tail)"
-    , "                 (vector? meta) (= (vector-length meta) 4)"
-    , "                 (eq? (vector-ref meta 0) 'ccz-proxy-meta-v1)"
-    , "                 (string? (vector-ref meta 1))"
-    , "                 (string=? (vector-ref meta 1) proxy-id)"
-    , "                 (string? (vector-ref meta 2))"
-    , "                 (or (string=? (vector-ref meta 2) \".\")"
-    , "                     (cubical-chez-safe-proxy-id?"
-    , "                       (vector-ref meta 2)))"
-    , "                 (memq (vector-ref meta 3) '(active released)))"
-    , "            (cubical-chez-bridge-fail"
-    , "              \"CCZ-TYPED-BRIDGE-PROXY\" \"invalid proxy metadata\"))"
-    , "          meta)))))"
-    , "(define (cubical-chez-write-proxy-state proxy-id meta state)"
-    , "  (let ((path"
-    , "          (cubical-chez-absolute-artifact"
-    , "            (cubical-chez-proxy-meta-name proxy-id)))"
-    , "        (state-path"
-    , "          (string-append"
-    , "            (cubical-chez-absolute-artifact"
-    , "              (cubical-chez-proxy-meta-name proxy-id))"
-    , "            \".state\")))"
-    , "    (when (file-exists? state-path) (delete-file state-path))"
-    , "    (dynamic-wind"
-    , "      (lambda () #t)"
-    , "      (lambda ()"
-    , "        (call-with-output-file state-path"
-    , "          (lambda (port)"
-    , "            (write"
-    , "              (vector 'ccz-proxy-meta-v1 proxy-id"
-    , "                      (vector-ref meta 2) state)"
-    , "              port)"
-    , "            (newline port))"
-    , "          'error)"
-    , "        (rename-file state-path path))"
-    , "      (lambda ()"
-    , "        (when (file-exists? state-path)"
-    , "          (delete-file state-path))))))"
-    , "(define (cubical-chez-proxy-pair-exists? proxy-id)"
-    , "  (and"
-    , "    (file-exists?"
-    , "      (cubical-chez-absolute-artifact"
-    , "        (cubical-chez-proxy-packet-name proxy-id)))"
-    , "    (file-exists?"
-    , "      (cubical-chez-absolute-artifact"
-    , "        (cubical-chez-proxy-meta-name proxy-id)))))"
-    , "(define (cubical-chez-proxy-children proxy-id)"
-    , "  (let loop ((ids (cubical-chez-proxy-ids \".meta\"))"
-    , "             (children '()))"
-    , "    (if (null? ids)"
-    , "        (reverse children)"
-    , "        (let ((meta (cubical-chez-read-proxy-meta (car ids))))"
-    , "          (loop (cdr ids)"
-    , "            (if (string=? (vector-ref meta 2) proxy-id)"
-    , "                (cons (car ids) children)"
-    , "                children))))))"
-    , "(define (cubical-chez-delete-proxy-pair proxy-id)"
-    , "  (let ((packet"
-    , "          (cubical-chez-absolute-artifact"
-    , "            (cubical-chez-proxy-packet-name proxy-id)))"
-    , "        (meta"
-    , "          (cubical-chez-absolute-artifact"
-    , "            (cubical-chez-proxy-meta-name proxy-id))))"
-    , "    (when (file-exists? packet) (delete-file packet))"
-    , "    (when (file-exists? meta) (delete-file meta))))"
-    , "(define (cubical-chez-gc-proxy-pass)"
-    , "  (let ((removed 0))"
-    , "    (for-each"
-    , "      (lambda (filename)"
-    , "        (when"
-    , "          (and (cubical-chez-string-prefix? \"typed-proxy-\" filename)"
-    , "               (cubical-chez-string-suffix? \".meta.state\" filename))"
-    , "          (delete-file"
-    , "            (cubical-chez-absolute-artifact filename))"
-    , "          (set! removed (+ removed 1))))"
-    , "      (directory-list cubical-chez-artifact-directory))"
-    , "    (for-each"
-    , "      (lambda (proxy-id)"
-    , "        (unless"
-    , "          (file-exists?"
-    , "            (cubical-chez-absolute-artifact"
-    , "              (cubical-chez-proxy-meta-name proxy-id)))"
-    , "          (delete-file"
-    , "            (cubical-chez-absolute-artifact"
-    , "              (cubical-chez-proxy-packet-name proxy-id)))"
-    , "          (set! removed (+ removed 1))))"
-    , "      (cubical-chez-proxy-ids \".bin\"))"
-    , "    (for-each"
-    , "      (lambda (proxy-id)"
-    , "        (let ((meta-path"
-    , "                (cubical-chez-absolute-artifact"
-    , "                  (cubical-chez-proxy-meta-name proxy-id)))"
-    , "              (packet-path"
-    , "                (cubical-chez-absolute-artifact"
-    , "                  (cubical-chez-proxy-packet-name proxy-id))))"
-    , "          (when (file-exists? meta-path)"
-    , "            (if (not (file-exists? packet-path))"
-    , "                (begin (delete-file meta-path)"
-    , "                       (set! removed (+ removed 1)))"
-    , "                (let* ((meta (cubical-chez-read-proxy-meta proxy-id))"
-    , "                       (parent (vector-ref meta 2))"
-    , "                       (released?"
-    , "                         (eq? (vector-ref meta 3) 'released))"
-    , "                       (orphan?"
-    , "                         (and (not (string=? parent \".\"))"
-    , "                              (not"
-    , "                                (cubical-chez-proxy-pair-exists?"
-    , "                                  parent)))))"
-    , "                  (when"
-    , "                    (or orphan?"
-    , "                        (and released?"
-    , "                             (null?"
-    , "                               (cubical-chez-proxy-children proxy-id))))"
-    , "                    (cubical-chez-delete-proxy-pair proxy-id)"
-    , "                    (set! removed (+ removed 1))))))))"
-    , "      (cubical-chez-proxy-ids \".meta\"))"
-    , "    removed))"
-    , "(define (cubical-chez-gc-proxies-unlocked)"
-    , "  (let loop ((total 0))"
-    , "    (let ((removed (cubical-chez-gc-proxy-pass)))"
-    , "      (if (= removed 0)"
-    , "          total"
-    , "          (loop (+ total removed))))))"
-    , "(define (cubical-chez-gc-proxies)"
-    , "  (cubical-chez-with-proxy-store-lock"
-    , "    cubical-chez-gc-proxies-unlocked))"
-    , "(define (cubical-chez-materialize-mode arguments)"
-    , "  (let ((bool-holes"
-    , "          (cubical-chez-prefixed-values"
-    , "            cubical-chez-materialize-bool-hole-prefix arguments))"
-    , "        (bool-arguments"
-    , "          (cubical-chez-prefixed-values"
-    , "            cubical-chez-materialize-bool-argument-prefix arguments))"
-    , "        (nat-holes"
-    , "          (cubical-chez-prefixed-values"
-    , "            cubical-chez-materialize-nat-hole-prefix arguments))"
-    , "        (nat-arguments"
-    , "          (cubical-chez-prefixed-values"
-    , "            cubical-chez-materialize-nat-argument-prefix arguments)))"
-    , "    (cond"
-    , "      ((and (= (length bool-holes) 1)"
-    , "            (= (length bool-arguments) 1)"
-    , "            (null? nat-holes) (null? nat-arguments))"
-    , "       \"bool\")"
-    , "      ((and (= (length nat-holes) 1)"
-    , "            (= (length nat-arguments) 1)"
-    , "            (null? bool-holes) (null? bool-arguments))"
-    , "       \"nat\")"
-    , "      (else"
-    , "        (cubical-chez-bridge-fail"
-    , "          \"CCZ-TYPED-BRIDGE-PROXY\""
-    , "          \"select exactly one matching Bool or Nat proxy codec\")))))"
-    , "(define (cubical-chez-materialize-application-proxy"
-    , "          handle hole-type application proxy-id)"
-    , "  (cubical-chez-gc-proxies)"
-    , "  (unless (and (cubical-chez-valid-typed-hole-handle? handle)"
-    , "               (cubical-chez-safe-qname? hole-type)"
-    , "               (string? application)"
-    , "               (cubical-chez-safe-proxy-id? proxy-id))"
-    , "    (cubical-chez-bridge-fail"
-    , "      \"CCZ-TYPED-BRIDGE-PROXY\""
-    , "      \"invalid bound application proxy configuration\"))"
-    , "  (let* ((packet-name (cubical-chez-proxy-packet-name proxy-id))"
-    , "         (packet-path (cubical-chez-absolute-artifact packet-name))"
-    , "         (meta-name (cubical-chez-proxy-meta-name proxy-id))"
-    , "         (meta-path (cubical-chez-absolute-artifact meta-name)))"
-    , "    (when (or (file-exists? packet-path) (file-exists? meta-path))"
-    , "      (cubical-chez-bridge-fail"
-    , "        \"CCZ-TYPED-BRIDGE-PROXY\" \"proxy ID already exists\"))"
-    , "    (putenv \"CUBICAL_CHEZ_TYPED_MODE\" \"materialize-proxy\")"
-    , "    (putenv \"CUBICAL_CHEZ_TYPED_PROXY_ID\" proxy-id)"
-    , "    (putenv \"CUBICAL_CHEZ_TYPED_PROXY_PACKET_NAME\" packet-name)"
-    , "    (putenv \"CUBICAL_CHEZ_TYPED_RESULT_PACKET\" packet-path)"
-    , "    (putenv \"CUBICAL_CHEZ_TYPED_PROXY_META_NAME\" meta-name)"
-    , "    (putenv \"CUBICAL_CHEZ_TYPED_RESULT_META\" meta-path)"
-    , "    (putenv \"CUBICAL_CHEZ_TYPED_PROXY_PARENT_ID\" \".\")"
-    , "    (putenv \"CUBICAL_CHEZ_TYPED_PROXY_STORE_DIR\""
-    , "            cubical-chez-artifact-directory)"
-    , "    (putenv"
-    , "      \"CUBICAL_CHEZ_TYPED_CONSUMER\""
-    , "      (string-append"
-    , "        \"(Œª (cubicalChezHole : \" hole-type \") ‚Üí \" application \")\"))"
-    , "    (let ((proxy (cubical-chez-force-typed-hole handle)))"
-    , "      (unless"
-    , "        (and (vector? proxy) (= (vector-length proxy) 3)"
-    , "             (eq? (vector-ref proxy 0)"
-    , "                  'cubical-chez-typed-value-proxy-v1)"
-    , "             (string=? (vector-ref proxy 1) proxy-id)"
-    , "             (string=? (vector-ref proxy 2) packet-name)"
-    , "             (cubical-chez-proxy-pair-exists? proxy-id)"
-    , "             (eq? (vector-ref"
-    , "                    (cubical-chez-read-proxy-meta proxy-id) 3)"
-    , "                  'active))"
-    , "        (cubical-chez-bridge-fail"
-    , "          \"CCZ-TYPED-BRIDGE-PROTOCOL\""
-    , "          \"bound application proxy identity mismatch\"))"
-    , "      proxy)))"
-    , "(define (cubical-chez-materialize-ground-proxy config)"
-    , "  (cubical-chez-gc-proxies)"
-    , "  (let* ((codec (vector-ref config 0))"
-    , "         (id (vector-ref config 1))"
-    , "         (argument (vector-ref config 2))"
-    , "         (hole-type (vector-ref config 3))"
-    , "         (proxy-id (vector-ref config 4))"
-    , "         (entry (assoc id cubical-chez-typed-holes)))"
-    , "    (unless entry"
-    , "      (cubical-chez-bridge-fail"
-    , "        \"CCZ-TYPED-BRIDGE-PROXY\""
-    , "        (string-append \"unknown proxy source hole: \" id)))"
-    , "    (unless (cubical-chez-safe-proxy-id? proxy-id)"
-    , "      (cubical-chez-bridge-fail"
-    , "        \"CCZ-TYPED-BRIDGE-PROXY\" \"invalid proxy ID\"))"
-    , "    (let* ((handle (cdr entry))"
-    , "           (packet-name (cubical-chez-proxy-packet-name proxy-id))"
-    , "           (packet-path (cubical-chez-absolute-artifact packet-name)))"
-    , "      (unless"
-    , "        (and (cubical-chez-valid-typed-hole-handle? handle)"
-    , "             (string=? (vector-ref handle 3)"
-    , "               (string-append codec"
-    , "                 \"-unary-ground-elimination-v1\")))"
-    , "        (cubical-chez-bridge-fail"
-    , "          \"CCZ-TYPED-BRIDGE-PROXY\""
-    , "          \"source hole does not support the proxy argument codec\"))"
-    , "      (unless"
-    , "        (if (string=? codec \"bool\")"
-    , "            (or (string=? argument \"true\")"
-    , "                (string=? argument \"false\"))"
-    , "            (cubical-chez-valid-nat-argument? argument))"
-    , "        (cubical-chez-bridge-fail"
-    , "          \"CCZ-TYPED-BRIDGE-PROXY\""
-    , "          (string-append \"invalid \" codec \" proxy argument\")))"
-    , "      (unless (cubical-chez-safe-qname? hole-type)"
-    , "        (cubical-chez-bridge-fail"
-    , "          \"CCZ-TYPED-BRIDGE-PROXY\" \"proxy type must be a safe QName\"))"
-    , "      (when (or (file-exists? packet-path)"
-    , "                (file-exists?"
-    , "                  (cubical-chez-absolute-artifact"
-    , "                    (cubical-chez-proxy-meta-name proxy-id))))"
-    , "        (cubical-chez-bridge-fail"
-    , "          \"CCZ-TYPED-BRIDGE-PROXY\" \"proxy ID already exists\"))"
-    , "      (putenv \"CUBICAL_CHEZ_TYPED_MODE\" \"materialize-proxy\")"
-    , "      (putenv \"CUBICAL_CHEZ_TYPED_PROXY_ID\" proxy-id)"
-    , "      (putenv \"CUBICAL_CHEZ_TYPED_PROXY_PACKET_NAME\" packet-name)"
-    , "      (putenv \"CUBICAL_CHEZ_TYPED_RESULT_PACKET\" packet-path)"
-    , "      (putenv \"CUBICAL_CHEZ_TYPED_PROXY_META_NAME\""
-    , "              (cubical-chez-proxy-meta-name proxy-id))"
-    , "      (putenv \"CUBICAL_CHEZ_TYPED_RESULT_META\""
-    , "              (cubical-chez-absolute-artifact"
-    , "                (cubical-chez-proxy-meta-name proxy-id)))"
-    , "      (putenv \"CUBICAL_CHEZ_TYPED_PROXY_PARENT_ID\" \".\")"
-    , "      (putenv \"CUBICAL_CHEZ_TYPED_PROXY_STORE_DIR\""
-    , "              cubical-chez-artifact-directory)"
-    , "      (putenv"
-    , "        \"CUBICAL_CHEZ_TYPED_CONSUMER\""
-    , "        (string-append"
-    , "          \"(Œª (cubicalChezHole : \" hole-type \" ) ‚Üí cubicalChezHole \""
-    , "          (if (string=? codec \"bool\")"
-    , "              (string-append \"Agda.Builtin.Bool.\" argument)"
-    , "              argument)"
-    , "          \")\"))"
-    , "      (let ((proxy (cubical-chez-force-typed-hole handle)))"
-    , "        (unless"
-    , "          (and (vector? proxy) (= (vector-length proxy) 3)"
-    , "               (eq? (vector-ref proxy 0)"
-    , "                    'cubical-chez-typed-value-proxy-v1)"
-    , "               (string=? (vector-ref proxy 1) proxy-id)"
-    , "               (string=? (vector-ref proxy 2) packet-name)"
-    , "               (cubical-chez-proxy-pair-exists? proxy-id)"
-    , "               (eq? (vector-ref"
-    , "                      (cubical-chez-read-proxy-meta proxy-id) 3)"
-    , "                    'active))"
-    , "          (cubical-chez-bridge-fail"
-    , "            \"CCZ-TYPED-BRIDGE-PROTOCOL\""
-    , "            \"materialized proxy identity mismatch\"))"
-    , "        proxy))))"
-    , "(define (cubical-chez-derive-proxy config)"
-    , "  (cubical-chez-gc-proxies)"
-    , "  (let* ((source-id (vector-ref config 0))"
-    , "         (consumer (vector-ref config 1))"
-    , "         (proxy-id (vector-ref config 2)))"
-    , "    (unless"
-    , "      (and (cubical-chez-safe-proxy-id? source-id)"
-    , "           (cubical-chez-safe-proxy-id? proxy-id)"
-    , "           (not (string=? source-id proxy-id))"
-    , "           (cubical-chez-safe-qname? consumer))"
-    , "      (cubical-chez-bridge-fail"
-    , "        \"CCZ-TYPED-BRIDGE-PROXY\""
-    , "        \"invalid derived proxy source, target, or consumer\"))"
-    , "    (unless (cubical-chez-proxy-pair-exists? source-id)"
-    , "      (cubical-chez-bridge-fail"
-    , "        \"CCZ-TYPED-BRIDGE-PROXY\" \"source proxy does not exist\"))"
-    , "    (let* ((source-meta (cubical-chez-read-proxy-meta source-id))"
-    , "           (packet-name (cubical-chez-proxy-packet-name proxy-id))"
-    , "           (packet-path (cubical-chez-absolute-artifact packet-name))"
-    , "           (meta-name (cubical-chez-proxy-meta-name proxy-id))"
-    , "           (meta-path (cubical-chez-absolute-artifact meta-name)))"
-    , "      (unless (eq? (vector-ref source-meta 3) 'active)"
-    , "        (cubical-chez-bridge-fail"
-    , "          \"CCZ-TYPED-BRIDGE-PROXY\" \"source proxy is released\"))"
-    , "      (when (or (file-exists? packet-path) (file-exists? meta-path))"
-    , "        (cubical-chez-bridge-fail"
-    , "          \"CCZ-TYPED-BRIDGE-PROXY\" \"derived proxy ID already exists\"))"
-    , "      (putenv \"CUBICAL_CHEZ_TYPED_MODE\" \"materialize-proxy\")"
-    , "      (putenv \"CUBICAL_CHEZ_TYPED_PROXY_ID\" proxy-id)"
-    , "      (putenv \"CUBICAL_CHEZ_TYPED_PROXY_PACKET_NAME\" packet-name)"
-    , "      (putenv \"CUBICAL_CHEZ_TYPED_RESULT_PACKET\" packet-path)"
-    , "      (putenv \"CUBICAL_CHEZ_TYPED_PROXY_META_NAME\" meta-name)"
-    , "      (putenv \"CUBICAL_CHEZ_TYPED_RESULT_META\" meta-path)"
-    , "      (putenv \"CUBICAL_CHEZ_TYPED_PROXY_PARENT_ID\" source-id)"
-    , "      (putenv \"CUBICAL_CHEZ_TYPED_PROXY_STORE_DIR\""
-    , "              cubical-chez-artifact-directory)"
-    , "      (putenv \"CUBICAL_CHEZ_TYPED_CONSUMER\" consumer)"
-    , "      (let ((proxy"
-    , "              (cubical-chez-force-typed-hole"
-    , "                (vector 'cubical-chez-typed-hole-import-v1"
-    , "                        source-id"
-    , "                        (cubical-chez-proxy-packet-name source-id)"
-    , "                        \"none\"))))"
-    , "        (unless"
-    , "          (and (vector? proxy) (= (vector-length proxy) 3)"
-    , "               (eq? (vector-ref proxy 0)"
-    , "                    'cubical-chez-typed-value-proxy-v1)"
-    , "               (string=? (vector-ref proxy 1) proxy-id)"
-    , "               (string=? (vector-ref proxy 2) packet-name)"
-    , "               (cubical-chez-proxy-pair-exists? proxy-id)"
-    , "               (let ((meta"
-    , "                       (cubical-chez-read-proxy-meta proxy-id)))"
-    , "                 (and (string=? (vector-ref meta 2) source-id)"
-    , "                      (eq? (vector-ref meta 3) 'active))))"
-    , "          (cubical-chez-bridge-fail"
-    , "            \"CCZ-TYPED-BRIDGE-PROTOCOL\""
-    , "            \"derived proxy identity mismatch\"))"
-    , "        proxy))))"
-    , "(define (cubical-chez-consume-proxy config)"
-    , "  (let ((proxy-id (vector-ref config 0))"
-    , "        (consumer (vector-ref config 1)))"
-    , "    (unless (and (cubical-chez-safe-proxy-id? proxy-id)"
-    , "                 (cubical-chez-safe-qname? consumer))"
-    , "      (cubical-chez-bridge-fail"
-    , "        \"CCZ-TYPED-BRIDGE-PROXY\" \"invalid proxy ID or consumer QName\"))"
-    , "    (cubical-chez-with-proxy-store-lock"
-    , "      (lambda ()"
-    , "        (cubical-chez-gc-proxies-unlocked)"
-    , "        (let* ((packet-name (cubical-chez-proxy-packet-name proxy-id))"
-    , "               (packet-path"
-    , "                 (cubical-chez-absolute-artifact packet-name)))"
-    , "          (unless (file-exists? packet-path)"
-    , "            (cubical-chez-bridge-fail"
-    , "              \"CCZ-TYPED-BRIDGE-PROXY\""
-    , "              \"proxy packet does not exist\"))"
-    , "          (unless"
-    , "            (eq?"
-    , "              (vector-ref (cubical-chez-read-proxy-meta proxy-id) 3)"
-    , "              'active)"
-    , "            (cubical-chez-bridge-fail"
-    , "              \"CCZ-TYPED-BRIDGE-PROXY\" \"proxy is released\"))"
-    , "          (putenv \"CUBICAL_CHEZ_TYPED_MODE\" \"ground\")"
-    , "          (putenv \"CUBICAL_CHEZ_TYPED_CONSUMER\" consumer)"
-    , "          (cubical-chez-force-typed-hole"
-    , "            (vector 'cubical-chez-typed-hole-import-v1"
-    , "                    proxy-id packet-name \"none\")))))))"
-    , "(define (cubical-chez-map-proxy config)"
-    , "  (let* ((source-id (vector-ref config 0))"
-    , "         (mapper (vector-ref config 1))"
-    , "         (target-id (vector-ref config 2))"
-    , "         (result-consumer (vector-ref config 3)))"
-    , "    (unless (and (cubical-chez-safe-proxy-id? source-id)"
-    , "                 (cubical-chez-safe-qname? mapper))"
-    , "      (cubical-chez-bridge-fail"
-    , "        \"CCZ-TYPED-BRIDGE-PROXY\""
-    , "        \"invalid map source proxy ID or function QName\"))"
-    , "    (unless (not (eq? (if target-id #t #f)"
-    , "                         (if result-consumer #t #f)))"
-    , "      (cubical-chez-bridge-fail"
-    , "        \"CCZ-TYPED-BRIDGE-PROXY\""
-    , "        \"map requires exactly one target proxy or result consumer\"))"
-    , "    (when target-id"
-    , "      (unless (and (cubical-chez-safe-proxy-id? target-id)"
-    , "                   (not (string=? source-id target-id)))"
-    , "        (cubical-chez-bridge-fail"
-    , "          \"CCZ-TYPED-BRIDGE-PROXY\""
-    , "          \"invalid map target proxy ID\")))"
-    , "    (when result-consumer"
-    , "      (unless (cubical-chez-safe-qname? result-consumer)"
-    , "        (cubical-chez-bridge-fail"
-    , "          \"CCZ-TYPED-BRIDGE-PROXY\""
-    , "          \"invalid map result consumer QName\")))"
-    , "    (if target-id"
-    , "        (cubical-chez-derive-proxy"
-    , "          (vector source-id mapper target-id))"
-    , "        (cubical-chez-with-proxy-store-lock"
-    , "          (lambda ()"
-    , "            (cubical-chez-gc-proxies-unlocked)"
-    , "            (unless (cubical-chez-proxy-pair-exists? source-id)"
-    , "              (cubical-chez-bridge-fail"
-    , "                \"CCZ-TYPED-BRIDGE-PROXY\""
-    , "                \"map source proxy does not exist\"))"
-    , "            (unless"
-    , "              (eq?"
-    , "                (vector-ref"
-    , "                  (cubical-chez-read-proxy-meta source-id) 3)"
-    , "                'active)"
-    , "              (cubical-chez-bridge-fail"
-    , "                \"CCZ-TYPED-BRIDGE-PROXY\""
-    , "                \"map source proxy is released\"))"
-    , "            (putenv \"CUBICAL_CHEZ_TYPED_MODE\" \"map-ground\")"
-    , "            (putenv \"CUBICAL_CHEZ_TYPED_MAPPER\" mapper)"
-    , "            (putenv"
-    , "              \"CUBICAL_CHEZ_TYPED_CONSUMER\" result-consumer)"
-    , "            (cubical-chez-force-typed-hole"
-    , "              (vector 'cubical-chez-typed-hole-import-v1"
-    , "                      source-id"
-    , "                      (cubical-chez-proxy-packet-name source-id)"
-    , "                      \"none\")))))))"
-    , "(define (cubical-chez-drop-proxy proxy-id)"
-    , "  (unless (cubical-chez-safe-proxy-id? proxy-id)"
-    , "    (cubical-chez-bridge-fail"
-    , "      \"CCZ-TYPED-BRIDGE-PROXY\" \"invalid proxy ID\"))"
-    , "  (cubical-chez-with-proxy-store-lock"
-    , "    (lambda ()"
-    , "      (cubical-chez-gc-proxies-unlocked)"
-    , "      (let* ((packet-name (cubical-chez-proxy-packet-name proxy-id))"
-    , "             (packet-path"
-    , "               (cubical-chez-absolute-artifact packet-name)))"
-    , "        (unless (cubical-chez-proxy-pair-exists? proxy-id)"
-    , "          (cubical-chez-bridge-fail"
-    , "            \"CCZ-TYPED-BRIDGE-PROXY\""
-    , "            \"proxy packet does not exist\"))"
-    , "        (let ((meta (cubical-chez-read-proxy-meta proxy-id)))"
-    , "          (when (eq? (vector-ref meta 3) 'active)"
-    , "            (cubical-chez-write-proxy-state"
-    , "              proxy-id meta 'released)))"
-    , "        (cubical-chez-gc-proxies-unlocked)"
-    , "        (if (cubical-chez-proxy-pair-exists? proxy-id)"
-    , "            (vector"
-    , "              'cubical-chez-typed-value-proxy-retained-v1 proxy-id)"
-    , "            (vector"
-    , "              'cubical-chez-typed-value-proxy-dropped-v1 proxy-id))))))"
-    , "(define cubical-chez-shell-arguments (command-line-arguments))"
-    , "(define cubical-chez-selected-typed-hole"
-    , "  (cubical-chez-select-typed-hole cubical-chez-shell-arguments))"
-    , "(define cubical-chez-observe-all?"
-    , "  (member \"--observe-all-ground\" cubical-chez-shell-arguments))"
-    , "(define cubical-chez-hole-consumers"
-    , "  (cubical-chez-requested-hole-consumers cubical-chez-shell-arguments))"
-    , "(define cubical-chez-call-requested"
-    , "  (cubical-chez-call-requested? cubical-chez-shell-arguments))"
-    , "(define cubical-chez-call-config"
-    , "  (if cubical-chez-call-requested"
-    , "      (let ((mode"
-    , "              (cubical-chez-call-mode"
-    , "                cubical-chez-shell-arguments)))"
-    , "        (vector"
-    , "          mode"
-    , "          (cubical-chez-exactly-one-call-value"
-    , "            (cond"
-    , "              ((string=? mode \"bool\")"
-    , "               cubical-chez-call-bool-hole-prefix)"
-    , "              ((string=? mode \"nat\")"
-    , "               cubical-chez-call-nat-hole-prefix)"
-    , "              ((string=? mode \"word64\")"
-    , "               cubical-chez-call-word64-hole-prefix)"
-    , "              ((string=? mode \"char\")"
-    , "               cubical-chez-call-char-hole-prefix)"
-    , "              ((string=? mode \"int\")"
-    , "               cubical-chez-call-int-hole-prefix)"
-    , "              (else cubical-chez-call-ground-hole-prefix))"
-    , "            \"callable hole ID\" cubical-chez-shell-arguments)"
-    , "          (if (string=? mode \"ground\")"
-    , "              (cubical-chez-call-ground-arguments"
-    , "                cubical-chez-shell-arguments)"
-    , "              (cubical-chez-exactly-one-call-value"
-    , "                (cond"
-    , "                  ((string=? mode \"bool\")"
-    , "                   cubical-chez-call-bool-argument-prefix)"
-    , "                  ((string=? mode \"nat\")"
-    , "                   cubical-chez-call-nat-argument-prefix)"
-    , "                  ((string=? mode \"word64\")"
-    , "                   cubical-chez-call-word64-argument-prefix)"
-    , "                  ((string=? mode \"char\")"
-    , "                   cubical-chez-call-char-argument-prefix)"
-    , "                  (else cubical-chez-call-int-argument-prefix))"
-    , "                \"ground argument\" cubical-chez-shell-arguments))"
-    , "          (cubical-chez-exactly-one-call-value"
-    , "            cubical-chez-call-hole-type-prefix \"hole type QName\""
-    , "            cubical-chez-shell-arguments)"
-    , "          (cubical-chez-call-action"
-    , "            cubical-chez-shell-arguments)))"
-    , "      #f))"
-    , "(define cubical-chez-auto-bind-requested"
-    , "  (cubical-chez-auto-bind-requested?"
-    , "    cubical-chez-shell-arguments))"
-    , "(define cubical-chez-auto-bind-config"
-    , "  (if cubical-chez-auto-bind-requested"
-    , "      (let ((mode"
-    , "              (cubical-chez-auto-bind-mode"
-    , "                cubical-chez-shell-arguments)))"
-    , "        (vector"
-    , "          mode"
-    , "          (cubical-chez-exactly-one-auto-bind-value"
-    , "            (cond"
-    , "              ((string=? mode \"bool\")"
-    , "               cubical-chez-auto-bind-bool-hole-prefix)"
-    , "              ((string=? mode \"nat\")"
-    , "               cubical-chez-auto-bind-nat-hole-prefix)"
-    , "              ((string=? mode \"word64\")"
-    , "               cubical-chez-auto-bind-word64-hole-prefix)"
-    , "              ((string=? mode \"char\")"
-    , "               cubical-chez-auto-bind-char-hole-prefix)"
-    , "              ((string=? mode \"int\")"
-    , "               cubical-chez-auto-bind-int-hole-prefix)"
-    , "              (else cubical-chez-auto-bind-ground-hole-prefix))"
-    , "            \"auto-bound hole ID\" cubical-chez-shell-arguments)"
-    , "          (if (string=? mode \"ordered-ground\")"
-    , "              (cubical-chez-entry-ground-values"
-    , "                cubical-chez-shell-arguments)"
-    , "              (cubical-chez-exactly-one-auto-bind-value"
-    , "                (cond"
-    , "                  ((string=? mode \"bool\")"
-    , "                   cubical-chez-entry-bool-argument-prefix)"
-    , "                  ((string=? mode \"nat\")"
-    , "                   cubical-chez-entry-nat-argument-prefix)"
-    , "                  ((string=? mode \"word64\")"
-    , "                   cubical-chez-entry-word64-argument-prefix)"
-    , "                  ((string=? mode \"char\")"
-    , "                   cubical-chez-entry-char-argument-prefix)"
-    , "                  (else cubical-chez-entry-int-argument-prefix))"
-    , "                \"entry ground argument\""
-    , "                cubical-chez-shell-arguments))"
-    , "          (cubical-chez-exactly-one-auto-bind-value"
-    , "            cubical-chez-auto-bind-hole-type-prefix"
-    , "            \"auto-bound hole type QName\" cubical-chez-shell-arguments)"
-    , "          (cubical-chez-auto-bind-action"
-    , "            cubical-chez-shell-arguments)))"
-    , "      #f))"
-    , "(define cubical-chez-proxy-requested"
-    , "  (cubical-chez-proxy-requested? cubical-chez-shell-arguments))"
-    , "(define cubical-chez-proxy-config"
-    , "  (if cubical-chez-proxy-requested"
-    , "      (let ((mode"
-    , "              (cubical-chez-materialize-mode"
-    , "                cubical-chez-shell-arguments)))"
-    , "        (vector"
-    , "          mode"
-    , "          (cubical-chez-exactly-one-proxy-value"
-    , "            (if (string=? mode \"bool\")"
-    , "                cubical-chez-materialize-bool-hole-prefix"
-    , "                cubical-chez-materialize-nat-hole-prefix)"
-    , "            \"source hole ID\" cubical-chez-shell-arguments)"
-    , "          (cubical-chez-exactly-one-proxy-value"
-    , "            (if (string=? mode \"bool\")"
-    , "                cubical-chez-materialize-bool-argument-prefix"
-    , "                cubical-chez-materialize-nat-argument-prefix)"
-    , "            \"ground argument\" cubical-chez-shell-arguments)"
-    , "          (cubical-chez-exactly-one-proxy-value"
-    , "            cubical-chez-materialize-hole-type-prefix"
-    , "            \"hole type QName\" cubical-chez-shell-arguments)"
-    , "          (cubical-chez-exactly-one-proxy-value"
-    , "            cubical-chez-proxy-id-prefix"
-    , "            \"proxy ID\" cubical-chez-shell-arguments)))"
-    , "      #f))"
-    , "(define cubical-chez-consume-proxy-requested"
-    , "  (or"
-    , "    (cubical-chez-prefix-requested?"
-    , "      cubical-chez-consume-proxy-prefix cubical-chez-shell-arguments)"
-    , "    (cubical-chez-prefix-requested?"
-    , "      cubical-chez-proxy-consumer-prefix cubical-chez-shell-arguments)))"
-    , "(define cubical-chez-consume-proxy-config"
-    , "  (if cubical-chez-consume-proxy-requested"
-    , "      (vector"
-    , "        (cubical-chez-exactly-one-proxy-value"
-    , "          cubical-chez-consume-proxy-prefix"
-    , "          \"proxy ID\" cubical-chez-shell-arguments)"
-    , "        (cubical-chez-exactly-one-proxy-value"
-    , "          cubical-chez-proxy-consumer-prefix"
-    , "          \"proxy consumer QName\" cubical-chez-shell-arguments))"
-    , "      #f))"
-    , "(define cubical-chez-map-proxy-requested"
-    , "  (or"
-    , "    (cubical-chez-prefix-requested?"
-    , "      cubical-chez-map-proxy-prefix cubical-chez-shell-arguments)"
-    , "    (cubical-chez-prefix-requested?"
-    , "      cubical-chez-map-proxy-function-prefix"
-    , "      cubical-chez-shell-arguments)"
-    , "    (cubical-chez-prefix-requested?"
-    , "      cubical-chez-map-proxy-result-consumer-prefix"
-    , "      cubical-chez-shell-arguments)))"
-    , "(define cubical-chez-map-proxy-config"
-    , "  (if cubical-chez-map-proxy-requested"
-    , "      (vector"
-    , "        (cubical-chez-exactly-one-proxy-value"
-    , "          cubical-chez-map-proxy-prefix"
-    , "          \"map source proxy ID\" cubical-chez-shell-arguments)"
-    , "        (cubical-chez-exactly-one-proxy-value"
-    , "          cubical-chez-map-proxy-function-prefix"
-    , "          \"map function QName\" cubical-chez-shell-arguments)"
-    , "        (cubical-chez-zero-or-one-proxy-value"
-    , "          cubical-chez-proxy-id-prefix"
-    , "          \"map target proxy ID\" cubical-chez-shell-arguments)"
-    , "        (cubical-chez-zero-or-one-proxy-value"
-    , "          cubical-chez-map-proxy-result-consumer-prefix"
-    , "          \"map result consumer QName\" cubical-chez-shell-arguments))"
-    , "      #f))"
-    , "(define cubical-chez-drop-proxy-requested"
-    , "  (cubical-chez-prefix-requested?"
-    , "    cubical-chez-drop-proxy-prefix cubical-chez-shell-arguments))"
-    , "(define cubical-chez-drop-proxy-id"
-    , "  (if cubical-chez-drop-proxy-requested"
-    , "      (cubical-chez-exactly-one-proxy-value"
-    , "        cubical-chez-drop-proxy-prefix"
-    , "        \"proxy ID\" cubical-chez-shell-arguments)"
-    , "      #f))"
-    , "(define cubical-chez-derive-proxy-requested"
-    , "  (or"
-    , "    (cubical-chez-prefix-requested?"
-    , "      cubical-chez-derive-proxy-prefix cubical-chez-shell-arguments)"
-    , "    (cubical-chez-prefix-requested?"
-    , "      cubical-chez-derive-proxy-consumer-prefix"
-    , "      cubical-chez-shell-arguments)))"
-    , "(define cubical-chez-derive-proxy-config"
-    , "  (if cubical-chez-derive-proxy-requested"
-    , "      (vector"
-    , "        (cubical-chez-exactly-one-proxy-value"
-    , "          cubical-chez-derive-proxy-prefix"
-    , "          \"source proxy ID\" cubical-chez-shell-arguments)"
-    , "        (cubical-chez-exactly-one-proxy-value"
-    , "          cubical-chez-derive-proxy-consumer-prefix"
-    , "          \"derived proxy consumer QName\""
-    , "          cubical-chez-shell-arguments)"
-    , "        (cubical-chez-exactly-one-proxy-value"
-    , "          cubical-chez-proxy-id-prefix"
-    , "          \"target proxy ID\" cubical-chez-shell-arguments))"
-    , "      #f))"
-    , "(define cubical-chez-gc-proxies-count"
-    , "  (length"
-    , "    (filter"
-    , "      (lambda (argument)"
-    , "        (string=? argument cubical-chez-gc-proxies-argument))"
-    , "      cubical-chez-shell-arguments)))"
-    , "(when (> cubical-chez-gc-proxies-count 1)"
-    , "  (cubical-chez-bridge-fail"
-    , "    \"CCZ-TYPED-BRIDGE-PROXY\" \"duplicate proxy GC argument\"))"
-    , "(define cubical-chez-gc-proxies-requested"
-    , "  (= cubical-chez-gc-proxies-count 1))"
-    , "(define cubical-chez-proxy-operation-count"
-    , "  (+ (if cubical-chez-proxy-requested 1 0)"
-    , "     (if cubical-chez-derive-proxy-requested 1 0)"
-    , "     (if cubical-chez-consume-proxy-requested 1 0)"
-    , "     (if cubical-chez-map-proxy-requested 1 0)"
-    , "     (if cubical-chez-drop-proxy-requested 1 0)"
-    , "     (if cubical-chez-gc-proxies-requested 1 0)))"
-    , "(when (and cubical-chez-auto-bind-requested"
-    , "           (or cubical-chez-call-requested"
-    , "               (> cubical-chez-proxy-operation-count 0)"
-    , "               cubical-chez-observe-all?"
-    , "               cubical-chez-selected-typed-hole"
-    , "               (pair? cubical-chez-hole-consumers)))"
-    , "  (cubical-chez-bridge-fail"
-    , "    \"CCZ-TYPED-BRIDGE-ENVIRONMENT\""
-    , "    \"automatic environment binding conflicts with another execution mode\"))"
-    , "(when (or (> cubical-chez-proxy-operation-count 1)"
-    , "          (and (> cubical-chez-proxy-operation-count 0)"
-    , "               (or cubical-chez-call-requested"
-    , "                   cubical-chez-auto-bind-requested"
-    , "                   cubical-chez-observe-all?"
-    , "                   cubical-chez-selected-typed-hole"
-    , "                   (pair? cubical-chez-hole-consumers))))"
-    , "  (cubical-chez-bridge-fail"
-    , "    \"CCZ-TYPED-BRIDGE-PROXY\""
-    , "    \"proxy operation conflicts with another execution mode\"))"
-    , "(when (and cubical-chez-call-requested"
-    , "           (or cubical-chez-auto-bind-requested"
-    , "               cubical-chez-observe-all?"
-    , "               cubical-chez-selected-typed-hole))"
-    , "  (cubical-chez-bridge-fail"
-    , "    \"CCZ-TYPED-BRIDGE-CALL\""
-    , "    \"callable elimination conflicts with another execution mode\"))"
-    , "(when (and cubical-chez-observe-all?"
-    , "           cubical-chez-selected-typed-hole)"
-    , "  (cubical-chez-bridge-fail"
-    , "    \"CCZ-TYPED-BRIDGE-OBSERVATION\""
-    , "    \"batch observation conflicts with single-hole forcing\"))"
-    , "(when (and (not cubical-chez-observe-all?)"
-    , "           (pair? cubical-chez-hole-consumers))"
-    , "  (cubical-chez-bridge-fail"
-    , "    \"CCZ-TYPED-BRIDGE-OBSERVATION\""
-    , "    \"hole consumer mappings require --observe-all-ground\"))"
-    , "(define cubical-chez-validated-hole-consumers"
-    , "  (if cubical-chez-observe-all?"
-    , "      (cubical-chez-validate-hole-consumers"
-    , "        cubical-chez-hole-consumers)"
-    , "      '()))"
-    , "(display"
-    , "  (cond"
-    , "    (cubical-chez-proxy-requested"
-    , "     (cubical-chez-materialize-ground-proxy cubical-chez-proxy-config))"
-    , "    (cubical-chez-derive-proxy-requested"
-    , "     (cubical-chez-derive-proxy cubical-chez-derive-proxy-config))"
-    , "    (cubical-chez-consume-proxy-requested"
-    , "     (cubical-chez-consume-proxy"
-    , "       cubical-chez-consume-proxy-config))"
-    , "    (cubical-chez-map-proxy-requested"
-    , "     (cubical-chez-map-proxy cubical-chez-map-proxy-config))"
-    , "    (cubical-chez-drop-proxy-requested"
-    , "     (cubical-chez-drop-proxy cubical-chez-drop-proxy-id))"
-    , "    (cubical-chez-gc-proxies-requested"
-    , "     (vector 'cubical-chez-typed-value-proxy-gc-v1"
-    , "             (cubical-chez-gc-proxies)))"
-    , "    (cubical-chez-auto-bind-requested"
-    , "     ((cond"
-    , "        ((string=? (vector-ref cubical-chez-auto-bind-config 0)"
-    , "                   \"bool\")"
-    , "         cubical-chez-auto-observe-bound-bool)"
-    , "        ((string=? (vector-ref cubical-chez-auto-bind-config 0)"
-    , "                   \"nat\")"
-    , "         cubical-chez-auto-observe-bound-nat)"
-    , "        ((string=? (vector-ref cubical-chez-auto-bind-config 0)"
-    , "                   \"word64\")"
-    , "         cubical-chez-auto-observe-bound-word64)"
-    , "        ((string=? (vector-ref cubical-chez-auto-bind-config 0)"
-    , "                   \"char\")"
-    , "         cubical-chez-auto-observe-bound-char)"
-    , "        ((string=? (vector-ref cubical-chez-auto-bind-config 0)"
-    , "                   \"int\")"
-    , "         cubical-chez-auto-observe-bound-int)"
-    , "        (else cubical-chez-auto-observe-bound-ground))"
-    , "       cubical-chez-auto-bind-config "
-        ++ mangleQName (compiledName entry) ++ "))"
-    , "    (cubical-chez-call-requested"
-    , "     (cubical-chez-call-ground-hole cubical-chez-call-config))"
-    , "    (cubical-chez-observe-all?"
-    , "     (cubical-chez-observe-all-ground"
-    , "       cubical-chez-validated-hole-consumers))"
-    , "    (cubical-chez-selected-typed-hole"
-    , "     (cubical-chez-force-typed-hole cubical-chez-selected-typed-hole))"
-    , "    (else " ++ mangleQName (compiledName entry) ++ ")))"
-    , "(newline)"
-    ]
-  where
-    imports = Map.fromList
-      [ (residualHolePath hole, (index, hole))
-      | (index, hole) <- zip [(1 :: Int) ..] holes
-      ]
-    effectiveImports = testResidualShellImports imports
-
-testResidualShellImports
-  :: Map.Map String (Int, ResidualHolePlan)
-  -> Map.Map String (Int, ResidualHolePlan)
-#if defined(CUBICAL_CHEZ_TEST_RESIDUAL_SHELL_UNCOVERED)
-testResidualShellImports _ = Map.empty
-#else
-testResidualShellImports = id
-#endif
-
-typedHoleGroundBridgeScript :: String
-typedHoleGroundBridgeScript = unlines
-  [ "#!/bin/sh"
-  , ""
-  , "set -u"
-  , ""
-  , "bridge_error() {"
-  , "  printf '(ccz-bridge-error-v1 %s %s)\\n' \"$1\" \"$2\""
-  , "  exit \"$3\""
-  , "}"
-  , ""
-  , "if [ -z \"${CUBICAL_CHEZ_TYPED_RUNNER:-}\" ]; then"
-  , "  bridge_error CCZ-TYPED-BRIDGE-CONFIG runner 64"
-  , "fi"
-  , "if [ -z \"${CUBICAL_CHEZ_AGDA_DATADIR:-}\" ]; then"
-  , "  bridge_error CCZ-TYPED-BRIDGE-CONFIG agda-datadir 64"
-  , "fi"
-  , "if [ -z \"${CUBICAL_CHEZ_TYPED_SOURCE:-}\" ]; then"
-  , "  bridge_error CCZ-TYPED-BRIDGE-CONFIG source 64"
-  , "fi"
-  , "if [ -z \"${CUBICAL_CHEZ_TYPED_INCLUDE:-}\" ]; then"
-  , "  bridge_error CCZ-TYPED-BRIDGE-CONFIG include 64"
-  , "fi"
-  , "if [ -z \"${CUBICAL_CHEZ_TYPED_CONSUMER:-}\" ]; then"
-  , "  bridge_error CCZ-TYPED-BRIDGE-CONFIG consumer 64"
-  , "fi"
-  , "if [ -z \"${CUBICAL_CHEZ_TYPED_PACKET:-}\" ]; then"
-  , "  bridge_error CCZ-TYPED-BRIDGE-CONFIG packet 64"
-  , "fi"
-  , "if [ ! -x \"$CUBICAL_CHEZ_TYPED_RUNNER\" ] ||"
-  , "   [ ! -d \"$CUBICAL_CHEZ_AGDA_DATADIR\" ] ||"
-  , "   [ ! -f \"$CUBICAL_CHEZ_TYPED_SOURCE\" ] ||"
-  , "   [ ! -d \"$CUBICAL_CHEZ_TYPED_INCLUDE\" ] ||"
-  , "   [ ! -f \"$CUBICAL_CHEZ_TYPED_PACKET\" ]; then"
-  , "  bridge_error CCZ-TYPED-BRIDGE-CONFIG invalid-path 64"
-  , "fi"
-  , ""
-  , "bridge_mode=${CUBICAL_CHEZ_TYPED_MODE:-ground}"
-  , "bridge_result_temp="
-  , "bridge_meta_temp="
-  , "bridge_mapped_temp="
-  , "bridge_store_lock="
-  , "bridge_store_lock_owner="
-  , "bridge_store_lock_acquired=0"
-  , "bridge_current_proxy_bytes=0"
-  , "bridge_packet_published=0"
-  , "case \"$bridge_mode\" in"
-  , "  ground)"
-  , "    ;;"
-  , "  map-ground)"
-  , "    if [ -z \"${CUBICAL_CHEZ_TYPED_MAPPER:-}\" ]; then"
-  , "      bridge_error CCZ-TYPED-BRIDGE-CONFIG mapper 64"
-  , "    fi"
-  , "    ;;"
-  , "  materialize-proxy)"
-  , "    if [ -z \"${CUBICAL_CHEZ_TYPED_RESULT_PACKET:-}\" ] ||"
-  , "       [ -z \"${CUBICAL_CHEZ_TYPED_RESULT_META:-}\" ] ||"
-  , "       [ -z \"${CUBICAL_CHEZ_TYPED_PROXY_ID:-}\" ] ||"
-  , "       [ -z \"${CUBICAL_CHEZ_TYPED_PROXY_PACKET_NAME:-}\" ] ||"
-  , "       [ -z \"${CUBICAL_CHEZ_TYPED_PROXY_META_NAME:-}\" ] ||"
-  , "       [ -z \"${CUBICAL_CHEZ_TYPED_PROXY_PARENT_ID:-}\" ] ||"
-  , "       [ -z \"${CUBICAL_CHEZ_TYPED_PROXY_STORE_DIR:-}\" ]; then"
-  , "      bridge_error CCZ-TYPED-BRIDGE-CONFIG proxy-config 64"
-  , "    fi"
-  , "    if [ ! -d \"$CUBICAL_CHEZ_TYPED_PROXY_STORE_DIR\" ]; then"
-  , "      bridge_error CCZ-TYPED-BRIDGE-CONFIG proxy-store 64"
-  , "    fi"
-  , "    case \"$CUBICAL_CHEZ_TYPED_PROXY_ID\" in"
-  , "      *[!A-Za-z0-9_-]* )"
-  , "        bridge_error CCZ-TYPED-BRIDGE-PROXY proxy-id 65 ;;"
-  , "    esac"
-  , "    case \"$CUBICAL_CHEZ_TYPED_PROXY_PARENT_ID\" in"
-  , "      .) ;;"
-  , "      *[!A-Za-z0-9_-]*|'')"
-  , "        bridge_error CCZ-TYPED-BRIDGE-PROXY proxy-parent-id 65 ;;"
-  , "    esac"
-  , "    if [ \"${#CUBICAL_CHEZ_TYPED_PROXY_ID}\" -gt 64 ] ||"
-  , "       [ \"${#CUBICAL_CHEZ_TYPED_PROXY_PARENT_ID}\" -gt 64 ] ||"
-  , "       [ -e \"$CUBICAL_CHEZ_TYPED_RESULT_PACKET\" ] ||"
-  , "       [ -e \"$CUBICAL_CHEZ_TYPED_RESULT_META\" ]; then"
-  , "      bridge_error CCZ-TYPED-BRIDGE-PROXY proxy-exists-or-too-long 65"
-  , "    fi"
-  , "    case \"$CUBICAL_CHEZ_TYPED_RESULT_PACKET\" in"
-  , "      \"$CUBICAL_CHEZ_TYPED_PROXY_STORE_DIR\"/typed-proxy-*.bin) ;;"
-  , "      *) bridge_error CCZ-TYPED-BRIDGE-CONFIG proxy-packet-path 64 ;;"
-  , "    esac"
-  , "    case \"$CUBICAL_CHEZ_TYPED_RESULT_META\" in"
-  , "      \"$CUBICAL_CHEZ_TYPED_PROXY_STORE_DIR\"/typed-proxy-*.meta) ;;"
-  , "      *) bridge_error CCZ-TYPED-BRIDGE-CONFIG proxy-meta-path 64 ;;"
-  , "    esac"
-  , "    proxy_max_count=${CUBICAL_CHEZ_TYPED_PROXY_MAX_COUNT:-256}"
-  , "    proxy_max_bytes=${CUBICAL_CHEZ_TYPED_PROXY_MAX_BYTES:-67108864}"
-  , "    case \"$proxy_max_count\" in"
-  , "      ''|*[!0-9]*) bridge_error CCZ-TYPED-BRIDGE-QUOTA count 73 ;;"
-  , "    esac"
-  , "    case \"$proxy_max_bytes\" in"
-  , "      ''|*[!0-9]*) bridge_error CCZ-TYPED-BRIDGE-QUOTA bytes 73 ;;"
-  , "    esac"
-  , "    if [ \"$proxy_max_count\" -lt 1 ] ||"
-  , "       [ \"$proxy_max_count\" -gt 65536 ] ||"
-  , "       [ \"$proxy_max_bytes\" -lt 1 ] ||"
-  , "       [ \"$proxy_max_bytes\" -gt 1073741824 ]; then"
-  , "      bridge_error CCZ-TYPED-BRIDGE-QUOTA range 73"
-  , "    fi"
-  , "    bridge_result_temp=\"$CUBICAL_CHEZ_TYPED_RESULT_PACKET.tmp.$$\""
-  , "    bridge_meta_temp=\"$CUBICAL_CHEZ_TYPED_RESULT_META.tmp.$$\""
-  , "    if [ -e \"$bridge_result_temp\" ] ||"
-  , "       [ -e \"$bridge_meta_temp\" ]; then"
-  , "      bridge_error CCZ-TYPED-BRIDGE-PROXY proxy-temp-exists 65"
-  , "    fi"
-  , "    ;;"
-  , "  *)"
-  , "    bridge_error CCZ-TYPED-BRIDGE-PROXY invalid-mode 65"
-  , "    ;;"
-  , "esac"
-  , ""
-  , "bridge_tmp=$(mktemp -d \"${TMPDIR:-/tmp}/cubical-chez-bridge.XXXXXX\") ||"
-  , "  bridge_error CCZ-TYPED-BRIDGE-CONFIG tempdir 64"
-  , "if [ \"$bridge_mode\" = map-ground ]; then"
-  , "  bridge_mapped_temp=\"$bridge_tmp/mapped.bin\""
-  , "fi"
-  , "bridge_cleanup() {"
-  , "  rm -f \"$bridge_tmp/stdout\" \"$bridge_tmp/stderr\" \"$bridge_mapped_temp\""
-  , "  rmdir \"$bridge_tmp\" 2>/dev/null || true"
-  , "  if [ \"$bridge_mode\" = materialize-proxy ] &&"
-  , "     [ -n \"$bridge_result_temp\" ]; then"
-  , "    rm -f \"$bridge_result_temp\""
-  , "  fi"
-  , "  if [ \"$bridge_mode\" = materialize-proxy ] &&"
-  , "     [ -n \"$bridge_meta_temp\" ]; then"
-  , "    rm -f \"$bridge_meta_temp\""
-  , "  fi"
-  , "  if [ \"$bridge_store_lock_acquired\" -eq 1 ]; then"
-  , "    rm -f \"$bridge_store_lock_owner\""
-  , "    rmdir \"$bridge_store_lock\" 2>/dev/null || true"
-  , "    bridge_store_lock_acquired=0"
-  , "  fi"
-  , "}"
-  , "trap bridge_cleanup EXIT HUP INT TERM"
-  , ""
-  , "bridge_acquire_proxy_store_lock() {"
-  , "  bridge_store_lock=\"$CUBICAL_CHEZ_TYPED_PROXY_STORE_DIR/.typed-proxy-store.lock\""
-  , "  bridge_store_lock_owner=\"$bridge_store_lock/owner\""
-  , "  lock_attempt=0"
-  , "  while ! mkdir \"$bridge_store_lock\" 2>/dev/null; do"
-  , "    lock_attempt=$((lock_attempt + 1))"
-  , "    lock_owner_pid="
-  , "    if [ -f \"$bridge_store_lock_owner\" ]; then"
-  , "      IFS= read -r lock_owner_pid < \"$bridge_store_lock_owner\" || true"
-  , "    fi"
-  , "    case \"$lock_owner_pid\" in"
-  , "      ''|*[!0-9]*)"
-  , "        if [ \"$lock_attempt\" -ge 100 ]; then"
-  , "          rm -f \"$bridge_store_lock_owner\""
-  , "          rmdir \"$bridge_store_lock\" 2>/dev/null || true"
-  , "        fi"
-  , "        ;;"
-  , "      *)"
-  , "        if ! kill -0 \"$lock_owner_pid\" 2>/dev/null; then"
-  , "          rm -f \"$bridge_store_lock_owner\""
-  , "          rmdir \"$bridge_store_lock\" 2>/dev/null || true"
-  , "        fi"
-  , "        ;;"
-  , "    esac"
-  , "    if [ \"$lock_attempt\" -ge 500 ]; then"
-  , "      bridge_error CCZ-TYPED-BRIDGE-QUOTA lock-timeout 73"
-  , "    fi"
-  , "    sleep 0.01"
-  , "  done"
-  , "  bridge_store_lock_acquired=1"
-  , "  if ! printf '%s\\n' \"$$\" > \"$bridge_store_lock_owner\"; then"
-  , "    bridge_error CCZ-TYPED-BRIDGE-QUOTA lock-owner 73"
-  , "  fi"
-  , "}"
-  , ""
-  , "bridge_measure_proxy_store() {"
-  , "  bridge_proxy_store_count=0"
-  , "  bridge_current_proxy_bytes=0"
-  , "  for proxy_meta in \"$CUBICAL_CHEZ_TYPED_PROXY_STORE_DIR\"/typed-proxy-*.meta; do"
-  , "    [ -f \"$proxy_meta\" ] || continue"
-  , "    proxy_packet=${proxy_meta%.meta}.bin"
-  , "    [ -f \"$proxy_packet\" ] || continue"
-  , "    proxy_packet_bytes=$(wc -c < \"$proxy_packet\" | tr -d ' ')"
-  , "    proxy_meta_bytes=$(wc -c < \"$proxy_meta\" | tr -d ' ')"
-  , "    bridge_proxy_store_count=$((bridge_proxy_store_count + 1))"
-  , "    bridge_current_proxy_bytes=$((bridge_current_proxy_bytes + proxy_packet_bytes + proxy_meta_bytes))"
-  , "  done"
-  , "}"
-  , ""
-  , "if [ \"$bridge_mode\" = materialize-proxy ]; then"
-  , "  bridge_acquire_proxy_store_lock"
-  , "  if [ -e \"$CUBICAL_CHEZ_TYPED_RESULT_PACKET\" ] ||"
-  , "     [ -e \"$CUBICAL_CHEZ_TYPED_RESULT_META\" ]; then"
-  , "    bridge_error CCZ-TYPED-BRIDGE-PROXY publish-conflict 65"
-  , "  fi"
-  , "  if [ \"$CUBICAL_CHEZ_TYPED_PROXY_PARENT_ID\" != . ]; then"
-  , "    parent_packet=\"$CUBICAL_CHEZ_TYPED_PROXY_STORE_DIR/typed-proxy-$CUBICAL_CHEZ_TYPED_PROXY_PARENT_ID.bin\""
-  , "    parent_meta=\"$CUBICAL_CHEZ_TYPED_PROXY_STORE_DIR/typed-proxy-$CUBICAL_CHEZ_TYPED_PROXY_PARENT_ID.meta\""
-  , "    if [ ! -f \"$parent_packet\" ] || [ ! -f \"$parent_meta\" ] ||"
-  , "       ! grep -Eq \"^#\\(ccz-proxy-meta-v1 \\\"$CUBICAL_CHEZ_TYPED_PROXY_PARENT_ID\\\" \\\"(\\\\.|[A-Za-z0-9_-]+)\\\" active\\)$\" \"$parent_meta\"; then"
-  , "      bridge_error CCZ-TYPED-BRIDGE-PROXY inactive-parent 65"
-  , "    fi"
-  , "  fi"
-  , "  bridge_measure_proxy_store"
-  , "  if [ \"$bridge_proxy_store_count\" -ge \"$proxy_max_count\" ]; then"
-  , "    bridge_error CCZ-TYPED-BRIDGE-QUOTA count-exceeded 73"
-  , "  fi"
-  , "  if [ \"$bridge_current_proxy_bytes\" -gt \"$proxy_max_bytes\" ]; then"
-  , "    bridge_error CCZ-TYPED-BRIDGE-QUOTA bytes-already-exceeded 73"
-  , "  fi"
-  , "fi"
-  , ""
-  , "if [ \"$bridge_mode\" = materialize-proxy ]; then"
-  , "  Agda_datadir=\"$CUBICAL_CHEZ_AGDA_DATADIR\" \"$CUBICAL_CHEZ_TYPED_RUNNER\" \\"
-  , "    -v0 \\"
-  , "    --cubical-import=\"$CUBICAL_CHEZ_TYPED_CONSUMER\" \\"
-  , "    --cubical-term-file=\"$CUBICAL_CHEZ_TYPED_PACKET\" \\"
-  , "    --cubical-result-term-file=\"$bridge_result_temp\" \\"
-  , "    --no-libraries \\"
-  , "    --no-write-interfaces \\"
-  , "    -i \"$CUBICAL_CHEZ_TYPED_INCLUDE\" \\"
-  , "    \"$CUBICAL_CHEZ_TYPED_SOURCE\" \\"
-  , "    > \"$bridge_tmp/stdout\" 2> \"$bridge_tmp/stderr\""
-  , "elif [ \"$bridge_mode\" = map-ground ]; then"
-  , "  Agda_datadir=\"$CUBICAL_CHEZ_AGDA_DATADIR\" \"$CUBICAL_CHEZ_TYPED_RUNNER\" \\"
-  , "    -v0 \\"
-  , "    --cubical-import=\"$CUBICAL_CHEZ_TYPED_MAPPER\" \\"
-  , "    --cubical-term-file=\"$CUBICAL_CHEZ_TYPED_PACKET\" \\"
-  , "    --cubical-result-term-file=\"$bridge_mapped_temp\" \\"
-  , "    --no-libraries \\"
-  , "    --no-write-interfaces \\"
-  , "    -i \"$CUBICAL_CHEZ_TYPED_INCLUDE\" \\"
-  , "    \"$CUBICAL_CHEZ_TYPED_SOURCE\" \\"
-  , "    > \"$bridge_tmp/stdout\" 2> \"$bridge_tmp/stderr\""
-  , "  mapper_status=$?"
-  , "  if [ \"$mapper_status\" -ne 0 ]; then"
-  , "    bridge_error CCZ-TYPED-BRIDGE-RUNNER-EXIT \"$mapper_status\" 70"
-  , "  fi"
-  , "  if [ -s \"$bridge_tmp/stdout\" ] ||"
-  , "     [ -s \"$bridge_tmp/stderr\" ] ||"
-  , "     [ ! -s \"$bridge_mapped_temp\" ]; then"
-  , "    bridge_error CCZ-TYPED-BRIDGE-DIRTY-OUTPUT mapped-result 71"
-  , "  fi"
-  , "  Agda_datadir=\"$CUBICAL_CHEZ_AGDA_DATADIR\" \"$CUBICAL_CHEZ_TYPED_RUNNER\" \\"
-  , "    -v0 \\"
-  , "    --cubical-import=\"$CUBICAL_CHEZ_TYPED_CONSUMER\" \\"
-  , "    --cubical-term-file=\"$bridge_mapped_temp\" \\"
-  , "    --no-libraries \\"
-  , "    --no-write-interfaces \\"
-  , "    -i \"$CUBICAL_CHEZ_TYPED_INCLUDE\" \\"
-  , "    \"$CUBICAL_CHEZ_TYPED_SOURCE\" \\"
-  , "    > \"$bridge_tmp/stdout\" 2> \"$bridge_tmp/stderr\""
-  , "else"
-  , "  Agda_datadir=\"$CUBICAL_CHEZ_AGDA_DATADIR\" \"$CUBICAL_CHEZ_TYPED_RUNNER\" \\"
-  , "    -v0 \\"
-  , "    --cubical-import=\"$CUBICAL_CHEZ_TYPED_CONSUMER\" \\"
-  , "    --cubical-term-file=\"$CUBICAL_CHEZ_TYPED_PACKET\" \\"
-  , "    --no-libraries \\"
-  , "    --no-write-interfaces \\"
-  , "    -i \"$CUBICAL_CHEZ_TYPED_INCLUDE\" \\"
-  , "    \"$CUBICAL_CHEZ_TYPED_SOURCE\" \\"
-  , "    > \"$bridge_tmp/stdout\" 2> \"$bridge_tmp/stderr\""
-  , "fi"
-  , "runner_status=$?"
-  , "if [ \"$runner_status\" -ne 0 ]; then"
-  , "  bridge_error CCZ-TYPED-BRIDGE-RUNNER-EXIT \"$runner_status\" 70"
-  , "fi"
-  , "if [ -s \"$bridge_tmp/stderr\" ]; then"
-  , "  bridge_error CCZ-TYPED-BRIDGE-DIRTY-OUTPUT stderr 71"
-  , "fi"
-  , "if [ \"$bridge_mode\" = materialize-proxy ]; then"
-  , "  if [ -s \"$bridge_tmp/stdout\" ] ||"
-  , "     [ ! -s \"$bridge_result_temp\" ]; then"
-  , "    bridge_error CCZ-TYPED-BRIDGE-DIRTY-OUTPUT proxy-result 71"
-  , "  fi"
-  , "  printf '#(ccz-proxy-meta-v1 \"%s\" \"%s\" active)\\n' \\"
-  , "    \"$CUBICAL_CHEZ_TYPED_PROXY_ID\" \\"
-  , "    \"$CUBICAL_CHEZ_TYPED_PROXY_PARENT_ID\" > \"$bridge_meta_temp\" ||"
-  , "    bridge_error CCZ-TYPED-BRIDGE-PROXY meta-temp-write 65"
-  , "  bridge_new_packet_bytes=$(wc -c < \"$bridge_result_temp\" | tr -d ' ')"
-  , "  bridge_new_meta_bytes=$(wc -c < \"$bridge_meta_temp\" | tr -d ' ')"
-  , "  bridge_projected_proxy_bytes=$((bridge_current_proxy_bytes + bridge_new_packet_bytes + bridge_new_meta_bytes))"
-  , "  if [ \"$bridge_projected_proxy_bytes\" -gt \"$proxy_max_bytes\" ]; then"
-  , "    bridge_error CCZ-TYPED-BRIDGE-QUOTA bytes-exceeded 73"
-  , "  fi"
-  , "  if ! ln \"$bridge_result_temp\" \"$CUBICAL_CHEZ_TYPED_RESULT_PACKET\" 2>/dev/null; then"
-  , "    bridge_error CCZ-TYPED-BRIDGE-PROXY publish-conflict 65"
-  , "  fi"
-  , "  bridge_packet_published=1"
-  , "  if ! ln \"$bridge_meta_temp\" \"$CUBICAL_CHEZ_TYPED_RESULT_META\" 2>/dev/null; then"
-  , "    if [ \"$bridge_packet_published\" -eq 1 ]; then"
-  , "      rm -f \"$CUBICAL_CHEZ_TYPED_RESULT_PACKET\""
-  , "      bridge_packet_published=0"
-  , "    fi"
-  , "    bridge_error CCZ-TYPED-BRIDGE-PROXY publish-conflict 65"
-  , "  fi"
-  , "  rm -f \"$bridge_result_temp\""
-  , "  rm -f \"$bridge_meta_temp\""
-  , "  bridge_result_temp="
-  , "  bridge_meta_temp="
-  , "  if [ ! -s \"$CUBICAL_CHEZ_TYPED_RESULT_PACKET\" ] ||"
-  , "     [ ! -s \"$CUBICAL_CHEZ_TYPED_RESULT_META\" ]; then"
-  , "    bridge_error CCZ-TYPED-BRIDGE-PROTOCOL proxy-publish 72"
-  , "  fi"
-  , "  printf '(ccz-proxy-v1 \"%s\" \"%s\")\\n' \\"
-  , "    \"$CUBICAL_CHEZ_TYPED_PROXY_ID\" \\"
-  , "    \"$CUBICAL_CHEZ_TYPED_PROXY_PACKET_NAME\""
-  , "  exit 0"
-  , "fi"
-  , "line_count=$(wc -l < \"$bridge_tmp/stdout\" | tr -d ' ' )"
-  , "if [ \"$line_count\" != 1 ]; then"
-  , "  bridge_error CCZ-TYPED-BRIDGE-DIRTY-OUTPUT line-count 71"
-  , "fi"
-  , "IFS= read -r ground_result < \"$bridge_tmp/stdout\""
-  , "case \"$ground_result\" in"
-  , "  true|false)"
-  , "    printf '(ccz-ground-v1 bool %s)\\n' \"$ground_result\""
-  , "    ;;"
-  , "  ''|*[!0-9]*)"
-  , "    bridge_error CCZ-TYPED-BRIDGE-DIRTY-OUTPUT ground-result 71"
-  , "    ;;"
-  , "  *)"
-  , "    printf '(ccz-ground-v1 nat %s)\\n' \"$ground_result\""
-  , "    ;;"
-  , "esac"
-  ]
-
-renderResidualHoles :: String -> ResidualSlicePlan -> [String]
-renderResidualHoles artifact = \case
-  ResidualSliceNotApplicable _ -> []
-  ResidualSlicePlanned holes -> concat
-    [ let closure = residualHoleClosure hole
-          residual = residualClosurePayload closure
-          field suffix value =
-            "residual-slice-hole-" ++ show index ++ "-" ++ suffix ++ ": " ++ value
-      in [ field "id" (residualHoleId hole)
-      , field "path" (residualHolePath hole)
-      , field "blockers" (renderBlockers $ residualHoleBlockers hole)
-      , field "materialization" "checked"
-      , field "closed" "true"
-      , field "source-closed" $
-          renderBoolean (residualHoleSourceClosed hole)
-      , field "packet-closed" "true"
-      , field "environment-abi" $
-          if residualHoleSourceClosed hole
-            then "none"
-            else "lambda-lifted-explicit-environment-v1"
-      , field "environment-arity" $
-          show (residualHoleEnvironmentArity hole)
-      , field "environment-binding-abi" $
-          residualHoleAutomaticEnvironmentBindingAbi hole
-      , field "meta-free" "true"
-      , field "typechecked" "true"
-      , field "callable-abi" $
-          renderResidualHoleCallableAbi (residualHoleCallableAbi hole)
-      , field "artifact" $
-          if artifact == "packet-v2"
-            then residualHolePacketName index
-            else "none"
-      , field "direct-dependency-count" $
-          show (length $ residualDirectDependencies residual)
-      , field "direct-dependencies" $
-          renderBlockers (residualDirectDependencies residual)
-      , field "dependency-slice" "checked-type+definition-body-v1"
-      , field "resolved-dependency-count" $
-          show (length $ residualClosureResolvedDependencies closure)
-      , field "resolved-dependencies" $
-          renderBlockers (residualClosureResolvedDependencies closure)
-      , field "expanded-definitions" $
-          renderBlockers (residualClosureExpandedDefinitions closure)
-      , field "signature-leaves" $
-          renderBlockers (residualClosureSignatureLeaves closure)
-      , field "excluded-presentation-dependency-count" $
-          show
-            (length $ residualClosureExcludedPresentationDependencies closure)
-      , field "excluded-presentation-dependencies" $
-          renderBlockers
-            (residualClosureExcludedPresentationDependencies closure)
-      , field "type" (prettyShow $ residualType residual)
-      , field "term" (prettyShow $ residualTerm residual)
-      ]
-    | (index, hole) <- zip [(1 :: Int) ..] holes
-    ]
-
-renderResidualHoleCallableAbi :: ResidualHoleCallableAbi -> String
-renderResidualHoleCallableAbi = \case
-  ResidualHoleObservationOnly -> "none"
-  ResidualHoleUnaryGroundElimination codec ->
-    renderResidualGroundCodec codec
-      ++ "-unary-ground-elimination-v1"
-  ResidualHoleOrderedGroundEnvironmentElimination codecs ->
-    "ordered-"
-      ++ intercalate "+" (map renderResidualGroundCodec codecs)
-      ++ "-ground-environment-elimination-v1"
-  ResidualHoleDependentGroundEnvironmentElimination ->
-    "dependent-ground-environment-elimination-v1"
-
-renderResidualGroundCodec :: ResidualGroundCodec -> String
-renderResidualGroundCodec =
-  groundCodecDescriptorName . residualGroundCodecDescriptor
-
-renderResidualGroundCodecRegistry :: String
-renderResidualGroundCodecRegistry =
-  intercalate "," (map renderResidualGroundCodec allResidualGroundCodecs)
-
-renderSchemeGroundCodecRegistry :: String
-renderSchemeGroundCodecRegistry =
-  "(define cubical-chez-ground-codec-registry-v1 '("
-    ++ unwords
-      (map (schemeString . renderResidualGroundCodec) allResidualGroundCodecs)
-    ++ "))"
-
-renderSchemeGroundCodecDescriptors :: String
-renderSchemeGroundCodecDescriptors =
-  unlines $
-    [ "(define cubical-chez-ground-codec-descriptors-v1"
-    , "  (list"
-    ]
-      ++ map renderDescriptor residualGroundCodecDescriptors
-      ++ ["  ))"]
-  where
-    renderDescriptor descriptor =
-      "    (vector "
-        ++ schemeString (groundCodecDescriptorName descriptor)
-        ++ " "
-        ++ schemeString
-          ( groundCodecDescriptorName descriptor
-              ++ "-unary-ground-elimination-v1"
-          )
-        ++ " "
-        ++ schemeString (groundCodecDescriptorName descriptor ++ ":")
-        ++ " "
-        ++ groundCodecDescriptorArgumentValidator descriptor
-        ++ " "
-        ++ groundCodecDescriptorArgumentReifier descriptor
-        ++ " "
-        ++ groundCodecDescriptorEntryParser descriptor
-        ++ " "
-        ++ groundCodecDescriptorValueReifier descriptor
-        ++ ")"
-
-residualHoleAutomaticSingleGroundCodec
-  :: ResidualHolePlan
-  -> Maybe ResidualGroundCodec
-residualHoleAutomaticSingleGroundCodec hole
-  | residualHoleSourceClosed hole = Nothing
-  | residualHoleEnvironmentArity hole /= 1 = Nothing
-  | otherwise = case residualHoleCallableAbi hole of
-      ResidualHoleUnaryGroundElimination codec -> Just codec
-      _ -> Nothing
-
-residualHoleSupportsPersistentTypedValueProxy :: ResidualHolePlan -> Bool
-residualHoleSupportsPersistentTypedValueProxy hole =
-  residualHoleSupportsAutomaticGroundEnvironment hole
-    || case residualHoleCallableAbi hole of
-      ResidualHoleUnaryGroundElimination _ -> True
-      _ -> False
-
-residualHoleSupportsAutomaticGroundEnvironment :: ResidualHolePlan -> Bool
-residualHoleSupportsAutomaticGroundEnvironment hole =
-  case residualHoleAutomaticSingleGroundCodec hole of
-    Just _ -> True
-    Nothing ->
-      residualHoleSupportsAutomaticOrderedGroundEnvironment hole
-        || residualHoleSupportsAutomaticDependentGroundEnvironment hole
-
-residualHoleSupportsAutomaticDependentGroundEnvironment
-  :: ResidualHolePlan
-  -> Bool
-residualHoleSupportsAutomaticDependentGroundEnvironment hole =
-  not (residualHoleSourceClosed hole)
-    && residualHoleEnvironmentArity hole > 1
-    && residualHoleEnvironmentArity hole <= residualHoleEnvironmentLimit
-    && residualHoleCallableAbi hole
-      == ResidualHoleDependentGroundEnvironmentElimination
-
-residualHoleSupportsAutomaticOrderedGroundEnvironment
-  :: ResidualHolePlan
-  -> Bool
-residualHoleSupportsAutomaticOrderedGroundEnvironment hole =
-  not (residualHoleSourceClosed hole)
-    && residualHoleEnvironmentArity hole > 1
-    && case residualHoleCallableAbi hole of
-      ResidualHoleOrderedGroundEnvironmentElimination codecs ->
-        length codecs == residualHoleEnvironmentArity hole
-      _ -> False
-
-residualHoleOrderedGroundEnvironmentCodecs
-  :: ResidualHolePlan
-  -> [ResidualGroundCodec]
-residualHoleOrderedGroundEnvironmentCodecs hole =
-  case residualHoleCallableAbi hole of
-    ResidualHoleOrderedGroundEnvironmentElimination codecs -> codecs
-    _ -> []
-
-residualHoleAutomaticEnvironmentBindingAbi :: ResidualHolePlan -> String
-residualHoleAutomaticEnvironmentBindingAbi hole
-  | residualHoleSupportsAutomaticDependentGroundEnvironment hole =
-      "dependent-ground-chez-lexical-binding-v1"
-  | residualHoleSupportsAutomaticOrderedGroundEnvironment hole =
-      "ordered-"
-        ++ intercalate "+"
-          (map renderResidualGroundCodec $
-            residualHoleOrderedGroundEnvironmentCodecs hole)
-        ++ "-chez-lexical-binding-v1"
-  | otherwise = case residualHoleAutomaticSingleGroundCodec hole of
-      Just codec ->
-        "single-"
-          ++ renderResidualGroundCodec codec
-          ++ "-chez-lexical-binding-v1"
-      Nothing -> "none"
-
-backendAbortWith :: BackendFailureClass -> String -> TCM a
-backendAbortWith failureClass message = liftIO $ ioError $ userError $
-  "Cubical Chez backend [" ++ failureCode failureClass ++ "]: " ++ message
-
-failureCode :: BackendFailureClass -> String
-failureCode = \case
-  InvalidConfiguration -> "CCZ-INVALID-CONFIG"
-  EntryRejected -> "CCZ-ENTRY-REJECTED"
-  NbeUnavailable -> "CCZ-NBE-UNAVAILABLE"
-  NbeUnsupportedFeature -> "CCZ-NBE-UNSUPPORTED"
-  EngineTimeout -> "CCZ-ENGINE-TIMEOUT"
-  NbeExecutionFailed -> "CCZ-NBE-FAILED"
-  EngineResultInvalid -> "CCZ-ENGINE-RESULT-INVALID"
-  UnsupportedProgram -> "CCZ-UNSUPPORTED"
-  ResidualRequired -> "CCZ-RESIDUAL-REQUIRED"
-  ResidualizationFailed -> "CCZ-RESIDUALIZATION-FAILED"
-  SchemeLoweringFailed -> "CCZ-SCHEME-LOWERING-FAILED"
-
-renderProgram :: CompiledDef -> [CompiledDef] -> Either String String
-renderProgram entry defs = do
-  validateChezCoreAbi
-  definitions <- traverse renderDefinition defs
-  pure $ unlines $
-    [ "; Generated by CubicalChez 0.1.0-dev."
-    , "; Static closure audited by CubicalChez."
-    , "; Chez core ABI: " ++ chezCoreAbiVersion declaredChezCoreAbi ++ "."
-    , "#!chezscheme"
-    ]
-      ++ definitions
-      ++ [ "(display " ++ mangleQName (compiledName entry) ++ ")"
-         , "(newline)"
-         ]
-
-reachableDefinitions :: [CompiledDef] -> CompiledDef -> ([CompiledDef], [QName])
-reachableDefinitions defs entry =
-  let (_, ordered, unresolved) = visit Set.empty Set.empty entry
-  in (ordered, Set.toList unresolved)
-  where
-    definitionsByName = Map.fromList [(compiledName def, def) | def <- defs]
-
-    visit seen unresolved def
-      | compiledName def `Set.member` seen = (seen, [], unresolved)
-      | otherwise =
-          let seenWithCurrent = Set.insert (compiledName def) seen
-              (seenAfterDependencies, orderedDependencies, unresolvedDependencies) =
-                foldl visitDependency
-                  (seenWithCurrent, [], unresolved)
-                  (referencedDefinitions (compiledTerm def))
-          in (seenAfterDependencies, orderedDependencies ++ [def], unresolvedDependencies)
-
-    visitDependency (seen, ordered, unresolved) name
-      | name `Set.member` seen = (seen, ordered, unresolved)
-      | otherwise = case Map.lookup name definitionsByName of
-          Nothing -> (Set.insert name seen, ordered, Set.insert name unresolved)
-          Just dependency ->
-            let (seenAfterDependency, dependencyOrder, unresolvedAfterDependency) =
-                  visit seen unresolved dependency
-            in (seenAfterDependency, ordered ++ dependencyOrder, unresolvedAfterDependency)
-
-referencedDefinitions :: TTerm -> [QName]
-referencedDefinitions = \case
-  TVar _ -> []
-  TPrim _ -> []
-  TDef name -> [name]
-  TApp function arguments -> referencedDefinitions function ++ concatMap referencedDefinitions arguments
-  TLam body -> referencedDefinitions body
-  TLit _ -> []
-  TCon _ -> []
-  TLet value body -> referencedDefinitions value ++ referencedDefinitions body
-  TCase _ _ fallback alternatives ->
-    referencedDefinitions fallback ++ concatMap referencedAlternative alternatives
-  TUnit -> []
-  TSort -> []
-  TErased -> []
-  TCoerce term -> referencedDefinitions term
-  TError _ -> []
-  where
-    referencedAlternative = \case
-      TACon _ _ body -> referencedDefinitions body
-      TAGuard guard body -> referencedDefinitions guard ++ referencedDefinitions body
-      TALit _ body -> referencedDefinitions body
-
--- | Catalog lookup retained for identifying typed-hole candidates after the
--- entry has passed the semantic audit. It is not the publication classifier.
-typedInternalBlockers :: NamesIn internal => internal -> [QName]
-typedInternalBlockers internal =
-  Set.toList $ Set.filter needsTypedRuntime (namesIn internal :: Set.Set QName)
-
--- | Resolve the Internal names against Agda's semantic Cubical registry. A
--- pinned QName is accepted as a blocker only when the current checked
--- signature also identifies it as the corresponding builtin/primitive, or as
--- a generated Kan operation. This prevents a same-spelled postulate or a
--- stale catalog entry from acquiring runtime authority by name alone.
-auditTypedInternal :: NamesIn internal => internal -> TCM InternalSemanticAudit
-auditTypedInternal internal = do
-  let occurrences = namesIn internal :: Set.Set QName
-      catalog = Set.filter needsTypedRuntime occurrences
-      shapedUnknown = Set.filter isUnknownCubicalPrimitive occurrences
-  registrySources <- resolveCubicalRegistrySources
-  kanSources <- resolveKanOperationSources occurrences
-  let availableSources = testInternalSemanticSources $
-        registrySources ++ kanSources
-      sourceMap = Map.fromListWith mergeSourceLabels availableSources
-      semantic = Set.intersection occurrences (Map.keysSet sourceMap)
-      disagreements = Set.union
-        (Set.difference semantic catalog)
-        (Set.difference catalog semantic)
-      semanticUnknown = Set.filter (not . needsTypedRuntime) semantic
-      evidence =
-        [ (name, source)
-        | name <- Set.toList semantic
-        , Just source <- [Map.lookup name sourceMap]
-        ]
-  pure InternalSemanticAudit
-    { internalSemanticBlockers = Set.toList semantic
-    , internalCatalogBlockers = Set.toList catalog
-    , internalSemanticSources = evidence
-    , internalSemanticCatalogDisagreements = Set.toList disagreements
-    , internalUnknownCubicalPrimitives =
-        Set.toList (Set.union shapedUnknown semanticUnknown)
-    }
-
-mergeSourceLabels :: String -> String -> String
-mergeSourceLabels left right
-  | left == right = left
-  | otherwise = left ++ "+" ++ right
-
-resolveCubicalRegistrySources :: TCM [(QName, String)]
-resolveCubicalRegistrySources = do
-  builtinSources <- fmap catMaybes $ forM cubicalBuiltinBindings $
-    \(label, builtinId) -> do
-      maybeName <- Builtin.getBuiltinName' builtinId
-      pure $ fmap (\name -> (name, "builtin:" ++ label)) maybeName
-  primitiveSources <- fmap catMaybes $ forM cubicalPrimitiveBindings $
-    \(label, primitiveId) -> do
-      maybeName <- Builtin.getPrimitiveName' primitiveId
-      pure $ fmap (\name -> (name, "primitive:" ++ label)) maybeName
-  pure $ builtinSources ++ primitiveSources
-
-resolveKanOperationSources :: Set.Set QName -> TCM [(QName, String)]
-resolveKanOperationSources occurrences = fmap catMaybes $
-  forM (Set.toList occurrences) $ \name -> do
-    definitionResult <- getConstInfo' name
-    pure $ case definitionResult of
-      Right definition -> case theDef definition of
-        Function {funIsKanOp = Just _} -> Just (name, "definition:kan-operation")
-        _ -> Nothing
-      Left _ -> Nothing
-
--- Stable semantic identities exported by Agda, deliberately separate from
--- the rendered-QName compatibility catalog below.
-cubicalBuiltinBindings :: [(String, Builtin.BuiltinId)]
-cubicalBuiltinBindings =
-  [ ("interval-universe", Builtin.builtinIntervalUniv)
-  , ("interval", Builtin.builtinInterval)
-  , ("interval-zero", Builtin.builtinIZero)
-  , ("interval-one", Builtin.builtinIOne)
-  , ("path", Builtin.builtinPath)
-  , ("path-dependent", Builtin.builtinPathP)
-  , ("partial", Builtin.builtinPartial)
-  , ("partial-dependent", Builtin.builtinPartialP)
-  , ("is-one", Builtin.builtinIsOne)
-  , ("it-is-one", Builtin.builtinItIsOne)
-  , ("is-one-left", Builtin.builtinIsOne1)
-  , ("is-one-right", Builtin.builtinIsOne2)
-  , ("is-one-empty", Builtin.builtinIsOneEmpty)
-  , ("transp-proof", Builtin.builtinTranspProof)
-  , ("sub", Builtin.builtinSub)
-  , ("sub-in", Builtin.builtinSubIn)
-  ]
-
-cubicalPrimitiveBindings :: [(String, Builtin.PrimitiveId)]
-cubicalPrimitiveBindings =
-  [ ("interval-min", Builtin.builtinIMin)
-  , ("interval-max", Builtin.builtinIMax)
-  , ("interval-neg", Builtin.builtinINeg)
-  , ("partial", Builtin.PrimPartial)
-  , ("partial-dependent", Builtin.PrimPartialP)
-  , ("sub-out", Builtin.builtinSubOut)
-  , ("glue", Builtin.builtinGlue)
-  , ("glue-intro", Builtin.builtin_glue)
-  , ("glue-elim", Builtin.builtin_unglue)
-  , ("glue-universe-intro", Builtin.builtin_glueU)
-  , ("glue-universe-elim", Builtin.builtin_unglueU)
-  , ("face-forall", Builtin.builtinFaceForall)
-  , ("composition", Builtin.builtinComp)
-  , ("partial-or", Builtin.builtinPOr)
-  , ("transport", Builtin.builtinTrans)
-  , ("homogeneous-composition", Builtin.builtinHComp)
-  ]
-
--- Compile-time-only semantic-registry fault. The verifier uses it to prove
--- that a correct spelling in the pinned catalog cannot bypass semantic
--- identity validation.
-testInternalSemanticSources :: [(QName, String)] -> [(QName, String)]
-#if defined(CUBICAL_CHEZ_TEST_INTERNAL_SEMANTIC_CATALOG_DISAGREEMENT)
-testInternalSemanticSources _ = []
-#else
-testInternalSemanticSources = id
-#endif
-
--- | Defense-in-depth audit of the candidate erased term.  It can catch a
--- blocker introduced or exposed by Treeless conversion.
-typedTreelessBlockers :: TTerm -> [QName]
-typedTreelessBlockers =
-  Set.toList . Set.fromList . filter needsTypedRuntime . referencedDefinitions
-
--- | Names which look like Cubical primitives but are not in the pinned Agda
--- 2.8/2.9 catalog are kept separate from supported runtime blockers.  An
--- executable occurrence is fail-closed so an Agda upgrade cannot silently
--- route a newly introduced primitive through erased Chez code.
-typedTreelessUnknownCubical :: TTerm -> [QName]
-typedTreelessUnknownCubical =
-  Set.toList
-    . Set.fromList
-    . filter isUnknownCubicalPrimitive
-    . referencedDefinitions
-
--- | The two syntax layers must at least agree on whether executable typed
--- semantics survive.  Exact QName sets need not match because Treeless erases
--- helper names such as interval endpoints.  A runtime-headed residual is
--- dynamic; a blocker below a static constructor/control node is mixed. Mixed
--- can publish a static shell plus typed-hole artifacts and a checked-ground or
--- explicit-environment bridge, while the whole-entry packet remains the equivalence
--- reference.
-classifyBindingTime
-  :: [QName]
-  -> [QName]
-  -> [QName]
-  -> [QName]
-  -> [QName]
-  -> TTerm
-  -> (BindingTimeClass, BindingTimeReason)
-classifyBindingTime
-  internalBlockers
-  treelessBlockers
-  internalUnknownCubical
-  treelessUnknownCubical
-  semanticCatalogDisagreements
-  term
-  | not (null internalUnknownCubical && null treelessUnknownCubical) =
-      (BindingUnsupported, UnknownCubicalPrimitive)
-  | not (null semanticCatalogDisagreements) =
-      (BindingUnsupported, InternalSemanticCatalogDisagreement)
-  | null internalBlockers && null treelessBlockers =
-      (BindingStatic, NoRuntimeBlockers)
-  | null internalBlockers || null treelessBlockers =
-      (BindingUnsupported, InternalTreelessAuditDisagreement)
-  | runtimeBlockerAtHead term =
-      (BindingDynamic, WholeEntryRuntimeHead)
-  | otherwise =
-      (BindingMixed, StaticContextAroundRuntimeBlocker)
-
-runtimeBlockerAtHead :: TTerm -> Bool
-runtimeBlockerAtHead = \case
-  TDef name -> needsTypedRuntime name
-  TApp function _ -> runtimeBlockerAtHead function
-  TLam body -> runtimeBlockerAtHead body
-  TLet _ body -> runtimeBlockerAtHead body
-  TCoerce term -> runtimeBlockerAtHead term
-  _ -> False
-
--- Compile-time-only audit fault for the unsupported-class verifier.
-testTreelessBlockers :: [QName] -> [QName]
-#if defined(CUBICAL_CHEZ_TEST_BINDING_AUDIT_DISAGREEMENT)
-testTreelessBlockers _ = []
-#else
-testTreelessBlockers = id
-#endif
-
-renderBindingTime :: BindingTimeClass -> String
-renderBindingTime = \case
-  BindingStatic -> "static"
-  BindingDynamic -> "dynamic"
-  BindingMixed -> "mixed"
-  BindingUnsupported -> "unsupported"
-
-bindingTimeReason :: BindingTimeReason -> String
-bindingTimeReason = \case
-  NoRuntimeBlockers -> "no-runtime-blockers"
-  WholeEntryRuntimeHead -> "whole-entry-runtime-head"
-  StaticContextAroundRuntimeBlocker -> "static-context-around-runtime-blocker"
-  InternalSemanticCatalogDisagreement ->
-    "internal-semantic-catalog-disagreement"
-  InternalTreelessAuditDisagreement -> "internal-treeless-audit-disagreement"
-  UnknownCubicalPrimitive -> "unknown-cubical-primitive"
-
-bindingTimeAction :: BindingTimeClass -> String
-bindingTimeAction = \case
-  BindingStatic -> "erase-types-and-emit"
-  BindingDynamic -> "typed-residual-whole-entry"
-  BindingMixed ->
-    "typed-residual-split-shell-ground-observation-by-id-whole-entry-reference"
-  BindingUnsupported -> "reject"
-
-bindingTimeDecision :: BindingTimeClass -> String
-bindingTimeDecision = \case
-  BindingStatic -> "static-closed"
-  BindingDynamic -> "typed-residual"
-  BindingMixed -> "typed-residual"
-  BindingUnsupported -> "unsupported"
-
-compiledRuntimeBlockers :: CompiledDef -> [QName]
-compiledRuntimeBlockers entry = mergeBlockers
-  (compiledInternalTermBlockers entry)
-  (compiledTreelessBlockers entry)
-
-compiledUnknownCubicalPrimitives :: CompiledDef -> [QName]
-compiledUnknownCubicalPrimitives entry = mergeBlockers
-  (compiledInternalTermUnknownCubical entry)
-  (compiledTreelessUnknownCubical entry)
-
-mergeBlockers :: [QName] -> [QName] -> [QName]
-mergeBlockers left right = Set.toList $ Set.fromList (left ++ right)
-
-renderBlockers :: [QName] -> String
-renderBlockers = \case
-  [] -> "none"
-  blockers -> commaSeparated (map prettyShow blockers)
-
-renderSemanticSources :: [(QName, String)] -> String
-renderSemanticSources = \case
-  [] -> "none"
-  sources -> commaSeparated
-    [ prettyShow name ++ "=" ++ source
-    | (name, source) <- sources
-    ]
-
-semanticCatalogStatus :: [QName] -> String
-semanticCatalogStatus [] = "agree"
-semanticCatalogStatus _ = "disagree"
-
-needsTypedRuntime :: QName -> Bool
-needsTypedRuntime name =
-  prettyShow name `elem` knownCubicalRuntimeQNames
-    || "transpX-" `isInfixOf` prettyShow name
-
-isUnknownCubicalPrimitive :: QName -> Bool
-isUnknownCubicalPrimitive name =
-  isCubicalPrimitiveCandidate rendered
-    && not (needsTypedRuntime name)
-  where
-    rendered = prettyShow name
-
-isCubicalPrimitiveCandidate :: String -> Bool
-isCubicalPrimitiveCandidate rendered =
-  "Agda.Primitive.Cubical." `isPrefixOf` rendered
-    || (isPrimitiveNamespace rendered && "prim" `isPrefixOf` localName rendered)
-  where
-    isPrimitiveNamespace name = any (`isPrefixOf` name)
-      [ "Agda.Builtin.Cubical."
-      , "Cubical.Primitive."
-      , "Cubical.Primitives."
-      ]
-
-localName :: String -> String
-localName = reverse . takeWhile (/= '.') . reverse
-
--- Pinned union of the runtime-sensitive names declared by the Agda 2.8 and
--- Agda 2.9 primitive libraries.  Keep this explicit: a new QName must first
--- be reviewed and added here, otherwise the unknown-primitive gate rejects it.
-knownCubicalRuntimeQNames :: [String]
-knownCubicalRuntimeQNames =
-  [ "Agda.Primitive.Cubical.IUniv"
-  , "Agda.Primitive.Cubical.I"
-  , "Agda.Primitive.Cubical.i0"
-  , "Agda.Primitive.Cubical.i1"
-  , "Agda.Primitive.Cubical.primIMin"
-  , "Agda.Primitive.Cubical.primIMax"
-  , "Agda.Primitive.Cubical.primINeg"
-  , "Agda.Primitive.Cubical.IsOne"
-  , "Agda.Primitive.Cubical.itIsOne"
-  , "Agda.Primitive.Cubical.IsOne1"
-  , "Agda.Primitive.Cubical.IsOne2"
-  , "Agda.Primitive.Cubical.Partial"
-  , "Agda.Primitive.Cubical.PartialP"
-  , "Agda.Primitive.Cubical.isOneEmpty"
-  , "Agda.Primitive.Cubical.primPOr"
-  , "Agda.Primitive.Cubical.primComp"
-  , "Agda.Primitive.Cubical.primTransp"
-  , "Agda.Primitive.Cubical.primHComp"
-  , "Agda.Primitive.Cubical.PathP"
-  , "Agda.Builtin.Cubical.Glue.primGlue"
-  , "Agda.Builtin.Cubical.Glue.prim^glue"
-  , "Agda.Builtin.Cubical.Glue.prim^unglue"
-  , "Agda.Builtin.Cubical.HCompU.prim^glueU"
-  , "Agda.Builtin.Cubical.HCompU.prim^unglueU"
-  , "Agda.Builtin.Cubical.HCompU.primFaceForall"
-  , "Agda.Builtin.Cubical.Sub.primSubOut"
-  ]
-
-findEntry :: ChezOptions -> [CompiledDef] -> Either String CompiledDef
-findEntry opts defs = case filter isEntry defs of
-  [entry] -> Right entry
-  [] -> Left $ "no closed, argument-free entry matched "
-    ++ show (chezEntry opts)
-  entries -> Left $ "ambiguous entry "
-    ++ show (chezEntry opts)
-    ++ ": "
-    ++ show (map (prettyShow . compiledName) entries)
-  where
-    isEntry def =
-      compiledFromMainModule def
-        && compiledIsEntry def
-
-isRequestedEntryName :: String -> QName -> Bool
-isRequestedEntryName requested name =
-  rendered == requested
-    || ('.' `notElem` requested && ('.' : requested) `isSuffixOf` rendered)
-  where
-    rendered = prettyShow name
-
-renderDefinition :: CompiledDef -> Either String String
-renderDefinition compiled = do
-  body <- compileTerm [] 0 (compiledTerm compiled)
-  pure $ "(define " ++ mangleQName (compiledName compiled) ++ " " ++ body ++ ")"
-
-renderChezConstructor :: QName -> [String] -> String
-renderChezConstructor name = renderChezConstructorSymbol (mangleQName name)
-
-renderChezConstructorSymbol :: String -> [String] -> String
-renderChezConstructorSymbol symbol fields =
-  "(vector '" ++ symbol ++ concatMap (" " ++) fields ++ ")"
-
-renderChezConstructorTag :: String -> String
-renderChezConstructorTag value =
-  renderChezVectorRef value $
-    chezCoreAbiConstructorTagIndex implementedChezCoreAbi
-
-renderChezConstructorField :: String -> Int -> String
-renderChezConstructorField value offset =
-  renderChezVectorRef value $
-    chezCoreAbiConstructorFieldBaseIndex implementedChezCoreAbi + offset
-
-renderChezVectorRef :: String -> Int -> String
-renderChezVectorRef value index =
-  "(vector-ref " ++ value ++ " " ++ show index ++ ")"
-
-renderChezApplication :: String -> [String] -> String
-renderChezApplication = foldl applyOne
-
-renderChezLambda :: String -> String -> String
-renderChezLambda variable body =
-  "(lambda (" ++ variable ++ ") " ++ body ++ ")"
-
-compileTerm :: [String] -> Int -> TTerm -> Either String String
-compileTerm env depth = \case
-  TVar index -> lookupVariable env index
-  TDef name -> pure (mangleQName name)
-  TApp (TCon name) args -> do
-    rendered <- traverse (compileTerm env depth) args
-    pure $ renderChezConstructor name rendered
-  TApp (TPrim primitive) args -> compilePrimitiveApplication env depth primitive args
-  TApp function args -> do
-    renderedFunction <- compileTerm env depth function
-    renderedArgs <- traverse (compileTerm env depth) args
-    pure (renderChezApplication renderedFunction renderedArgs)
-  TLam body -> do
-    let variable = "v" ++ show depth
-    renderedBody <- compileTerm (variable : env) (depth + 1) body
-    pure $ renderChezLambda variable renderedBody
-  TLit literal -> compileLiteral literal
-  TCon name -> pure $ renderChezConstructor name []
-  TLet value body -> do
-    renderedValue <- compileTerm env depth value
-    let variable = "v" ++ show depth
-    renderedBody <- compileTerm (variable : env) (depth + 1) body
-    pure $ "(let ((" ++ variable ++ " " ++ renderedValue ++ ")) " ++ renderedBody ++ ")"
-  TCase scrutinee caseInfo fallback alternatives ->
-    compileCase env depth scrutinee caseInfo fallback alternatives
-  TPrim primitive -> compilePrimitiveValue primitive
-  TUnit -> pure "#f"
-  TSort -> pure "#f"
-  TErased -> pure "#f"
-  TCoerce term -> compileTerm env depth term
-  TError TUnreachable -> pure "(error 'agda-chez \"unreachable code reached\")"
-  TError (TMeta message) -> pure $ "(error 'agda-chez " ++ schemeString message ++ ")"
-
--- | Lower a mixed static shell while replacing every planned blocker-headed
--- subtree with an opaque import handle.  The handle is data, never a fake
--- implementation of the typed term. Any runtime-headed subtree not covered by
--- the exact path inventory rejects lowering.
-compileTermWithHoleImports
-  :: Map.Map String (Int, ResidualHolePlan)
-  -> [String]
-  -> [String]
-  -> Int
-  -> TTerm
-  -> Either String String
-compileTermWithHoleImports imports path env depth term =
-  case Map.lookup (renderResidualHolePath path) imports of
-    Just (_, hole)
-      | residualHoleSupportsAutomaticDependentGroundEnvironment hole ->
-          let arity = residualHoleEnvironmentArity hole
-              available = take arity env
-              orderedVariables = reverse available
-          in if length available == arity
-            then pure $
-              "(cubical-chez-bind-dependent-ground-environment "
-                ++ "(cubical-chez-typed-hole-reference "
-                ++ schemeString (residualHoleId hole)
-                ++ ") "
-                ++ show arity
-                ++ " "
-                ++ "(vector "
-                ++ unwords orderedVariables
-                ++ "))"
-            else Left $
-              "dependent ground lexical environment is unavailable at "
-                ++ renderResidualHolePath path
-      | residualHoleSupportsAutomaticOrderedGroundEnvironment hole ->
-          let arity = residualHoleEnvironmentArity hole
-              available = take arity env
-              orderedVariables = reverse available
-              codecs = residualHoleOrderedGroundEnvironmentCodecs hole
-          in if length available == arity && length codecs == arity
-            then pure $
-              "(cubical-chez-bind-ground-environment "
-                ++ "(cubical-chez-typed-hole-reference "
-                ++ schemeString (residualHoleId hole)
-                ++ ") "
-                ++ "(vector "
-                ++ unwords (map (schemeString . renderResidualGroundCodec) codecs)
-                ++ ") "
-                ++ "(vector "
-                ++ unwords orderedVariables
-                ++ "))"
-            else Left $
-              "ordered ground lexical environment is unavailable at "
-                ++ renderResidualHolePath path
-      | Just codec <- residualHoleAutomaticSingleGroundCodec hole ->
-          case env of
-            variable : _ -> pure $
-              "(cubical-chez-bind-"
-                ++ renderResidualGroundCodec codec
-                ++ "-environment "
-                ++ "(cubical-chez-typed-hole-reference "
-                ++ schemeString (residualHoleId hole)
-                ++ ") "
-                ++ variable
-                ++ ")"
-            [] -> Left $
-              "single-"
-                ++ renderResidualGroundCodec codec
-                ++ " lexical environment is unavailable at "
-                ++ renderResidualHolePath path
-      | otherwise -> pure $
-          "(cubical-chez-typed-hole-reference "
-            ++ schemeString (residualHoleId hole)
-            ++ ")"
-    Nothing
-      | runtimeBlockerAtHead term -> Left $
-          "mixed residual static shell has an uncovered runtime subtree at "
-            ++ renderResidualHolePath path
-      | otherwise -> lower term
-  where
-    descend segment = compileTermWithHoleImports imports (path ++ [segment])
-    lower = \case
-      TVar index -> lookupVariable env index
-      TPrim primitive -> compilePrimitiveValue primitive
-      TDef name -> pure (mangleQName name)
-      TApp (TCon name) args -> do
-        rendered <- traverseIndexed "app-argument-" args
-        pure $ renderChezConstructor name rendered
-      TApp (TPrim primitive) args -> do
-        rendered <- traverseIndexed "app-argument-" args
-        compilePrimitiveApplicationRendered primitive rendered
-      TApp function args -> do
-        renderedFunction <- descend "app-function" env depth function
-        renderedArgs <- traverseIndexed "app-argument-" args
-        pure (renderChezApplication renderedFunction renderedArgs)
-      TLam body -> do
-        let variable = "v" ++ show depth
-        renderedBody <- descend "lambda-body" (variable : env) (depth + 1) body
-        pure $ renderChezLambda variable renderedBody
-      TLit literal -> compileLiteral literal
-      TCon name -> pure $ renderChezConstructor name []
-      TLet value body -> do
-        renderedValue <- descend "let-value" env depth value
-        let variable = "v" ++ show depth
-        renderedBody <- descend "let-body" (variable : env) (depth + 1) body
-        pure $ "(let ((" ++ variable ++ " " ++ renderedValue
-          ++ ")) " ++ renderedBody ++ ")"
-      TCase scrutinee caseInfo fallback alternatives ->
-        compileCaseWithHoleImports
-          imports path env depth scrutinee caseInfo fallback alternatives
-      TUnit -> pure "#f"
-      TSort -> pure "#f"
-      TErased -> pure "#f"
-      TCoerce coerced -> descend "coerce-body" env depth coerced
-      TError TUnreachable ->
-        pure "(error 'agda-chez \"unreachable code reached\")"
-      TError (TMeta message) ->
-        pure $ "(error 'agda-chez " ++ schemeString message ++ ")"
-
-    traverseIndexed prefix terms = sequence
-      [ descend (prefix ++ show index) env depth child
-      | (index, child) <- zip [(0 :: Int) ..] terms
-      ]
-
-compileCaseWithHoleImports
-  :: Map.Map String (Int, ResidualHolePlan)
-  -> [String]
-  -> [String]
-  -> Int
-  -> Int
-  -> CaseInfo
-  -> TTerm
-  -> [TAlt]
-  -> Either String String
-compileCaseWithHoleImports
-  imports path env depth scrutinee caseInfo fallback alternatives = do
-    value <- lookupVariable env scrutinee
-    renderedFallback <- compileTermWithHoleImports
-      imports (path ++ ["case-fallback"]) env depth fallback
-    case caseType caseInfo of
-      CTData _ -> do
-        clauses <- sequence
-          [ compileDataAlternativeWithHoleImports
-              imports
-              (path ++ ["case-alternative-" ++ show index])
-              env depth value alternative
-          | (index, alternative) <- zip [(0 :: Int) ..] alternatives
-          ]
-        pure $ "(case " ++ renderChezConstructorTag value ++ " " ++ unwords clauses
-          ++ " (else " ++ renderedFallback ++ "))"
-      CTNat -> do
-        clauses <- sequence
-          [ compileLiteralAlternativeWithHoleImports
-              imports
-              (path ++ ["case-alternative-" ++ show index])
-              env depth value alternative
-          | (index, alternative) <- zip [(0 :: Int) ..] alternatives
-          ]
-        pure $ "(cond " ++ unwords clauses
-          ++ " (else " ++ renderedFallback ++ "))"
-      other -> Left $
-        "Cubical Chez backend: unsupported mixed-shell case type " ++ show other
-
-compileDataAlternativeWithHoleImports
-  :: Map.Map String (Int, ResidualHolePlan)
-  -> [String]
-  -> [String]
-  -> Int
-  -> String
-  -> TAlt
-  -> Either String String
-compileDataAlternativeWithHoleImports imports path env depth value = \case
-  TACon constructor arity body -> do
-    let fields =
-          [ "field" ++ show depth ++ "_" ++ show index
-          | index <- [0 .. arity - 1]
-          ]
-        bindings = zipWith
-          (\field index ->
-            "(" ++ field ++ " "
-              ++ renderChezConstructorField value index ++ ")")
-          fields
-          [0 :: Int ..]
-        bodyEnv = reverse fields ++ env
-    renderedBody <- compileTermWithHoleImports
-      imports (path ++ ["constructor-body"]) bodyEnv (depth + arity) body
-    pure $ "((" ++ mangleQName constructor ++ ") (let ("
-      ++ unwords bindings ++ ") " ++ renderedBody ++ "))"
-  alternative -> Left $
-    "Cubical Chez backend: unsupported mixed-shell data alternative "
-      ++ show alternative
-
-compileLiteralAlternativeWithHoleImports
-  :: Map.Map String (Int, ResidualHolePlan)
-  -> [String]
-  -> [String]
-  -> Int
-  -> String
-  -> TAlt
-  -> Either String String
-compileLiteralAlternativeWithHoleImports imports path env depth value = \case
-  TALit literal body -> do
-    renderedLiteral <- compileLiteral literal
-    renderedBody <- compileTermWithHoleImports
-      imports (path ++ ["literal-body"]) env depth body
-    pure $ "((equal? " ++ value ++ " " ++ renderedLiteral
-      ++ ") " ++ renderedBody ++ ")"
-  TAGuard guard body -> do
-    renderedGuard <- compileTermWithHoleImports
-      imports (path ++ ["guard-test"]) env depth guard
-    renderedBody <- compileTermWithHoleImports
-      imports (path ++ ["guard-body"]) env depth body
-    pure $ "(" ++ renderedGuard ++ " " ++ renderedBody ++ ")"
-  alternative -> Left $
-    "Cubical Chez backend: unsupported mixed-shell literal alternative "
-      ++ show alternative
-
-compileCase :: [String] -> Int -> Int -> CaseInfo -> TTerm -> [TAlt] -> Either String String
-compileCase env depth scrutinee caseInfo fallback alternatives = do
-  value <- lookupVariable env scrutinee
-  renderedFallback <- compileTerm env depth fallback
-  case caseType caseInfo of
-    CTData _ -> do
-      clauses <- traverse (compileDataAlternative env depth value) alternatives
-      pure $ "(case " ++ renderChezConstructorTag value ++ " " ++ unwords clauses
-        ++ " (else " ++ renderedFallback ++ "))"
-    CTNat -> do
-      clauses <- traverse (compileLiteralAlternative env depth value) alternatives
-      pure $ "(cond " ++ unwords clauses ++ " (else " ++ renderedFallback ++ "))"
-    other -> Left $ "Cubical Chez backend: unsupported case type " ++ show other
-
-compileDataAlternative :: [String] -> Int -> String -> TAlt -> Either String String
-compileDataAlternative env depth value = \case
-  TACon constructor arity body -> do
-    let fields = ["field" ++ show depth ++ "_" ++ show index | index <- [0 .. arity - 1]]
-        bindings = zipWith
-          (\field index ->
-            "(" ++ field ++ " "
-              ++ renderChezConstructorField value index ++ ")")
-          fields
-          [0 :: Int ..]
-        bodyEnv = reverse fields ++ env
-    renderedBody <- compileTerm bodyEnv (depth + arity) body
-    pure $ "((" ++ mangleQName constructor ++ ") (let (" ++ unwords bindings ++ ") " ++ renderedBody ++ "))"
-  alternative -> Left $ "Cubical Chez backend: unsupported data alternative " ++ show alternative
-
-compileLiteralAlternative :: [String] -> Int -> String -> TAlt -> Either String String
-compileLiteralAlternative env depth value = \case
-  TALit literal body -> do
-    renderedLiteral <- compileLiteral literal
-    renderedBody <- compileTerm env depth body
-    pure $ "((equal? " ++ value ++ " " ++ renderedLiteral ++ ") " ++ renderedBody ++ ")"
-  TAGuard guard body -> do
-    renderedGuard <- compileTerm env depth guard
-    renderedBody <- compileTerm env depth body
-    pure $ "(" ++ renderedGuard ++ " " ++ renderedBody ++ ")"
-  alternative -> Left $ "Cubical Chez backend: unsupported literal alternative " ++ show alternative
-
-compilePrimitiveApplication :: [String] -> Int -> TPrim -> [TTerm] -> Either String String
-compilePrimitiveApplication env depth primitive args = do
-  rendered <- traverse (compileTerm env depth) args
-  compilePrimitiveApplicationRendered primitive rendered
-
-compilePrimitiveApplicationRendered
-  :: TPrim
-  -> [String]
-  -> Either String String
-compilePrimitiveApplicationRendered primitive rendered =
-  case
-    [ form
-    | (candidate, arity, form) <- chezPrimitiveApplicationTable
-    , candidate == primitive
-    , arity == length rendered
-    ] of
-    ChezPrimitiveBinary operator : _ -> case rendered of
-      [x, y] -> pure $ "(" ++ operator ++ " " ++ x ++ " " ++ y ++ ")"
-      _ -> unsupported
-    ChezPrimitiveIf : _ -> case rendered of
-      [condition, yes, no] -> pure $
-        "(if " ++ condition ++ " " ++ yes ++ " " ++ no ++ ")"
-      _ -> unsupported
-    ChezPrimitiveBegin : _ -> case rendered of
-      [first, second] -> pure $
-        "(begin " ++ first ++ " " ++ second ++ ")"
-      _ -> unsupported
-    ChezPrimitiveIdentity : _ -> case rendered of
-      [value] -> pure value
-      _ -> unsupported
-    [] -> unsupported
-  where
-    unsupported = Left $
-      "Cubical Chez backend: unsupported primitive application "
-        ++ show primitive ++ "/" ++ show (length rendered)
-
-compilePrimitiveValue :: TPrim -> Either String String
-compilePrimitiveValue primitive = case
-  [ operator
-  | (candidate, operator) <- chezPrimitiveFirstClassTable
-  , candidate == primitive
-  ] of
-  operator : _ -> curried2 operator
-  [] -> Left $
-    "Cubical Chez backend: unsupported first-class primitive " ++ show primitive
-  where
-    curried2 operator = pure $
-      renderChezLambda "x" $
-        renderChezLambda "y" $ "(" ++ operator ++ " x y)"
-
-compileLiteral :: Literal -> Either String String
-compileLiteral = \case
-  LitNat number -> pure (show number)
-  LitWord64 number -> pure (show number)
-  LitFloat number -> pure (show number)
-  LitString value -> pure (schemeString (Text.unpack value))
-  LitChar value -> pure $ "#\\" ++ [value]
-  LitQName value -> pure $ "'" ++ mangleQName value
-  literal@LitMeta {} -> Left $ "Cubical Chez backend: cannot compile meta literal " ++ show literal
-
-lookupVariable :: [String] -> Int -> Either String String
-lookupVariable env index = case drop index env of
-  variable : _ -> Right variable
-  [] -> Left $ "Cubical Chez backend: invalid de Bruijn index " ++ show index
-
-applyOne :: String -> String -> String
-applyOne function argument = "(" ++ function ++ " " ++ argument ++ ")"
-
-mangleQName :: QName -> String
-mangleQName = ("agda_" ++) . concatMap encode . prettyShow
-  where
-    encode character
-      | isAlphaNum character = [character]
-      | otherwise = "_" ++ showHex (ord character) "_"
-
-schemeString :: String -> String
-schemeString = show
-
-renderDump :: [CompiledDef] -> [QName] -> String
-renderDump defs unresolved = unlines $
-  concatMap render defs
-    ++ case unresolved of
-      [] -> []
-      names -> "Unresolved runtime definitions:" : map (("  " ++) . prettyShow) names
-  where
-    render compiled =
-      [ prettyShow (compiledName compiled)
-      , "  " ++ summarizeTerm (compiledTerm compiled)
-      ]
-
-summarizeTerm :: TTerm -> String
-summarizeTerm = \case
-  TVar index -> "TVar " ++ show index
-  TPrim primitive -> "TPrim " ++ show primitive
-  TDef name -> "TDef(" ++ prettyShow name ++ ")"
-  TApp function arguments ->
-    "TApp(" ++ summarizeTerm function ++ ", [" ++ commaSeparated (map summarizeTerm arguments) ++ "])"
-  TLam body -> "TLam(" ++ summarizeTerm body ++ ")"
-  TLit literal -> "TLit(" ++ show literal ++ ")"
-  TCon name -> "TCon(" ++ prettyShow name ++ ")"
-  TLet value body -> "TLet(" ++ summarizeTerm value ++ ", " ++ summarizeTerm body ++ ")"
-  TCase scrutinee info fallback alternatives ->
-    "TCase(" ++ show scrutinee ++ ", " ++ summarizeCaseType (caseType info) ++ ", "
-      ++ summarizeTerm fallback ++ ", [" ++ commaSeparated (map summarizeAlternative alternatives) ++ "])"
-  TUnit -> "TUnit"
-  TSort -> "TSort"
-  TErased -> "TErased"
-  TCoerce term -> "TCoerce(" ++ summarizeTerm term ++ ")"
-  TError problem -> "TError(" ++ show problem ++ ")"
-  where
-    summarizeAlternative = \case
-      TACon constructor arity body ->
-        "TACon(" ++ prettyShow constructor ++ ", " ++ show arity ++ ", " ++ summarizeTerm body ++ ")"
-      TAGuard guard body ->
-        "TAGuard(" ++ summarizeTerm guard ++ ", " ++ summarizeTerm body ++ ")"
-      TALit literal body ->
-        "TALit(" ++ show literal ++ ", " ++ summarizeTerm body ++ ")"
-
-summarizeCaseType :: CaseType -> String
-summarizeCaseType = \case
-  CTData name -> "CTData(" ++ prettyShow name ++ ")"
-  CTNat -> "CTNat"
-  CTInt -> "CTInt"
-  CTChar -> "CTChar"
-  CTString -> "CTString"
-  CTFloat -> "CTFloat"
-  CTQName -> "CTQName"
-
-commaSeparated :: [String] -> String
-commaSeparated = foldr join ""
-  where
-    join item "" = item
-    join item rest = item ++ ", " ++ rest
+Y™Áäx-ÆÈ‹j◊ù¢Îi∫⁄+äßj[hëÈ‹¢ÈÌ◊MyÔîËµ©h∫⁄n∂XßzÕ^ÀH»Së’PQ—H‘À_BûÀH»Së’PQ—H\ö]ôQŸ[ô\öX»À_BûÀH»Së’PQ—Hõ^XõR[ú›[òŸ\»À_BûÀH»Së’PQ—H[XôPÿ\ŸHÀ_BûÀH»Së’PQ—H›ô\õÿYY›ö[ô‹»À_BÇõ[Ÿ[H›XöXÿ[⁄^ãêòX⁄Ÿ[ô
+⁄^êòX⁄Ÿ[ô
+H⁄\ôBÇö[\‹ùYŸKê€€\[\ãêòX⁄Ÿ[ôà⁄YàYö[ôY
+’PíP–S–“Vó–Q—WÃéJBö[\‹ùYŸKê€€\[\ãê€€[[€à
+›\íQäBàŸ[ôYÇà⁄YàYö[ôY
+’PíP–S–“Vó–Q—WÃéJBö[\‹ùYŸKê€€\[\ãï’ôY[\‹»
+€‹ŸY\õU’ôY[\‹ÀZ—Yò][––€€ôöY BàŸ[ŸBö[\‹ùYŸKê€€\[\ãï’ôY[\‹»
+–‘›Xú›
+\ò\ŸU[ù\ŸY
+K€‹ŸY\õU’ôY[\‹ BàŸ[ôYÇö[\‹ùYŸKîﬁ[ù^ê€€[[€ãîô]H
+ô]T⁄› Bö[\‹ùYŸKîﬁ[ù^ê€€[[€à
+Y[ô»
+õ›Y[äKŸ]Y[ô Bà⁄YàYö[ôY
+’PíP–S–“Vó’T’’SîëT””ëQ”QUJHYö[ôY
+’PíP–S–“Vó’T’—Së“SëW’SîëT””ëQ”QUJBö[\‹ùYŸKîﬁ[ù^ê€€[[€à
+Y]RY
+Y]RY
+Kõ”[Ÿ[Sò[YR\⁄
+BàŸ[ôYÇö[\‹ùYŸKîﬁ[ù^í[ù\õò[à
+€]\ŸH
+ãäBà€€íXYà€€í[ôõ¬à\õBà\Bà[”\›à
+Bö[\‹ù]X[YöYYYŸKîﬁ[ù^í[ù\õò[\»[ù\õò[ö[\‹ùYŸKîﬁ[ù^í[ù\õò[ìò[Y\»
+ò[Y\“[ãò[Y\“[äBö[\‹ùYŸKîﬁ[ù^ì]\ò[
+]\ò[
+ãäJBö[\‹ùYŸKîﬁ[ù^í[ù\õò[ìY]Uò\ú»
+õ”Y]\ Bö[\‹ùYŸKï\P⁄X⁄⁄[ôÀîôX€‹ô¬à
+]Q^[ôôX€‹ô¬à\—]TôX€‹ô\Bà\‘ôX€‹ôàZ–€€Çà
+Bö[\‹ùYŸKï\P⁄X⁄⁄[ôÀîôYXŸH
+õ‹õX[\ŸKôYXŸJBö[\‹ùYŸKï\P⁄X⁄⁄[ôÀëúôYH
+€‹ŸY
+Bö[\‹ùYŸKï\P⁄X⁄⁄[ôÀî›Xú›]]H
+[S[K[TJBö[\‹ù]X[YöYYYŸKï\P⁄X⁄⁄[ôÀê⁄X⁄“[ù\õò[\»⁄X⁄“[ù\õò[ö[\‹ù]X[YöYYYŸKï\P⁄X⁄⁄[ôÀì[€òYêùZ[[à\»ùZ[[Çà⁄YàYö[ôY
+’PíP–S–“Vó–Q—WÃéJBö[\‹ù]X[YöYYYŸKï\P⁄X⁄⁄[ôÀîŸ\öX[\ŸH\»Ÿ\öX[\ŸBàŸ[ôYÇö[\‹ùYŸKï][ÀëŸ]‹à
+\ô—\ÿ‹à
+õ–\ôÀô\P\ô Bà‹\ÿ‹à
+‹[€äBà
+Bö[\‹ùYŸKï][Àí[\‹‹⁄XõH
+◊“ST‘‘“PìW◊ Bà⁄YàYö[ôY
+’PíP–S–“Vó’T’”êëW–QTTó‘‘R—JHYö[ôY
+’PíP–S–“Vó”êëW–QTTó––SëQUJBö[\‹ù]X[YöYY›XöXÿ[⁄^ãìòôKêY\\î‹ZŸH\»òôT‹ZŸBàŸ[ôYÇà⁄YàYö[ôY
+’PíP–S–“Vó–Q—WÃéJBö[\‹ù]X[YöYYYŸKï][ÀîŸ\öX[^ôH\»ò]‘Ÿ\öX[\ŸBàŸ[ôYÇö[\‹ù€€ùõ€ëY\Ÿ\H
+ëë]JBö[\‹ù€€ùõ€ì[€òY
+õ‹ìKõ‹ìWÀ[õ\‹À⁄[äBö[\‹ù€€ùõ€ì[€òYë^Ÿ\
+ÿ]⁄\úõ‹ãõ›—\úõ‹äBö[\‹ù€€ùõ€ì[€òYíSÀê€\‹»
+YùS Bà⁄YàYö[ôY
+’PíP–S–“Vó–Q—WÃéJBö[\‹ù€€ùõ€ì[€òYïò[úÀìX^XôH
+X^XôUù[ìX^XôU
+BàŸ[ôYÇö[\‹ù]X[YöYY]Kêû]T›ö[ô»\»û]T›ö[ô¬ö[\‹ù]Kê⁄\à
+\–[Sù[K‹ô
+Bö[\‹ù]Kì\›
+[ù\òÿ[]K\“[ôö^Ÿã\‘ôYö^Ÿã\‘›Yôö^ŸäBö[\‹ù]X[YöYY]KìX\î›öX›\»X\ö[\‹ù]KìX^XôH
+ÿ]X^Xô\Àúõ€SX^XôJBö[\‹ù]KíS‘ôYà
+[ŸYûRS‘ôYâÀô]“S‘ôYãôXYS‘ôYäBö[\‹ù]X[YöYY]KîŸ]\»Ÿ]ö[\‹ù]X[YöYY]Kï^\»^ö[\‹ù]Kï€‹ô
+€‹ôç
+Bö[\‹ù“ÀëŸ[ô\öX‹»
+Ÿ[ô\öX Bö[\‹ù“Àê€ÿ⁄»
+Ÿ][€õ›€öX’[YSîŸX Bö[\‹ùù[Y\öX»
+⁄›“^
+Bö[\‹ùﬁ\›[Kë\ôX›‹ûBà
+‹ôX]Q\ôX›‹ûRYìZ\‹⁄[ô¬àŸ\—\ôX›‹ûQ^\›àŸ\—ö[Q^\›à\›\ôX›‹ûBàô[[›ôQö[Bà
+Bö[\‹ùﬁ\›[Këö[T]
+
+œäJBö[\‹ùﬁ\›[KíS»
+õ\⁄Ÿ]ö[ò\ûS[ŸK››]
+BÇô]H⁄^ì‹[€ú»H⁄^ì‹[€ú¬à»⁄^ë[òXõYéàõ€€à⁄^ë[ô⁄[ôHéà›ö[ô¬à⁄^ìòôQò[òX⁄»éà›ö[ô¬à⁄^îô\⁄YX[€XﬁHéà›ö[ô¬à⁄^îX⁄Ÿ]ö[HéàX^XôHö[T]à⁄^ì›]]\ôX›‹ûHéàö[T]à⁄^ë[ùûHéà›ö[ô¬àBà\ö]ö[ô»
+Ÿ[ô\öX BÇö[ú›[òŸHëë]H⁄^ì‹[€ú¬Çô]H€€\[YYàH€€\[YYÇà»€€\[Yò[YHéàSò[YBà€€\[Y\õHéà\õBà€€\[Yúõ€SXZ[ì[Ÿ[Héàõ€€à€€\[Y\—[ùûHéàõ€€à€€\[Y[ù\õò[\õPõÿ⁄Ÿ\ú»éà‘Sò[YWBà€€\[Y[ù\õò[\Põÿ⁄Ÿ\ú»éà‘Sò[YWBà€€\[Y[ù\õò[\õPÿ][Ÿ–õÿ⁄Ÿ\ú»éà‘Sò[YWBà€€\[Y[ù\õò[\Pÿ][Ÿ–õÿ⁄Ÿ\ú»éà‘Sò[YWBà€€\[Y[ù\õò[\õTŸ[X[ùX‘€›\òŸ\»éà Sò[YK›ö[ô WBà€€\[Y[ù\õò[\TŸ[X[ùX‘€›\òŸ\»éà Sò[YK›ö[ô WBà€€\[Y[ù\õò[\õTŸ[X[ùX–ÿ][Ÿ—\ÿY‹ôY[Y[ù»éà‘Sò[YWBà€€\[Y[ù\õò[\TŸ[X[ùX–ÿ][Ÿ—\ÿY‹ôY[Y[ù»éà‘Sò[YWBà€€\[YôY[\‹–õÿ⁄Ÿ\ú»éà‘Sò[YWBà€€\[Y[ù\õò[\õU[ö€õ›€ê›XöXÿ[éà‘Sò[YWBà€€\[Y[ù\õò[\U[ö€õ›€ê›XöXÿ[éà‘Sò[YWBà€€\[YôY[\‹’[ö€õ›€ê›XöXÿ[éà‘Sò[YWBà€€\[Yö[ô[ô’[YHéàö[ô[ô’[YP€\‹¬à€€\[Yö[ô[ô‘ôX\€€àéàö[ô[ô’[YTôX\€€Çà€€\[Yô\]Y\›Y[ô⁄[ôHéà›ö[ô¬à€€\[YYôôX›]ôQ[ô⁄[ôHéà›ö[ô¬à€€\[YòôQò[òX⁄‘€XﬁHéà›ö[ô¬à€€\[YòôQò[òX⁄’\ŸYéàõ€€à€€\[YòôQò[òX⁄‘ôX\€€àéà›ö[ô¬à€€\[Y[ô⁄[ôQ]öY[òŸHéà‘›ö[ô◊Bà€€\[Y\Yô\⁄YX[éàX^XôH\Yô\⁄YX[à€€\[Y[ô⁄[ôU›[ò[õ‹ŸX€€ô»éà€‹ôçà€€\[YòôQ]ò[X][€ìò[õ‹ŸX€€ô»éàX^XôH€‹ôçà€€\[YòôTôXYòX⁄”ò[õ‹ŸX€€ô»éàX^XôH€‹ôçà€€\[Yô\›[YZ\‹⁄[€ìò[õ‹ŸX€€ô»éà€‹ôçà€€\[Y[ù\õò[]Y]ò[õ‹ŸX€€ô»éà€‹ôçà€€\[YôY[\‹”ò[õ‹ŸX€€ô»éà€‹ôçàBÇô]Hö[ô[ô’[YP€\‹¬àHö[ô[ô‘›]X¬àö[ô[ô—[ò[ZX¬àö[ô[ô”Z^Yàö[ô[ô’[ú›\‹ùYà\ö]ö[ô»
+\JBÇô]Hö[ô[ô’[YTôX\€€ÇàHõ‘ù[ù[YPõÿ⁄Ÿ\ú¬à⁄€Q[ùûTù[ù[YRXYà›]X–€€ù^\õ›[ôù[ù[YPõÿ⁄Ÿ\Çà[ù\õò[Ÿ[X[ùX–ÿ][Ÿ—\ÿY‹ôY[Y[ùà[ù\õò[ôY[\‹–]Y]\ÿY‹ôY[Y[ùà[ö€õ›€ê›XöXÿ[ö[Z]]ôBà\ö]ö[ô»
+\JBÇãKHHö[X\ûHö[ô[ôÀ][YH]öY[òŸHõ‹à€ôH⁄X⁄ŸY[ù\õò[ò[YKàBãKHŸ[X[ùX»⁄YH\»\ö]ôYúõ€HYŸI‹»ôY⁄\›\ôY›XöXÿ[ùZ[[ã‹ö[Z]]ôBãKHY[ù]Y\»
+\»⁄X⁄ŸYÿ[ã[‹\ò][€àY]Y]JK⁄[HHÿ][Ÿ»⁄YH\¬ãKHH[õôYãéÃãéH€€\]Xö[]H[›€\›àXõXÿ][€àô\]Z\ô\»õ›⁄Y\¬ãKH»Y‹ôYN»H[›€\›\»õ»€ôŸ\à]Ÿ[àH[ù\õò[€\‹⁄YöY\ãÇô]H[ù\õò[Ÿ[X[ùX–]Y]H[ù\õò[Ÿ[X[ùX–]Y]à»[ù\õò[Ÿ[X[ùX–õÿ⁄Ÿ\ú»éà‘Sò[YWBà[ù\õò[ÿ][Ÿ–õÿ⁄Ÿ\ú»éà‘Sò[YWBà[ù\õò[Ÿ[X[ùX‘€›\òŸ\»éà Sò[YK›ö[ô WBà[ù\õò[Ÿ[X[ùX–ÿ][Ÿ—\ÿY‹ôY[Y[ù»éà‘Sò[YWBà[ù\õò[[ö€õ›€ê›XöXÿ[ö[Z]]ô\»éà‘Sò[YWBàBÇãKH›XõHXX⁄[ôK\ôXYXõHòZ[\ôH^€õ€^Kà[X[à^[ò][€ú»X^H‹õ›ÀãKHù]]]€X][€à⁄›[Ÿ^H€õH€à\ŸH€Ÿ\ÀÇô]HòX⁄Ÿ[ôòZ[\ôP€\‹¬àH[ùò[Y€€ôöY›\ò][€Çà[ùûTôZôX›YàòôU[ò]òZ[XõBàòôU[ú›\‹ùYôX]\ôBà[ô⁄[ôU[Y[›]àòôQ^X›][€ëòZ[Yà[ô⁄[ôTô\›[[ùò[Yà[ú›\‹ùYõŸ‹ò[Bàô\⁄YX[ô\]Z\ôYàô\⁄YX[^ò][€ëòZ[Yàÿ⁄[YS›Ÿ\ö[ô—òZ[YÇãKH]öY[òŸHô]Z[ôY⁄[àHÿ[ôY]HôY[\‹»\õH›[ôYY»\YãKH›XöXÿ[Ÿ[X[ùX‹Ààõ›HXY€õ‹›X»X[öYô\›[ôHYŸHãéHX⁄Ÿ]ãKHúöYŸH€€ú›[YH\»‹öY⁄[ò[[ù\õò[\õH[ô\N»õ»\Y[ôõ‹õX][€ÇãKH\»ôX€€ú›ùX›Yúõ€H\ò\ŸYôY[\‹»ﬁ[ù^Çô]H\Yô\⁄YX[H\Yô\⁄YX[à»ô\⁄YX[\õHéà\õBàô\⁄YX[\Héà\Bàô\⁄YX[\ôX›\[ô[ò⁄Y\»éà‘Sò[YWBàBÇãKHH⁄X⁄ŸY\[ô[òﬁH‹ò\õ‹àH›\úô[ù⁄€KY[ùûHô\⁄YX[à]ô\ûBãKHSò[YH[àHò[ú⁄]]ôH€‹›\ôHÿ\»ô\€€ôYúõ€HYŸI‹»›\úô[ù⁄Y€ò]\ôKÇãKHYŸHùZ[[úÀ‹ö[Z]]ô\»\ôHô]Z[ôY\»õ€ãY^[ôY⁄Y€ò]\ôHX]ô\Œ¬ãKH‹ô[ò\ûHYö[ö][€ú»\ôHò]ô\úŸYõ›Y⁄Z\à⁄X⁄ŸYYö[ö][€àò[YKÇô]Hô\⁄YX[€‹›\ôHHô\⁄YX[€‹›\ôBà»ô\⁄YX[€‹›\ôT^[ÿYéà\Yô\⁄YX[àô\⁄YX[€‹›\ôTô\€€ôY\[ô[ò⁄Y\»éà‘Sò[YWBàô\⁄YX[€‹›\ôQ^[ôYYö[ö][€ú»éà‘Sò[YWBàô\⁄YX[€‹›\ôT⁄Y€ò]\ôSX]ô\»éà‘Sò[YWBàô\⁄YX[€‹›\ôQ^€YYô\Ÿ[ù][€ë\[ô[ò⁄Y\»éà‘Sò[YWBàBÇô]H\[ô[òﬁQ‹ò\H\[ô[òﬁQ‹ò\à»\[ô[òﬁQ‹ò\ô\€€ôYéà‘Sò[YWBà\[ô[òﬁQ‹ò\^[ôYéà‘Sò[YWBà\[ô[òﬁQ‹ò\X]ô\»éà‘Sò[YWBà\[ô[òﬁQ‹ò\^€YYô\Ÿ[ù][€àéà‘Sò[YWBàBÇãKHH]\õZ[ö\›X»[àõ‹àÿ\ùö[ô»X^[X[õÿ⁄Ÿ\ãZXYYôY[\‹»›XùôY\¬ãKH›]ŸàHZ^Y[ùûKàôY[\‹»õ›öY\»Y[ù]H€õNàXX⁄Ÿ[X›Y›XùôYBãKH]\›X]⁄^X›H€ôH›Xù\õH\ÿ€›ô\ôYûHYŸI‹»[ù\õò[ôX⁄X⁄Ÿ\ããKH⁄X⁄›\Y\»H]]‹ö]]]ôH\õK\K[ôÿÿ[[\ÿ€‹Kà‹[ÇãKH€›\òŸ\»\ôH[XôK[YùYôYõ‹ôH^HôX€€YHX⁄Ÿ]^[ÿYÀÇô]Hô\⁄YX[€XŸT[ÇàHô\⁄YX[€XŸSõ›\XÿXõH›ö[ô¬àô\⁄YX[€XŸT[õôY‘ô\⁄YX[€T[óBÇô]Hô\⁄YX[€T[àHô\⁄YX[€T[Çà»ô\⁄YX[€RYéà›ö[ô¬àô\⁄YX[€T]éà›ö[ô¬àô\⁄YX[€Põÿ⁄Ÿ\ú»éà‘Sò[YWBàô\⁄YX[€P€‹›\ôHéàô\⁄YX[€‹›\ôBàô\⁄YX[€Pÿ[XõPXöHéàô\⁄YX[€Pÿ[XõPXöBàô\⁄YX[€T€›\òŸP€‹ŸYéàõ€€àô\⁄YX[€Q[ùö\õ€õY[ù\ö]Héà[ùàBÇãKH[Xô\ò][Hò\úõ›»ÿ\Xö[]Y\»\ö]ôYúõ€HH⁄X⁄ŸY€H\KÇãKH€‹ŸY‹⁄[ô€K\€›€\»XÿŸ\€ôHö\⁄XõHùZ[[àõ€€”ò]’€‹ôç–⁄\ã“[ù\ô›[Y[ù¬ãKH[à‹[à][K\€›€HX^H[ú›XYÿ\úûH[à‹ô\ôYõ€ãY\[ô[ùãKHõ€€”ò]’€‹ôç–⁄\ã“[ùãKH[ùö\õ€õY[ùôX›‹ãà\Xÿ][€à[ôô\›[€€ú›[\[€à›^H[ú⁄YHYŸN¬ãKH€õHHö[ò[õ€€”ò]ÿúŸ\ùò][€à‹õ‹‹Ÿ\»òX⁄»»⁄^ãÇô]Hô\⁄YX[€Pÿ[XõPXöBàHô\⁄YX[€SÿúŸ\ùò][€ì€õBàô\⁄YX[€U[ò\ûQ‹õ›[ô[[Z[ò][€àô\⁄YX[‹õ›[ô€ŸX¬àô\⁄YX[€S‹ô\ôY‹õ›[ô[ùö\õ€õY[ù[[Z[ò][€à‘ô\⁄YX[‹õ›[ô€ŸX◊Bàô\⁄YX[€Q\[ô[ù‹õ›[ô[ùö\õ€õY[ù[[Z[ò][€Çà\ö]ö[ô»
+\JBÇô]Hô\⁄YX[‹õ›[ô€ŸX¬àHô\⁄YX[‹õ›[ôõ€€àô\⁄YX[‹õ›[ôò]àô\⁄YX[‹õ›[ô€‹ôçàô\⁄YX[‹õ›[ô⁄\Çàô\⁄YX[‹õ›[ô[ùà\ö]ö[ô»
+\JBÇô]Hô\⁄YX[‹õ›[ô€ŸX—\ÿ‹ö\‹àHô\⁄YX[‹õ›[ô€ŸX—\ÿ‹ö\‹Çà»‹õ›[ô€ŸX—\ÿ‹ö\‹ê€ŸX»éàô\⁄YX[‹õ›[ô€ŸX¬à‹õ›[ô€ŸX—\ÿ‹ö\‹ìò[YHéà›ö[ô¬à‹õ›[ô€ŸX—\ÿ‹ö\‹ê\ô›[Y[ùò[Y]‹àéà›ö[ô¬à‹õ›[ô€ŸX—\ÿ‹ö\‹ê\ô›[Y[ùôZYöY\àéà›ö[ô¬à‹õ›[ô€ŸX—\ÿ‹ö\‹ë[ùûT\úŸ\àéà›ö[ô¬à‹õ›[ô€ŸX—\ÿ‹ö\‹ïò[YTôZYöY\àéà›ö[ô¬àBÇúô\⁄YX[‹õ›[ô€ŸX—\ÿ‹ö\‹ú»éà‘ô\⁄YX[‹õ›[ô€ŸX—\ÿ‹ö\‹óBúô\⁄YX[‹õ›[ô€ŸX—\ÿ‹ö\‹ú»Bà»ô\⁄YX[‹õ›[ô€ŸX—\ÿ‹ö\‹Çàô\⁄YX[‹õ›[ôõ€€àòõ€€Çàò›XöXÿ[X⁄^ã]ò[YXõ€€X\ô›[Y[ù»Çàä[XôH
+]\ò[
+H
+›ö[ôÀX\[ôêYŸKêùZ[[ãêõ€€óà]\ò[
+JHÇàä[XôH
+]\ò[
+H
+›XöXÿ[X⁄^ãXYŸKXõ€€]ò[YH]\ò[
+JHÇà
+ä[XôH
+ò[YJH
+›ö[ôÀX\[ôêYŸKêùZ[[ãêõ€€óàÇà
+ »à
+›XöXÿ[X⁄^ãXYŸKXõ€€[]\ò[ò[YJJJHÇà
+Bàô\⁄YX[‹õ›[ô€ŸX—\ÿ‹ö\‹Çàô\⁄YX[‹õ›[ôò]àõò]Çàò›XöXÿ[X⁄^ã]ò[Y[ò]X\ô›[Y[ù»Çàä[XôH
+]\ò[
+H]\ò[
+HÇàä[XôH
+]\ò[
+H
+›XöXÿ[X⁄^ãXYŸK[ò]]ò[YH]\ò[
+JHÇà
+ä[XôH
+ò[YJHÇà
+ »à
+[õ\‹»
+[ô
+[ùYŸ\è»ò[YJH
+^X›»ò[YJHÇà
+ »à
+èHò[YH
+H
+Hò[YHéMMçÃéMJJHÇà
+ »à
+›XöXÿ[X⁄^ãXúöYŸKYòZ[ê–÷ãUTQPîíQ—KQSïíTì”ìQSïàÇà
+ »àô^X›Yõ›[ôY⁄^àYŸHò]äJHÇà
+ »à
+ù[Xô\ãOú›ö[ô»ò[YJJHÇà
+Bàô\⁄YX[‹õ›[ô€ŸX—\ÿ‹ö\‹Çàô\⁄YX[‹õ›[ô€‹ôçàù€‹ôçÇàò›XöXÿ[X⁄^ã]ò[Y]€‹ôçX\ô›[Y[ù»Çà
+ä[XôH
+]\ò[
+HÇà
+ »à
+›ö[ôÀX\[ôäYŸKêùZ[[ãï€‹ôúö[U€‹ôçúõ€Sò]àÇà
+ »à]\ò[à
+WäJHÇà
+Bàä[XôH
+]\ò[
+H
+›XöXÿ[X⁄^ãXYŸK]€‹ôç]ò[YH]\ò[
+JHÇà
+ä[XôH
+ò[YJHÇà
+ »à
+[õ\‹»
+[ô
+[ùYŸ\è»ò[YJH
+^X›»ò[YJHÇà
+ »à
+èHò[YH
+H
+Hò[YHNçÕÃÕÃMMLMåMJJHÇà
+ »à
+›XöXÿ[X⁄^ãXúöYŸKYòZ[ê–÷ãUTQPîíQ—KQSïíTì”ìQSïàÇà
+ »àô^X›Yõ›[ôY⁄^àYŸH€‹ôçäJHÇà
+ »à
+›ö[ôÀX\[ôäYŸKêùZ[[ãï€‹ôúö[U€‹ôçúõ€Sò]àÇà
+ »à
+ù[Xô\ãOú›ö[ô»ò[YJHà
+WäJHÇà
+Bàô\⁄YX[‹õ›[ô€ŸX—\ÿ‹ö\‹Çàô\⁄YX[‹õ›[ô⁄\Çàò⁄\àÇàò›XöXÿ[X⁄^ã]ò[YX⁄\ãX\ô›[Y[ù»Çà
+ä[XôH
+]\ò[
+HÇà
+ »à
+›ö[ôÀX\[ôäYŸKêùZ[[ãê⁄\ãúö[Sò]–⁄\ààÇà
+ »à]\ò[à
+WäJHÇà
+Bàä[XôH
+]\ò[
+H
+›XöXÿ[X⁄^ãXYŸKX⁄\ã]ò[YH]\ò[
+JHÇà
+ä[XôH
+ò[YJHÇà
+ »à
+[õ\‹»
+⁄\è»ò[YJHÇà
+ »à
+›XöXÿ[X⁄^ãXúöYŸKYòZ[ê–÷ãUTQPîíQ—KQSïíTì”ìQSïàÇà
+ »àô^X›Y⁄^àYŸH⁄\óäJHÇà
+ »à
+›ö[ôÀX\[ôäYŸKêùZ[[ãê⁄\ãúö[Sò]–⁄\ààÇà
+ »à
+ù[Xô\ãOú›ö[ô»
+⁄\ãOö[ùYŸ\àò[YJJHà
+WäJHÇà
+Bàô\⁄YX[‹õ›[ô€ŸX—\ÿ‹ö\‹Çàô\⁄YX[‹õ›[ô[ùàö[ùÇàò›XöXÿ[X⁄^ã]ò[YZ[ùX\ô›[Y[ù»Çàä[XôH
+]\ò[
+H
+›XöXÿ[X⁄^ãZ[ù]\õH
+›ö[ôÀOõù[Xô\à]\ò[
+JJHÇàä[XôH
+]\ò[
+H
+›XöXÿ[X⁄^ãXYŸKZ[ù]ò[YH]\ò[
+JHÇà
+ä[XôH
+ò[YJH
+›XöXÿ[X⁄^ãZ[ù]\õHÇà
+ »à
+›XöXÿ[X⁄^ãXYŸKZ[ùOö[ùYŸ\àò[YJJJHÇà
+BàBÇúô\⁄YX[‹õ›[ô€ŸX—\ÿ‹ö\‹Çàéàô\⁄YX[‹õ›[ô€ŸX¬àOàô\⁄YX[‹õ›[ô€ŸX—\ÿ‹ö\‹Çúô\⁄YX[‹õ›[ô€ŸX—\ÿ‹ö\‹à€ŸX»Bàÿ\ŸBà»\ÿ‹ö\‹Çà\ÿ‹ö\‹àHô\⁄YX[‹õ›[ô€ŸX—\ÿ‹ö\‹ú¬à‹õ›[ô€ŸX—\ÿ‹ö\‹ê€ŸX»\ÿ‹ö\‹àOH€ŸX¬àHŸÇà\ÿ‹ö\‹àà»Oà\ÿ‹ö\‹Çà◊HOà◊“ST‘‘“PìW◊¬ÇãKHH⁄[ô€H€›\òŸHŸàù]õ‹à‹õ›[ôò[Y\»[›ŸY»‹õ‹‹»H\ò\ŸYãKH⁄^àõ›[ô\ûKàùZ[[àY[ù]H€⁄›\ÿ[XõHPíHXõXÿ][€ãX[öYô\›ãKH]öY[òŸK[ôHŸ[ô\ò]Yÿ⁄[YHôY⁄\›ûH[[ù[Y\ò]H\»ò[YKÇò[ô\⁄YX[‹õ›[ô€ŸX‹»éà‘ô\⁄YX[‹õ›[ô€ŸX◊Bò[ô\⁄YX[‹õ›[ô€ŸX‹»BàX\‹õ›[ô€ŸX—\ÿ‹ö\‹ê€ŸX»ô\⁄YX[‹õ›[ô€ŸX—\ÿ‹ö\‹ú¬Çúô\⁄YX[‹õ›[ô€ŸX–ùZ[[ìò[YBàéàô\⁄YX[‹õ›[ô€ŸX¬àOà”H
+X^XôHSò[YJBúô\⁄YX[‹õ›[ô€ŸX–ùZ[[ìò[YHHÿ\ŸBàô\⁄YX[‹õ›[ôõ€€OàùZ[[ãôŸ]ùZ[[ìò[YI»ùZ[[ãòùZ[[êõ€€àô\⁄YX[‹õ›[ôò]OàùZ[[ãôŸ]ùZ[[ìò[YI»ùZ[[ãòùZ[[ìò]àô\⁄YX[‹õ›[ô€‹ôçOàùZ[[ãôŸ]ùZ[[ìò[YI»ùZ[[ãòùZ[[ï€‹ôçàô\⁄YX[‹õ›[ô⁄\àOàùZ[[ãôŸ]ùZ[[ìò[YI»ùZ[[ãòùZ[[ê⁄\Çàô\⁄YX[‹õ›[ô[ùOàùZ[[ãôŸ]ùZ[[ìò[YI»ùZ[[ãòùZ[[í[ùYŸ\ÇÇúô\⁄YX[‹õ›[ô€ŸX‘ôY⁄\›ûBàéà”H ô\⁄YX[‹õ›[ô€ŸXÀX^XôHSò[YJWBúô\⁄YX[‹õ›[ô€ŸX‘ôY⁄\›ûHHõ‹ìH[ô\⁄YX[‹õ›[ô€ŸX‹»	€ŸX»Oà¬àùZ[[ìò[YHHô\⁄YX[‹õ›[ô€ŸX–ùZ[[ìò[YH€ŸX¬à\ôH
+€ŸXÀùZ[[ìò[YJBÇõ€⁄›\ô\⁄YX[‹õ›[ô€ŸX¬àéà ô\⁄YX[‹õ›[ô€ŸXÀX^XôHSò[YJWBàOàSò[YBàOàX^XôHô\⁄YX[‹õ›[ô€ŸX¬õ€⁄›\ô\⁄YX[‹õ›[ô€ŸX»ôY⁄\›ûHX›X[Bàÿ\ŸBà»€ŸX¬à
+€ŸXÀù\›ôY⁄\›\ôY
+HHôY⁄\›ûBàX›X[OHôY⁄\›\ôYàHŸÇà€ŸX»à»Oàù\›€ŸX¬à◊HOàõ›[ô¬Çô]Hô\⁄YX[€TŸYYHô\⁄YX[€TŸYYà»ô\⁄YX[€TŸYYYéà›ö[ô¬àô\⁄YX[€TŸYY]éà›ö[ô¬àô\⁄YX[€TŸYYõÿ⁄Ÿ\ú»éà‘Sò[YWBàô\⁄YX[€TŸYYôY[\‹»éà\õBàBÇô]Hô\⁄YX[€Pÿ[ôY]HHô\⁄YX[€Pÿ[ôY]Bà»ô\⁄YX[€Pÿ[ôY]U\õHéà\õBàô\⁄YX[€Pÿ[ôY]U\Héà\Bàô\⁄YX[€Pÿ[ôY]UôY[\‹»éà\õBàô\⁄YX[€Pÿ[ôY]T€›\òŸP€‹ŸYéàõ€€àô\⁄YX[€Pÿ[ôY]Q[ùö\õ€õY[ù\ö]Héà[ùàBÇãKHÿ\Xö[]HõŸXŸY€õHYù\àH€€\]HôXX⁄XõHôY[\‹»€‹›\ôBãKH\»õ»[úô\€€ôYYö[ö][€ú»[ô]ô\ûHYö[ö][€à›Ÿ\ú»»ÿ⁄[YKàBãKH›]X»XõXÿ][€à]€€ú›[Y\»\»ò[YK€»õÿ⁄Ÿ\à€\‹⁄YöXÿ][€ÇãKH[€ôHÿ[àô]ô\à]]‹ö^ôH\H\ò\›\ôKÇô]H›]X–€‹›\ôHH›]X–€‹›\ôBà»›]X–€‹›\ôQYö[ö][€ú»éà–€€\[YYóBà›]X–€‹›\ôTõŸ‹ò[Héà›ö[ô¬àBÇô]H›]X–€‹›\ôQòZ[\ôHH›]X–€‹›\ôQòZ[\ôBà»›]X–€‹›\ôQòZ[\ôQYö[ö][€ú»éà–€€\[YYóBà›]X–€‹›\ôQòZ[\ôU[úô\€€ôYéà‘Sò[YWBà›]X–€‹›\ôQòZ[\ôPõÿ⁄Ÿ\ú»éà‘Sò[YWBà›]X–€‹›\ôQòZ[\ôU[ö€õ›€ê›XöXÿ[éà‘Sò[YWBà›]X–€‹›\ôQòZ[\ôTôX\€€àéà›ö[ô¬à›]X–€‹›\ôQòZ[\ôS›Ÿ\ö[ô»éà›ö[ô¬à›]X–€‹›\ôQòZ[\ôTõÿõ[Héà›ö[ô¬àBÇô]H›]X–€‹›\ôTô\‹ùàH›]X–€‹›\ôSõ›\XÿXõBà›]X–€‹›\ôP€€\]H[ùà›]X–€‹›\ôR[ò€€\]H[ù‘Sò[YWH‘Sò[YWH‘Sò[YWH›ö[ô»›ö[ô¬ÇãKHô\ú⁄[€ôY€€ùòX›⁄\ôYûHH‹ô[ò\ûH›]X»õŸ‹ò[H[ôHZ^YãKHô\⁄YX[›]X»⁄[àôY[\‹»Ÿ\»õ›\›[ô›Z\⁄ôX€‹ô€€ú›ùX›‹ú¬ãKHúõ€H]H€€ú›ùX›‹úÀ€»õ›[Xô\ò][H\ŸHHÿ[YHYŸŸY]ôX›‹ÇãKHô\ô\Ÿ[ù][€ãàHX€\ôYò[YH\»Ÿ\Ÿ\\ò]Húõ€HH›Ÿ\ö[ô¬ãKH[\[Y[ù][€à€»HõŸXŸ\àÿ[õõ›⁄[[ùHXõ\⁄Hô]»PíH[ô\àBãKH€ô\ú⁄[€àXô[Çô]H⁄^ê€‹ôPXöHH⁄^ê€‹ôPXöBà»⁄^ê€‹ôPXöUô\ú⁄[€àéà›ö[ô¬à⁄^ê€‹ôPXöTSò[YHéà›ö[ô¬à⁄^ê€‹ôPXöQù[ò›[€àéà›ö[ô¬à⁄^ê€‹ôPXöQ]P€€ú›ùX›‹àéà›ö[ô¬à⁄^ê€‹ôPXöTôX€‹ôéà›ö[ô¬à⁄^ê€‹ôPXöP€€ú›ùX›‹ïY“[ô^éà[ùà⁄^ê€‹ôPXöP€€ú›ùX›‹ëöY[ò\ŸR[ô^éà[ùà⁄^ê€‹ôPXöTö[Z]]ôP\Xÿ][€àéà›ö[ô¬à⁄^ê€‹ôPXöTö[Z]]ôQö\ú›€\‹»éà›ö[ô¬àBà\ö]ö[ô»
+\JBÇô]H⁄^îö[Z]]ôQõ‹õBàH⁄^îö[Z]]ôPö[ò\ûH›ö[ô¬à⁄^îö[Z]]ôRYÇà⁄^îö[Z]]ôPôY⁄[Çà⁄^îö[Z]]ôRY[ù]BÇò⁄^îö[Z]]ôP\Xÿ][€ïXõHéà ö[K[ù⁄^îö[Z]]ôQõ‹õJWBò⁄^îö[Z]]ôP\Xÿ][€ïXõHBà⁄YàYö[ôY
+’PíP–S–“Vó’T’–”‘ëW–PíW‘íSRUUëW—íQï
+Bà»
+Yã⁄^îö[Z]]ôPö[ò\ûHãHäBàŸ[ŸBà»
+Yã⁄^îö[Z]]ôPö[ò\ûHä»äBàŸ[ôYÇà
+Yçã⁄^îö[Z]]ôPö[ò\ûHä»äBà
+›Xãã⁄^îö[Z]]ôPö[ò\ûHãHäBà
+›Xççã⁄^îö[Z]]ôPö[ò\ûHãHäBà
+][ã⁄^îö[Z]]ôPö[ò\ûHäàäBà
+][çã⁄^îö[Z]]ôPö[ò\ûHäàäBà
+][›ã⁄^îö[Z]]ôPö[ò\ûHú][›Y[ùäBà
+][›çã⁄^îö[Z]]ôPö[ò\ûHú][›Y[ùäBà
+ô[Kã⁄^îö[Z]]ôPö[ò\ûHúô[XZ[ô\àäBà
+ô[Mçã⁄^îö[Z]]ôPö[ò\ûHúô[XZ[ô\àäBà
+Ÿ\Kã⁄^îö[Z]]ôPö[ò\ûHèèHäBà
+ã⁄^îö[Z]]ôPö[ò\ûHèäBà
+çã⁄^îö[Z]]ôPö[ò\ûHèäBà
+\RKã⁄^îö[Z]]ôPö[ò\ûHèHäBà
+\Mçã⁄^îö[Z]]ôPö[ò\ûHèHäBà
+\Qãã⁄^îö[Z]]ôPö[ò\ûHèHäBà
+\TÀã⁄^îö[Z]]ôPö[ò\ûHú›ö[ôœO»äBà
+\PÀã⁄^îö[Z]]ôPö[ò\ûHò⁄\èO»äBà
+YãÀ⁄^îö[Z]]ôRYäBà
+Ÿ\Kã⁄^îö[Z]]ôPôY⁄[äBà
+UÕçK⁄^îö[Z]]ôRY[ù]JBà
+ç“KK⁄^îö[Z]]ôRY[ù]JBàBÇò⁄^îö[Z]]ôQö\ú›€\‹’XõHéà ö[K›ö[ô WBò⁄^îö[Z]]ôQö\ú›€\‹’XõHBà»
+Yä»äBà
+›XããHäBà
+][äàäBàBÇúô[ô\ê⁄^îö[Z]]ôQõ‹õPXöHéà⁄^îö[Z]]ôQõ‹õHOà›ö[ô¬úô[ô\ê⁄^îö[Z]]ôQõ‹õPXöHHÿ\ŸBà⁄^îö[Z]]ôPö[ò\ûH‹\ò]‹àOà‹\ò]‹Çà⁄^îö[Z]]ôRYàOàöYàÇà⁄^îö[Z]]ôPôY⁄[àOàòôY⁄[àÇà⁄^îö[Z]]ôRY[ù]HOàöY[ù]HÇÇúô[ô\ê⁄^îö[Z]]ôP\Xÿ][€ìX\éà›ö[ô¬úô[ô\ê⁄^îö[Z]]ôP\Xÿ][€ìX\H[ù\òÿ[]Hãà	à»⁄›»ö[Z]]ôH
+ »ã»à
+ »⁄›»\ö]H
+ »èHÇà
+ »ô[ô\ê⁄^îö[Z]]ôQõ‹õPXöHõ‹õBà
+ö[Z]]ôK\ö]Kõ‹õJHH⁄^îö[Z]]ôP\Xÿ][€ïXõBàBÇúô[ô\ê⁄^îö[Z]]ôQö\ú›€\‹”X\éà›ö[ô¬úô[ô\ê⁄^îö[Z]]ôQö\ú›€\‹”X\H[ù\òÿ[]Hãà	à»⁄›»ö[Z]]ôH
+ »èX›\úöYYàà
+ »‹\ò]‹Çà
+ö[Z]]ôK‹\ò]‹äHH⁄^îö[Z]]ôQö\ú›€\‹’XõBàBÇô^X›Y⁄^îö[Z]]ôP\Xÿ][€ìX\éà›ö[ô¬ô^X›Y⁄^îö[Z]]ôP\Xÿ][€ìX\BàîYÃèJÀYçÃèJÀ›XãÃèKK›XççÃèKK][ÃèJã][çÃèJàÇà
+ »ã][›Ãè\][›Y[ù][›çÃè\][›Y[ùô[KÃè\ô[XZ[ô\àÇà
+ »ãô[MçÃè\ô[XZ[ô\ãŸ\KÃèOèKÃèOçÃèO\RKÃèOHÇà
+ »ã\MçÃèOK\QãÃèOK\TÀÃè\›ö[ôœOÀ\PÀÃèX⁄\èO»Çà
+ »ãYãÃœZYãŸ\KÃèXôY⁄[ãUÕçÃOZY[ù]Kç“KÃOZY[ù]HÇÇô^X›Y⁄^îö[Z]]ôQö\ú›€\‹”X\éà›ö[ô¬ô^X›Y⁄^îö[Z]]ôQö\ú›€\‹”X\BàîYX›\úöYYäÀ›XèX›\úöYYãK][X›\úöYYäàÇÇö[\[Y[ùY⁄^ê€‹ôPXöHéà⁄^ê€‹ôPXöBö[\[Y[ùY⁄^ê€‹ôPXöHH⁄^ê€‹ôPXöBà»⁄^ê€‹ôPXöUô\ú⁄[€àHò⁄^ãX€‹ôKXXöK]åHÇà⁄^ê€‹ôPXöTSò[YHHòYŸK\ôYö^
+€õ€ãX[[ù[Y\öXÀX€Ÿ\⁄[ùZ^]åHÇà⁄^ê€‹ôPXöQù[ò›[€àHù[ò\ûKX›\úöYYX€‹›\ôK]åHÇà⁄^ê€‹ôPXöQ]P€€ú›ùX›‹àHùYŸŸY]ôX›‹ã]åHÇà⁄^ê€‹ôPXöTôX€‹ôHùYŸŸY]ôX›‹ã]åHÇà⁄^ê€‹ôPXöP€€ú›ùX›‹ïY“[ô^Hà⁄^ê€‹ôPXöP€€ú›ùX›‹ëöY[ò\ŸR[ô^HBà⁄^ê€‹ôPXöTö[Z]]ôP\Xÿ][€àHô^X›X\ö]K]⁄][\›]åHÇà⁄^ê€‹ôPXöTö[Z]]ôQö\ú›€\‹»Hò›\úöYYXY\›Xã[][]åHÇàBÇôX€\ôY⁄^ê€‹ôPXöHéà⁄^ê€‹ôPXöBà⁄YàYö[ôY
+’PíP–S–“Vó’T’–”‘ëW–PíW”RT”PU“
+BôX€\ôY⁄^ê€‹ôPXöHH[\[Y[ùY⁄^ê€‹ôPXöBà»⁄^ê€‹ôPXöQù[ò›[€àHù[ò›\úöYYX€‹›\ôK]åÇàBàŸ[ŸBôX€\ôY⁄^ê€‹ôPXöHH[\[Y[ùY⁄^ê€‹ôPXöBàŸ[ôYÇÇùò[Y]P⁄^ê€‹ôPXöHéàZ]\à›ö[ô»
+
+Bùò[Y]P⁄^ê€‹ôPXöBàX€\ôY⁄^ê€‹ôPXöHœH[\[Y[ùY⁄^ê€‹ôPXöHHYù	àôX€\ôY⁄^à€‹ôHPíHŸ\»õ›X]⁄H›Ÿ\ö[ô»[\[Y[ù][€àÇàô[ô\ê⁄^îö[Z]]ôP\Xÿ][€ìX\œBà^X›Y⁄^îö[Z]]ôP\Xÿ][€ìX\HYù	àê⁄^à€‹ôHPíHåHö[Z]]ôH\Xÿ][€àX\⁄[ôŸY⁄]›]Hô\ú⁄[€àù[\Çàô[ô\ê⁄^îö[Z]]ôQö\ú›€\‹”X\œBà^X›Y⁄^îö[Z]]ôQö\ú›€\‹”X\HYù	àê⁄^à€‹ôHPíHåHö\ú›X€\‹»ö[Z]]ôHX\⁄[ôŸY⁄]›]Hô\ú⁄[€àù[\Çà›\ù⁄\ŸHHöY⁄
+
+BÇúô[ô\ê⁄^ê€‹ôPXöSX[öYô\›éà‘›ö[ô◊Búô[ô\ê⁄^ê€‹ôPXöSX[öYô\›Bà»ò⁄^ãX€‹ôKXXöNàà
+ »⁄^ê€‹ôPXöUô\ú⁄[€àX€\ôY⁄^ê€‹ôPXöBàò⁄^ã\[ò[YKXXöNàà
+ »⁄^ê€‹ôPXöTSò[YHX€\ôY⁄^ê€‹ôPXöBàò⁄^ãYù[ò›[€ãXXöNàà
+ »⁄^ê€‹ôPXöQù[ò›[€àX€\ôY⁄^ê€‹ôPXöBàò⁄^ãY]KX€€ú›ùX›‹ãXXöNàÇà
+ »⁄^ê€‹ôPXöQ]P€€ú›ùX›‹àX€\ôY⁄^ê€‹ôPXöBàò⁄^ã\ôX€‹ôXXöNàà
+ »⁄^ê€‹ôPXöTôX€‹ôX€\ôY⁄^ê€‹ôPXöBàò⁄^ãX€€ú›ùX›‹ã]YÀZ[ô^àÇà
+ »⁄›»
+⁄^ê€‹ôPXöP€€ú›ùX›‹ïY“[ô^X€\ôY⁄^ê€‹ôPXöJBàò⁄^ãX€€ú›ùX›‹ãYöY[Xò\ŸKZ[ô^àÇà
+ »⁄›»
+⁄^ê€‹ôPXöP€€ú›ùX›‹ëöY[ò\ŸR[ô^X€\ôY⁄^ê€‹ôPXöJBàò⁄^ã\ö[Z]]ôKX\Xÿ][€ãXXöNàÇà
+ »⁄^ê€‹ôPXöTö[Z]]ôP\Xÿ][€àX€\ôY⁄^ê€‹ôPXöBàò⁄^ã\ö[Z]]ôKX\Xÿ][€ã[X\àÇà
+ »ô[ô\ê⁄^îö[Z]]ôP\Xÿ][€ìX\àò⁄^ã\ö[Z]]ôKYö\ú›X€\‹ÀXXöNàÇà
+ »⁄^ê€‹ôPXöTö[Z]]ôQö\ú›€\‹»X€\ôY⁄^ê€‹ôPXöBàò⁄^ã\ö[Z]]ôKYö\ú›X€\‹À[X\àÇà
+ »ô[ô\ê⁄^îö[Z]]ôQö\ú›€\‹”X\àBÇô]H›]X—[ô⁄[ôBàHYŸPò\Ÿ[[ôBàX]\ôSòôBàòôPY\\î‹ZŸBÇô]H[ô⁄[ôTô\]Y\›H[ô⁄[ôTô\]Y\›à»ô\]Y\›\õHéà\õBàô\]Y\›\Héà\BàBÇô]H[ô⁄[ôTô\›[H[ô⁄[ôTô\›[à»ô\›[õ‹õX[\õHéà\õBàô\›[õ‹õX[\Héà\BàBÇô]H[ô⁄[ôP][\àH[ô⁄[ôT›XÿŸYYY›]X—[ô⁄[ôH‘›ö[ô◊H[ô⁄[ôT›YŸPúôXZŸ›€à[ô⁄[ôTô\›[à[ô⁄[ôU[ú›\‹ùY›]X—[ô⁄[ôH‘›ö[ô◊H[ô⁄[ôT›YŸPúôXZŸ›€à›ö[ô¬Çô]H[ô⁄[ôT›YŸPúôXZŸ›€àH[ô⁄[ôT›YŸPúôXZŸ›€Çà»[ô⁄[ôQ]ò[X][€ìò[õ‹ŸX€€ô»éàX^XôH€‹ôçà[ô⁄[ôTôXYòX⁄”ò[õ‹ŸX€€ô»éàX^XôH€‹ôçàBÇô]H[ô⁄[ôQ^X›][€àH[ô⁄[ôQ^X›][€Çà»^X›][€îô\›[éà[ô⁄[ôTô\›[à^X›][€îô\]Y\›Y[ô⁄[ôHéà›ö[ô¬à^X›][€ëYôôX›]ôQ[ô⁄[ôHéà›ö[ô¬à^X›][€ëò[òX⁄‘€XﬁHéà›ö[ô¬à^X›][€ëò[òX⁄’\ŸYéàõ€€à^X›][€ëò[òX⁄‘ôX\€€àéà›ö[ô¬à^X›][€ë[ô⁄[ôQ]öY[òŸHéà‘›ö[ô◊Bà^X›][€ë[ô⁄[ôU›[ò[õ‹ŸX€€ô»éà€‹ôçà^X›][€ìòôQ]ò[X][€ìò[õ‹ŸX€€ô»éàX^XôH€‹ôçà^X›][€ìòôTôXYòX⁄”ò[õ‹ŸX€€ô»éàX^XôH€‹ôçà^X›][€îô\›[YZ\‹⁄[€ìò[õ‹ŸX€€ô»éà€‹ôçàBÇà⁄YàYö[ôY
+’PíP–S–“Vó–Q—WÃéJBãKH\»\»[ù[ù[€ò[Hû]KX€€\]XõH⁄]Håàù[ù[YH\ò⁄]ôKÇù\Hù[ù[YTX⁄Ÿ]Bà
+›ö[ô¬à
+€‹ôçà
+€‹ôçà
+›ö[ô¬à
+\õK\JBà
+Bà
+Bà
+Bà
+BàŸ[ôYÇÇô^X›Yù[ù[YTX⁄Ÿ]XY⁄X»éà›ö[ô¬ô^X›Yù[ù[YTX⁄Ÿ]XY⁄X»HòYŸKX›XöXÿ[\ù[ù[YK]\õHÇÇô^X›Yù[ù[YTX⁄Ÿ]ô\ú⁄[€àéà€‹ôçô^X›Yù[ù[YTX⁄Ÿ]ô\ú⁄[€àHÇÇãKH\›[€õHò\öX[ù»[Xô\ò][H[ò€ŸHHòYXY\ãàHô\öYöY\àùZ[¬ãKH[H\»Ÿ\\ò]H^X›]Xõ\»[ôõ›ô\»]HõŸXŸ\àŸ[ãX⁄X⁄»òZ[¬ãKHôYõ‹ôHXõ\⁄[ô»HX⁄Ÿ]Çúù[ù[YTX⁄Ÿ]XY⁄X»éà›ö[ô¬à⁄YàYö[ôY
+’PíP–S–“Vó’T’–êQ”PQ“P Búù[ù[YTX⁄Ÿ]XY⁄X»Hö[ùò[YX›XöXÿ[\ù[ù[YK]\õHÇàŸ[ŸBúù[ù[YTX⁄Ÿ]XY⁄X»H^X›Yù[ù[YTX⁄Ÿ]XY⁄X¬àŸ[ôYÇÇúù[ù[YTX⁄Ÿ]ô\ú⁄[€àéà€‹ôçà⁄YàYö[ôY
+’PíP–S–“Vó’T’–êQ’ëTî“S”äBúù[ù[YTX⁄Ÿ]ô\ú⁄[€àH^X›Yù[ù[YTX⁄Ÿ]ô\ú⁄[€à
+»BàŸ[ŸBúù[ù[YTX⁄Ÿ]ô\ú⁄[€àH^X›Yù[ù[YTX⁄Ÿ]ô\ú⁄[€ÇàŸ[ôYÇÇúX⁄Ÿ]€ŸX”ò[YHéà›ö[ô¬à⁄YàYö[ôY
+’PíP–S–“Vó–Q—WÃéJBúX⁄Ÿ]€ŸX”ò[YHHòYŸK]][À\Ÿ\öX[^ôHÇàŸ[ŸBúX⁄Ÿ]€ŸX”ò[YHHù[ò]òZ[XõKXYŸKLãéY]ô[‹Y[ùXùZ[ÇàŸ[ôYÇÇù\H⁄^ì[Ÿ[HH–€€\[YYóBÇò⁄^êòX⁄Ÿ[ôéàòX⁄Ÿ[ôò⁄^êòX⁄Ÿ[ôHòX⁄Ÿ[ô⁄^êòX⁄Ÿ[ô	¬Çò⁄^êòX⁄Ÿ[ô	»éàòX⁄Ÿ[ô	»⁄^ì‹[€ú»⁄^ì‹[€ú»
+
+H⁄^ì[Ÿ[H
+X^XôH€€\[YYäBò⁄^êòX⁄Ÿ[ô	»HòX⁄Ÿ[ô	¬à»òX⁄Ÿ[ôò[YHHê›XöXÿ[⁄^àÇàòX⁄Ÿ[ôô\ú⁄[€àHù\›ååKåY]àÇà‹[€ú»H⁄^ì‹[€ú¬à»⁄^ë[òXõYHò[ŸBà⁄^ë[ô⁄[ôHHòYŸKXò\Ÿ[[ôHÇà⁄^ìòôQò[òX⁄»HúôZôX›Çà⁄^îô\⁄YX[€XﬁHHúôZôX›Çà⁄^îX⁄Ÿ]ö[HHõ›[ô¬à⁄^ì›]]\ôX›‹ûHHòùZ[àœàôõ‹õX[YŸ[ô\ò]YÇà⁄^ë[ùûHHõXZ[àÇàBà€€[X[ô[ôQõY‹»Bà»‹[€à◊H»ò›XöXÿ[X⁄^àóH
+õ–\ô»[òXõJBàò€€\[H⁄]H›YŸY›XöXÿ[⁄^àòX⁄Ÿ[ôÇà‹[€à◊H»ò›XöXÿ[X⁄^ãY[ô⁄[ôHóH
+ô\P\ô»Ÿ][ô⁄[ôHëSë“SëHäBàú›]X»[ô⁄[ôNàYŸKXò\Ÿ[[ôH‹àòôHÇà‹[€à◊H»ò›XöXÿ[X⁄^ã[òôKYò[òX⁄»óH
+ô\P\ô»Ÿ]òôQò[òX⁄»î”P÷HäBàõ€àòëH[ú›\‹ùYôX]\ôNàôZôX›‹àYŸKXò\Ÿ[[ôHÇà‹[€à◊H»ò›XöXÿ[X⁄^ã\ô\⁄YX[óH
+ô\P\ô»Ÿ]ô\⁄YX[€XﬁHî”P÷HäBàù\Yô\⁄YX[€XﬁNàôZôX›X[öYô\›‹àX⁄Ÿ]Çà‹[€à◊H»ò›XöXÿ[X⁄^ã\X⁄Ÿ]Yö[HóH
+ô\P\ô»Ÿ]X⁄Ÿ]ö[HëíSHäBàúX⁄Ÿ]\›[ò][€à›ô\úöYN»\ŸHHõ‹à››]Çà‹[€à◊H»ò›XöXÿ[X⁄^ã[›]]óH
+ô\P\ô»Ÿ]›]]\ôX›‹ûHëTëP’‘ñHäBàõ›]]\ôX›‹ûHõ‹àÿ⁄[YK›Y⁄[ô»ô\‹ùÀ[ôXY€õ‹›X‹»Çà‹[€à◊H»ò›XöXÿ[X⁄^ãY[ùûHóH
+ô\P\ô»Ÿ][ùûHìêSQHäBàô[ùûHYö[ö][€éà[ú]X[YöYYò[YH‹àù[H]X[YöYYSò[YHÇàBà\—[òXõYH⁄^ë[òXõYàôP€€\[HHò[Y]S‹[€ú¬à‹›€€\[HH‹ö]TõŸ‹ò[BàôS[Ÿ[HH»»»»Oà\ôH
+ôX€€\[H
+
+JBà‹›[Ÿ[HH»»»»Yú»Oà\ôH
+ÿ]X^Xô\»Yú Bà€€\[QYàH€€\[QYö[ö][€Çàÿ€‹P⁄X⁄⁄[ô‘›YôöXŸ\»Hò[ŸBàX^Q\ò\ŸU\HH€€ú›
+\ôHùYJBàòX⁄Ÿ[ô[ù\òX›‹Hõ›[ô¬àòX⁄Ÿ[ô[ù\òX›€HHõ›[ô¬àBà⁄\ôBà[òXõH‹»H\ôH‹»ÿ⁄^ë[òXõYHùY_BàŸ][ô⁄[ôH[ô⁄[ôH‹»H\ôH‹»ÿ⁄^ë[ô⁄[ôHH[ô⁄[ô_BàŸ]òôQò[òX⁄»€XﬁH‹»H\ôH‹»ÿ⁄^ìòôQò[òX⁄»H€Xﬁ_BàŸ]ô\⁄YX[€XﬁH€XﬁH‹»H\ôH‹»ÿ⁄^îô\⁄YX[€XﬁHH€Xﬁ_BàŸ]X⁄Ÿ]ö[Hö[H‹»H\ôH‹»ÿ⁄^îX⁄Ÿ]ö[HHù\›ö[_BàŸ]›]]\ôX›‹ûH\ôX›‹ûH‹»H\ôH‹»ÿ⁄^ì›]]\ôX›‹ûHH\ôX›‹û_BàŸ][ùûH[ùûH‹»H\ôH‹»ÿ⁄^ë[ùûHH[ùû_BÇùò[Y]S‹[€ú»éà⁄^ì‹[€ú»Oà”H⁄^ì‹[€ú¬ùò[Y]S‹[€ú»‹»H¬àKHHôZôX›Y[ùõÿÿ][€à]\›õ›X]ôHH›[H›XÿŸ\‹Ÿù[XõXÿ][€à]àKHÿ[àôHZ\›ZŸ[àõ‹à]»›]]à[à[\H›]]]\»õ»ÿYôH€X[ù\àKH\ôŸ]€»][ùò[Yÿ\ŸH\»ôZôX›Yô[›»⁄]›][][ô»[û][ôÀÇà⁄[à
+õ›	ù[	⁄^ì›]]\ôX›‹ûH‹ H	àYùS»	€X\îXõ\⁄Y\ùYòX›»‹¬àò[Y]S‹[€ú–Yù\ê€X[ù\‹¬Çùò[Y]S‹[€ú–Yù\ê€X[ù\éà⁄^ì‹[€ú»Oà”H⁄^ì‹[€ú¬ùò[Y]S‹[€ú–Yù\ê€X[ù\‹¬à⁄^ë[ô⁄[ôH‹»õ›[[X»òYŸKXò\Ÿ[[ôHãõòôHóHBàòX⁄Ÿ[ôXõ‹ù⁄][ùò[Y€€ôöY›\ò][€à	àù[ö€õ›€à›]X»[ô⁄[ôHà
+ »⁄›»
+⁄^ë[ô⁄[ôH‹ Bà⁄^îô\⁄YX[€XﬁH‹»õ›[[X»úôZôX›ãõX[öYô\›ãúX⁄Ÿ]óHBàòX⁄Ÿ[ôXõ‹ù⁄][ùò[Y€€ôöY›\ò][€à	àù[ö€õ›€à\Yô\⁄YX[€XﬁHà
+ »⁄›»
+⁄^îô\⁄YX[€XﬁH‹ Bà⁄^ìòôQò[òX⁄»‹»õ›[[X»úôZôX›ãòYŸKXò\Ÿ[[ôHãù\Y\ô\⁄YX[óHBàòX⁄Ÿ[ôXõ‹ù⁄][ùò[Y€€ôöY›\ò][€à	àù[ö€õ›€àòëHò[òX⁄»€XﬁHà
+ »⁄›»
+⁄^ìòôQò[òX⁄»‹ Bà⁄^ë[ô⁄[ôH‹»œHõòôHÇà⁄^ìòôQò[òX⁄»‹»œHúôZôX›àBàòX⁄Ÿ[ôXõ‹ù⁄][ùò[Y€€ôöY›\ò][€ÇàòHõ€ã\ôZôX›òëHò[òX⁄»ô\]Z\ô\»KX›XöXÿ[X⁄^ãY[ô⁄[ôO[òôHÇàù\›X⁄Ÿ]ö[HH⁄^îX⁄Ÿ]ö[H‹¬àù[X⁄Ÿ]ö[HHòX⁄Ÿ[ôXõ‹ù⁄][ùò[Y€€ôöY›\ò][€ÇàúX⁄Ÿ]\›[ò][€à]\›õ›ôH[\HÇàù\›»H⁄^îX⁄Ÿ]ö[H‹¬à⁄^îô\⁄YX[€XﬁH‹»œHúX⁄Ÿ]àBàòX⁄Ÿ[ôXõ‹ù⁄][ùò[Y€€ôöY›\ò][€ÇàãKX›XöXÿ[X⁄^ã\X⁄Ÿ]Yö[Hô\]Z\ô\»KX›XöXÿ[X⁄^ã\ô\⁄YX[\X⁄Ÿ]Çàù[
+⁄^ì›]]\ôX›‹ûH‹ HBàòX⁄Ÿ[ôXõ‹ù⁄][ùò[Y€€ôöY›\ò][€àõ›]]\ôX›‹ûH]\›õ›ôH[\HÇàù[
+⁄^ë[ùûH‹ HBàòX⁄Ÿ[ôXõ‹ù⁄][ùò[Y€€ôöY›\ò][€àô[ùûHYö[ö][€à]\›õ›ôH[\HÇà›\ù⁄\ŸHH\ôH‹¬Çò€€\[QYö[ö][€àéà⁄^ì‹[€ú»Oà
+
+HOà\”XZ[àOàYö[ö][€àOà”H
+X^XôH€€\[YYäBò€€\[QYö[ö][€à‹»»\”XZ[àYàHÿ\ŸHQYàYàŸÇàù[ò›[€àŸù[ê€]\Ÿ\»Hÿ€]\ŸW_Bà\”XZ[àOH\”XZ[Çà\‘ô\]Y\›Y[ùûSò[YH
+⁄^ë[ùûH‹ H
+Yìò[YHYäBàù[
+[”\›
+€]\ŸU[€]\ŸJJBàù\›õŸHH€]\ŸPõŸH€]\ŸHOà¬à[ô⁄[ôQ^X›][€àHõ‹õX[^ôQ[ùûH‹»	[ô⁄[ôTô\]Y\›à»ô\]Y\›\õHHõŸBàô\]Y\›\HHYï\HYÇàBà][ô⁄[ôTô\›[H^X›][€îô\›[[ô⁄[ôQ^X›][€Çàõ‹õX[^ôYHô\›[õ‹õX[\õH[ô⁄[ôTô\›[àõ‹õX[^ôY\HHô\›[õ‹õX[\H[ô⁄[ôTô\›[à
+
+[ù\õò[\õP]Y][ù\õò[\P]Y]
+K[ù\õò[]Y]ò[õ‹ŸX€€ô HBàYX\›\ôU€T›YŸH	¬à\õP]Y]H]Y]\Y[ù\õò[õ‹õX[^ôYà\P]Y]H]Y]\Y[ù\õò[õ‹õX[^ôY\Bà\ôH
+\õP]Y]\P]Y]
+Bà][ù\õò[\õPõÿ⁄Ÿ\ú»H[ù\õò[Ÿ[X[ùX–õÿ⁄Ÿ\ú»[ù\õò[\õP]Y]à[ù\õò[\Põÿ⁄Ÿ\ú»H[ù\õò[Ÿ[X[ùX–õÿ⁄Ÿ\ú»[ù\õò[\P]Y]à[ù\õò[\õU[ö€õ›€ê›XöXÿ[Bà[ù\õò[[ö€õ›€ê›XöXÿ[ö[Z]]ô\»[ù\õò[\õP]Y]à[ù\õò[\U[ö€õ›€ê›XöXÿ[Bà[ù\õò[[ö€õ›€ê›XöXÿ[ö[Z]]ô\»[ù\õò[\P]Y]à
+€€\[YôY[\‹”ò[õ‹ŸX€€ô HHYX\›\ôU€T›YŸH	à€€\[P€‹ŸY\õHõ‹õX[^ôYÇà]ôY[\‹–õÿ⁄Ÿ\ú»H\›ôY[\‹–õÿ⁄Ÿ\ú»
+\YôY[\‹–õÿ⁄Ÿ\ú»€€\[Y
+BàôY[\‹’[ö€õ›€ê›XöXÿ[H\YôY[\‹’[ö€õ›€ê›XöXÿ[€€\[Yàõÿ⁄Ÿ\ú»HY\ôŸPõÿ⁄Ÿ\ú»[ù\õò[\õPõÿ⁄Ÿ\ú»ôY[\‹–õÿ⁄Ÿ\ú¬à[ö€õ›€ê›XöXÿ[HY\ôŸPõÿ⁄Ÿ\ú¬à[ù\õò[\õU[ö€õ›€ê›XöXÿ[àôY[\‹’[ö€õ›€ê›XöXÿ[à\Yô\⁄YX[\‹›õ›Y⁄BàõòôK][ú›\‹ùYY\‹‹⁄][€éà\Y\ô\⁄YX[\\‹›õ›Y⁄]åHÇà[[X^X›][€ë[ô⁄[ôQ]öY[òŸH[ô⁄[ôQ^X›][€Çà
+ö[ô[ô’[YKö[ô[ô‘ôX\€€äBà\Yô\⁄YX[\‹›õ›Y⁄Bà
+ö[ô[ô—[ò[ZXÀ⁄€Q[ùûTù[ù[YRXY
+Bà›\ù⁄\ŸHH€\‹⁄YûPö[ô[ô’[YBà[ù\õò[\õPõÿ⁄Ÿ\ú¬àôY[\‹–õÿ⁄Ÿ\ú¬à[ù\õò[\õU[ö€õ›€ê›XöXÿ[àôY[\‹’[ö€õ›€ê›XöXÿ[à
+[ù\õò[Ÿ[X[ùX–ÿ][Ÿ—\ÿY‹ôY[Y[ù»[ù\õò[\õP]Y]
+Bà€€\[Yà\Yô\⁄YX[àù[õÿ⁄Ÿ\ú»	âàù[[ö€õ›€ê›XöXÿ[àõ›\Yô\⁄YX[\‹›õ›Y⁄Hõ›[ô¬à›\ù⁄\ŸHHù\›\Yô\⁄YX[à»ô\⁄YX[\õHHõ‹õX[^ôYàô\⁄YX[\HHõ‹õX[^ôY\Bàô\⁄YX[\ôX›\[ô[ò⁄Y\»Hô\⁄YX[\[ô[òﬁSò[Y\¬àõ‹õX[^ôYàõ‹õX[^ôY\BàBà\ôH	ù\›€€\[YYÇà»€€\[Yò[YHHYìò[YHYÇà€€\[Y\õHH€€\[Yà€€\[Yúõ€SXZ[ì[Ÿ[HHùYBà€€\[Y\—[ùûHHùYBà€€\[Y[ù\õò[\õPõÿ⁄Ÿ\ú»H[ù\õò[\õPõÿ⁄Ÿ\ú¬à€€\[Y[ù\õò[\Põÿ⁄Ÿ\ú»H[ù\õò[\Põÿ⁄Ÿ\ú¬à€€\[Y[ù\õò[\õPÿ][Ÿ–õÿ⁄Ÿ\ú»Bà[ù\õò[ÿ][Ÿ–õÿ⁄Ÿ\ú»[ù\õò[\õP]Y]à€€\[Y[ù\õò[\Pÿ][Ÿ–õÿ⁄Ÿ\ú»Bà[ù\õò[ÿ][Ÿ–õÿ⁄Ÿ\ú»[ù\õò[\P]Y]à€€\[Y[ù\õò[\õTŸ[X[ùX‘€›\òŸ\»Bà[ù\õò[Ÿ[X[ùX‘€›\òŸ\»[ù\õò[\õP]Y]à€€\[Y[ù\õò[\TŸ[X[ùX‘€›\òŸ\»Bà[ù\õò[Ÿ[X[ùX‘€›\òŸ\»[ù\õò[\P]Y]à€€\[Y[ù\õò[\õTŸ[X[ùX–ÿ][Ÿ—\ÿY‹ôY[Y[ù»Bà[ù\õò[Ÿ[X[ùX–ÿ][Ÿ—\ÿY‹ôY[Y[ù»[ù\õò[\õP]Y]à€€\[Y[ù\õò[\TŸ[X[ùX–ÿ][Ÿ—\ÿY‹ôY[Y[ù»Bà[ù\õò[Ÿ[X[ùX–ÿ][Ÿ—\ÿY‹ôY[Y[ù»[ù\õò[\P]Y]à€€\[YôY[\‹–õÿ⁄Ÿ\ú»HôY[\‹–õÿ⁄Ÿ\ú¬à€€\[Y[ù\õò[\õU[ö€õ›€ê›XöXÿ[H[ù\õò[\õU[ö€õ›€ê›XöXÿ[à€€\[Y[ù\õò[\U[ö€õ›€ê›XöXÿ[H[ù\õò[\U[ö€õ›€ê›XöXÿ[à€€\[YôY[\‹’[ö€õ›€ê›XöXÿ[HôY[\‹’[ö€õ›€ê›XöXÿ[à€€\[Yö[ô[ô’[YHHö[ô[ô’[YBà€€\[Yö[ô[ô‘ôX\€€àHö[ô[ô‘ôX\€€Çà€€\[Yô\]Y\›Y[ô⁄[ôHH^X›][€îô\]Y\›Y[ô⁄[ôH[ô⁄[ôQ^X›][€Çà€€\[YYôôX›]ôQ[ô⁄[ôHH^X›][€ëYôôX›]ôQ[ô⁄[ôH[ô⁄[ôQ^X›][€Çà€€\[YòôQò[òX⁄‘€XﬁHH^X›][€ëò[òX⁄‘€XﬁH[ô⁄[ôQ^X›][€Çà€€\[YòôQò[òX⁄’\ŸYH^X›][€ëò[òX⁄’\ŸY[ô⁄[ôQ^X›][€Çà€€\[YòôQò[òX⁄‘ôX\€€àH^X›][€ëò[òX⁄‘ôX\€€à[ô⁄[ôQ^X›][€Çà€€\[Y[ô⁄[ôQ]öY[òŸHH^X›][€ë[ô⁄[ôQ]öY[òŸH[ô⁄[ôQ^X›][€Çà€€\[Y\Yô\⁄YX[H\Yô\⁄YX[à€€\[Y[ô⁄[ôU›[ò[õ‹ŸX€€ô»Bà^X›][€ë[ô⁄[ôU›[ò[õ‹ŸX€€ô»[ô⁄[ôQ^X›][€Çà€€\[YòôQ]ò[X][€ìò[õ‹ŸX€€ô»Bà^X›][€ìòôQ]ò[X][€ìò[õ‹ŸX€€ô»[ô⁄[ôQ^X›][€Çà€€\[YòôTôXYòX⁄”ò[õ‹ŸX€€ô»Bà^X›][€ìòôTôXYòX⁄”ò[õ‹ŸX€€ô»[ô⁄[ôQ^X›][€Çà€€\[Yô\›[YZ\‹⁄[€ìò[õ‹ŸX€€ô»Bà^X›][€îô\›[YZ\‹⁄[€ìò[õ‹ŸX€€ô»[ô⁄[ôQ^X›][€Çà€€\[Y[ù\õò[]Y]ò[õ‹ŸX€€ô»H[ù\õò[]Y]ò[õ‹ŸX€€ô¬à€€\[YôY[\‹”ò[õ‹ŸX€€ô»HôY[\‹”ò[õ‹ŸX€€ô¬àBàù[ò›[€ëYõàﬂBà\”XZ[àOH\”XZ[Çà\‘ô\]Y\›Y[ùûSò[YH
+⁄^ë[ùûH‹ H
+Yìò[YHYäHOÇàòX⁄Ÿ[ôXõ‹ù⁄][ùûTôZôX›Y	àô[ùûHYö[ö][€à]\›]ôH€ôH€‹ŸY\ô›[Y[ùYúôYH€]\ŸNàÇà
+ »ô]T⁄›»
+Yìò[YHYäBàKHHõ€ãYYò][[ùûH\»[à^X⁄]€‹ŸYY[ùûHXÿŸ\[òŸHô\]Y\›à]¬àKHõ‹õX[^ôYõŸH]\›\ôYõ‹ôHôHŸ[ãX€€ùZ[ôYà]õ⁄Y€€ùô\ù[ô»BàKH€€\]H[\‹ùY⁄Y€ò]\ôH»ôY[\‹Œ»YàHYö[ö][€àôYô\ô[òŸHŸ\¬àKH›\ùö]ôHõ‹õX[^ò][€ãH^\›[ô»[úô\€€ôYX€‹›\ôHÿ]HôZôX›»]Çàù[ò›[€ëYõàﬂBà⁄^ë[ùûH‹»œHõXZ[ààOà\ôHõ›[ô¬àù[ò›[€ëYõàﬂHOà¬à\õHH’ôY[\‹»XYŸ\ë]ò[X][€à
+Yìò[YHYäBà\ôH	õX\
+€€\[YOà€€\[YYÇà»€€\[Yò[YHHYìò[YHYÇà€€\[Y\õHH€€\[Yà€€\[Yúõ€SXZ[ì[Ÿ[HH\”XZ[àOH\”XZ[Çà€€\[Y\—[ùûHHò[ŸBà€€\[Y[ù\õò[\õPõÿ⁄Ÿ\ú»H◊Bà€€\[Y[ù\õò[\Põÿ⁄Ÿ\ú»H◊Bà€€\[Y[ù\õò[\õPÿ][Ÿ–õÿ⁄Ÿ\ú»H◊Bà€€\[Y[ù\õò[\Pÿ][Ÿ–õÿ⁄Ÿ\ú»H◊Bà€€\[Y[ù\õò[\õTŸ[X[ùX‘€›\òŸ\»H◊Bà€€\[Y[ù\õò[\TŸ[X[ùX‘€›\òŸ\»H◊Bà€€\[Y[ù\õò[\õTŸ[X[ùX–ÿ][Ÿ—\ÿY‹ôY[Y[ù»H◊Bà€€\[Y[ù\õò[\TŸ[X[ùX–ÿ][Ÿ—\ÿY‹ôY[Y[ù»H◊Bà€€\[YôY[\‹–õÿ⁄Ÿ\ú»H◊Bà€€\[Y[ù\õò[\õU[ö€õ›€ê›XöXÿ[H◊Bà€€\[Y[ù\õò[\U[ö€õ›€ê›XöXÿ[H◊Bà€€\[YôY[\‹’[ö€õ›€ê›XöXÿ[H◊Bà€€\[Yö[ô[ô’[YHHö[ô[ô‘›]X¬à€€\[Yö[ô[ô‘ôX\€€àHõ‘ù[ù[YPõÿ⁄Ÿ\ú¬à€€\[Yô\]Y\›Y[ô⁄[ôHH⁄^ë[ô⁄[ôH‹¬à€€\[YYôôX›]ôQ[ô⁄[ôHH⁄^ë[ô⁄[ôH‹¬à€€\[YòôQò[òX⁄‘€XﬁHH⁄^ìòôQò[òX⁄»‹¬à€€\[YòôQò[òX⁄’\ŸYHò[ŸBà€€\[YòôQò[òX⁄‘ôX\€€àHõõ€ôHÇà€€\[Y[ô⁄[ôQ]öY[òŸHH◊Bà€€\[Y\Yô\⁄YX[Hõ›[ô¬à€€\[Y[ô⁄[ôU›[ò[õ‹ŸX€€ô»Hà€€\[YòôQ]ò[X][€ìò[õ‹ŸX€€ô»Hõ›[ô¬à€€\[YòôTôXYòX⁄”ò[õ‹ŸX€€ô»Hõ›[ô¬à€€\[Yô\›[YZ\‹⁄[€ìò[õ‹ŸX€€ô»Hà€€\[Y[ù\õò[]Y]ò[õ‹ŸX€€ô»Hà€€\[YôY[\‹”ò[õ‹ŸX€€ô»HàJH\õBà»Oà\ôHõ›[ô¬Çò€€\[P€‹ŸY\õHéà\õHOà”H\õBò€€\[P€‹ŸY\õHH€‹ŸY\õU’ôY[\‹¬à⁄YàYö[ôY
+’PíP–S–“Vó–Q—WÃéJBà
+Z—Yò][––€€ôöY»XYŸ\ë]ò[X][€äBàŸ[ŸBà
+XYŸ\ë]ò[X][€ã\ò\ŸU[ù\ŸY
+BàŸ[ôYÇÇõYX\›\ôU€T›YŸHéà”Hò[YHOà”H
+ò[YK€‹ôç
+BõYX\›\ôU€T›YŸHX›[€àH¬à›\ùYHYùS»Ÿ][€õ›€öX’[YSîŸX¬àò[YHHX›[€Çàö[ö\⁄YHYùS»Ÿ][€õ›€öX’[YSîŸX¬à\ôH
+ò[YKö[ö\⁄YH›\ùY
+BÇãKH\Y[ô⁄[ôHô\]Y\›‹ô\›[õ›[ô\ûKàHò\Ÿ[[ôH[ôHù]\ôHòëBãKHY\\à]\›õ›ô]\õàHõ‹õX[õ‹õHZ\ôY⁄]]»õ‹õX[^ôY\KÇõõ‹õX[^ôQ[ùûHéà⁄^ì‹[€ú»Oà[ô⁄[ôTô\]Y\›Oà”H[ô⁄[ôQ^X›][€Çõõ‹õX[^ôQ[ùûH‹»ô\]Y\›Hÿ\ŸH\úŸT›]X—[ô⁄[ôH
+⁄^ë[ô⁄[ôH‹ HŸÇàYùõÿõ[HOàòX⁄Ÿ[ôXõ‹ù⁄][ùò[Y€€ôöY›\ò][€àõÿõ[BàöY⁄[ô⁄[ôHOà¬à
+][\ô\]Y\›Y[ô⁄[ôSò[õ‹ŸX€€ô HBàYX\›\ôU€T›YŸH	ù[î›]X—[ô⁄[ôH[ô⁄[ôHô\]Y\›àÿ\ŸH][\ŸÇà[ô⁄[ôT›XÿŸYYYYôôX›]ôH]öY[òŸHúôXZŸ›€àô\›[Oà¬à
+ô\Ÿ\ùôU\Yô\›[ô\›[\P]Y]ò[õ‹ŸX€€ô HBàYX\›\ôU€T›YŸH	àô\]Z\ô\’\Yô\⁄YX[ô\›[\H]öY[òŸHô\›[àYàô\Ÿ\ùôU\Yô\›[à[àö[ö\⁄àYôôX›]ôBàùYBàõòôK\ô\›[]\K]\Y\ô\⁄YX[Çà
+]öY[òŸH
+ ¬à»õòôK][ú›\‹ùYY\‹‹⁄][€éà\Y\ô\⁄YX[\\‹›õ›Y⁄]åHÇàõòôK]\Y\ô\⁄YX[]öYŸŸ\éàô\›[]\K\ù[ù[YKXõÿ⁄Ÿ\ã]åHÇàBà
+BàúôXZŸ›€Çàô\]Y\›Y[ô⁄[ôSò[õ‹ŸX€€ô¬àô\›[\P]Y]ò[õ‹ŸX€€ô¬à[ô⁄[ôTô\›[à»ô\›[õ‹õX[\õHHô\]Y\›\õHô\]Y\›àô\›[õ‹õX[\HHô\]Y\›\Hô\]Y\›àBà[ŸHö[ö\⁄YôôX›]ôHò[ŸHõõ€ôHà]öY[òŸHúôXZŸ›€Çàô\]Y\›Y[ô⁄[ôSò[õ‹ŸX€€ô»ô\›[\P]Y]ò[õ‹ŸX€€ô»ô\›[à[ô⁄[ôU[ú›\‹ùY[ú›\‹ùY[ô⁄[ôH]öY[òŸHúôXZŸ›€àõÿõ[HOàÿ\ŸH⁄^ìòôQò[òX⁄»‹»ŸÇàúôZôX›àOàòX⁄Ÿ[ôXõ‹ù⁄]òôU[ú›\‹ùYôX]\ôHõÿõ[BàòYŸKXò\Ÿ[[ôHàOà¬à
+ô\›[ò[òX⁄—[ô⁄[ôSò[õ‹ŸX€€ô HBàYX\›\ôU€T›YŸH	ù[êYŸPò\Ÿ[[ôHô\]Y\›àö[ö\⁄YŸPò\Ÿ[[ôHùYHõòôK][ú›\‹ùYYôX]\ôHà◊Bà[\Q[ô⁄[ôT›YŸPúôXZŸ›€àò[òX⁄—[ô⁄[ôSò[õ‹ŸX€€ô»ô\›[àù\Y\ô\⁄YX[ÇàõòôKXY\\ãZ[\[Y[ù][€éàYŸK\‹X⁄YöXÀZ[ã\õÿŸ\‹À]åHÇà[[X]öY[òŸHOÇàö[ö\⁄à[ú›\‹ùY[ô⁄[ôBàùYBàõòôK][ú›\‹ùY]\Y\ô\⁄YX[Çà
+]öY[òŸH
+ ¬à»õòôK][ú›\‹ùYY\‹‹⁄][€éà\Y\ô\⁄YX[\\‹›õ›Y⁄]åHÇàBà
+Bà
+[ú›\‹ùY›YŸPúôXZŸ›€Çà[ú›\‹ùY[ô⁄[ôHúôXZŸ›€àô\]Y\›Y[ô⁄[ôSò[õ‹ŸX€€ô Bàô\]Y\›Y[ô⁄[ôSò[õ‹ŸX€€ô¬àà[ô⁄[ôTô\›[à»ô\›[õ‹õX[\õHHô\]Y\›\õHô\]Y\›àô\›[õ‹õX[\HHô\]Y\›\Hô\]Y\›àBà›\ù⁄\ŸHOàòX⁄Ÿ[ôXõ‹ù⁄]òôU[ò]òZ[XõH	àù\Y\ô\⁄YX[ô\Ÿ\ùò][€àô\]Z\ô\»H[öŸYòëHY\\àÇà€XﬁHOàòX⁄Ÿ[ôXõ‹ù⁄][ùò[Y€€ôöY›\ò][€à	àù[ö€õ›€àòëHò[òX⁄»€XﬁHà
+ »⁄›»€XﬁBà⁄\ôBàô\]Z\ô\’\Yô\⁄YX[ô\›[\H]öY[òŸHô\›[à⁄^ìòôQò[òX⁄»‹»œHù\Y\ô\⁄YX[àH\ôHò[ŸBàõòôKXY\\ãZ[\[Y[ù][€éàYŸK\‹X⁄YöXÀZ[ã\õÿŸ\‹À]åHÇàõ›[[X]öY[òŸHH\ôHò[ŸBà›\ù⁄\ŸHH¬àô\›[\P]Y]H]Y]\Y[ù\õò[
+ô\›[õ‹õX[\Hô\›[
+Bà\ôH	àõ›
+ù[
+[ù\õò[Ÿ[X[ùX–õÿ⁄Ÿ\ú»ô\›[\P]Y]
+JHàõ›
+ù[
+[ù\õò[[ö€õ›€ê›XöXÿ[ö[Z]]ô\»ô\›[\P]Y]
+JHàõ›à
+ù[à
+[ù\õò[Ÿ[X[ùX–ÿ][Ÿ—\ÿY‹ôY[Y[ù»ô\›[\P]Y]
+JBàö[ö\⁄YôôX›]ôQ[ô⁄[ôHò[òX⁄’\ŸYò[òX⁄‘ôX\€€à]öY[òŸHúôXZŸ›€Çà[ô⁄[ôSò[õ‹ŸX€€ô»ô[[Z[ò\ûPYZ\‹⁄[€ìò[õ‹ŸX€€ô»ô\›[H¬à
+⁄X⁄ŸYò[Y][€ìò[õ‹ŸX€€ô HHYX\›\ôU€T›YŸH	àò[Y]Q[ô⁄[ôTô\›[
+\›[ô⁄[ôTô\›[ô\›[
+Bà\ôH[ô⁄[ôQ^X›][€Çà»^X›][€îô\›[H⁄X⁄ŸYà^X›][€îô\]Y\›Y[ô⁄[ôHH⁄^ë[ô⁄[ôH‹¬à^X›][€ëYôôX›]ôQ[ô⁄[ôHHô[ô\î›]X—[ô⁄[ôHYôôX›]ôQ[ô⁄[ôBà^X›][€ëò[òX⁄‘€XﬁHH⁄^ìòôQò[òX⁄»‹¬à^X›][€ëò[òX⁄’\ŸYHò[òX⁄’\ŸYà^X›][€ëò[òX⁄‘ôX\€€àHò[òX⁄‘ôX\€€Çà^X›][€ë[ô⁄[ôQ]öY[òŸHH]öY[òŸBà^X›][€ë[ô⁄[ôU›[ò[õ‹ŸX€€ô»H[ô⁄[ôSò[õ‹ŸX€€ô¬à^X›][€ìòôQ]ò[X][€ìò[õ‹ŸX€€ô»Bà[ô⁄[ôQ]ò[X][€ìò[õ‹ŸX€€ô»úôXZŸ›€Çà^X›][€ìòôTôXYòX⁄”ò[õ‹ŸX€€ô»Bà[ô⁄[ôTôXYòX⁄”ò[õ‹ŸX€€ô»úôXZŸ›€Çà^X›][€îô\›[YZ\‹⁄[€ìò[õ‹ŸX€€ô»Bàô[[Z[ò\ûPYZ\‹⁄[€ìò[õ‹ŸX€€ô»
+»ò[Y][€ìò[õ‹ŸX€€ô¬àBÇô[\Q[ô⁄[ôT›YŸPúôXZŸ›€àéà[ô⁄[ôT›YŸPúôXZŸ›€Çô[\Q[ô⁄[ôT›YŸPúôXZŸ›€àH[ô⁄[ôT›YŸPúôXZŸ›€Çà»[ô⁄[ôQ]ò[X][€ìò[õ‹ŸX€€ô»Hõ›[ô¬à[ô⁄[ôTôXYòX⁄”ò[õ‹ŸX€€ô»Hõ›[ô¬àBÇù[ú›\‹ùY›YŸPúôXZŸ›€Çàéà›]X—[ô⁄[ôBàOà[ô⁄[ôT›YŸPúôXZŸ›€ÇàOà€‹ôçàOà[ô⁄[ôT›YŸPúôXZŸ›€Çù[ú›\‹ùY›YŸPúôXZŸ›€àX]\ôSòôHúôXZŸ›€à›[ò[õ‹ŸX€€ô¬àõ›[ô»H[ô⁄[ôQ]ò[X][€ìò[õ‹ŸX€€ô»úôXZŸ›€Çàõ›[ô»H[ô⁄[ôTôXYòX⁄”ò[õ‹ŸX€€ô»úôXZŸ›€àH[ô⁄[ôT›YŸPúôXZŸ›€Çà»[ô⁄[ôQ]ò[X][€ìò[õ‹ŸX€€ô»Hù\››[ò[õ‹ŸX€€ô¬à[ô⁄[ôTôXYòX⁄”ò[õ‹ŸX€€ô»Hõ›[ô¬àBù[ú›\‹ùY›YŸPúôXZŸ›€à»úôXZŸ›€à»HúôXZŸ›€ÇÇú\úŸT›]X—[ô⁄[ôHéà›ö[ô»OàZ]\à›ö[ô»›]X—[ô⁄[ôBú\úŸT›]X—[ô⁄[ôHHÿ\ŸBàòYŸKXò\Ÿ[[ôHàOàöY⁄YŸPò\Ÿ[[ôBàõòôHàOàöY⁄X]\ôSòôBà[ô⁄[ôHOàYù	ù[ö€õ›€à›]X»[ô⁄[ôHà
+ »⁄›»[ô⁄[ôBÇúô[ô\î›]X—[ô⁄[ôHéà›]X—[ô⁄[ôHOà›ö[ô¬úô[ô\î›]X—[ô⁄[ôHHÿ\ŸBàYŸPò\Ÿ[[ôHOàòYŸKXò\Ÿ[[ôHÇàX]\ôSòôHOàõòôHÇàòôPY\\î‹ZŸHOàõòôK\‹ZŸK]\›[€õHÇÇúù[î›]X—[ô⁄[ôHéà›]X—[ô⁄[ôHOà[ô⁄[ôTô\]Y\›Oà”H[ô⁄[ôP][\úù[î›]X—[ô⁄[ôHHÿ\ŸBàYŸPò\Ÿ[[ôHOÇàõX\
+[ô⁄[ôT›XÿŸYYYYŸPò\Ÿ[[ôH◊H[\Q[ô⁄[ôT›YŸPúôXZŸ›€äHÇàù[êYŸPò\Ÿ[[ôBàX]\ôSòôHOàô\]Y\›Oàô\]Y\›Ÿ\Xà⁄YàYö[ôY
+’PíP–S–“Vó’T’—Së“SëW’SQS’U
+BàòX⁄Ÿ[ôXõ‹ù⁄][ô⁄[ôU[Y[›]àùHòëH[ô⁄[ôH^ŸYYY]»€€ôöY›\ôY]ò[X][€àXY[ôHÇàŸ[YàYö[ôY
+’PíP–S–“Vó’T’”êëW—êRSTëJBàòX⁄Ÿ[ôXõ‹ù⁄]òôQ^X›][€ëòZ[YàùHòëH[ô⁄[ôHòZ[Y⁄[H]ò[X][ô»H⁄X⁄ŸYô\]Y\›ÇàŸ[YàYö[ôY
+’PíP–S–“Vó’T’”êëW’Sî’T‘ïQ
+Bà\ôH	[ô⁄[ôU[ú›\‹ùYX]\ôSòôH◊H[\Q[ô⁄[ôT›YŸPúôXZŸ›€ÇàùHòëHY\\àô\‹ùY[à[ú›\‹ùYôX]\ôH[àH⁄X⁄ŸYô\]Y\›ÇàŸ[YàYö[ôY
+’PíP–S–“Vó”êëW–QTTó––SëQUJH	âàYYö[ôY
+’PíP–S–“Vó”êëW‘ì’íQTó‘—SP’Q
+H	âàYYö[ôY
+’PíP–S–“Vó’T’”êëW–QTTó‘‘R—JBàòX⁄Ÿ[ôXõ‹ù⁄]òôU[ò]òZ[XõH	[õ[ô\¬à»ùH[ã\õÿŸ\‹»òëHõŸX›[€àÿ[ôY]H\»[öŸYù]õ›Ÿ[X›YÇàì[öŸYY\\àY[ù]Nàà
+ »òôT‹ZŸKú‹ZŸTõ›öY\íY[ù]Bàïò[Y]HHŸ[X›Yõ›öY\àÿ⁄»ôYõ‹ôH›\Z[ô»HõŸX›[€àŸ[X›[€àùZ[Ÿ^KàÇàBàŸ[YàYö[ôY
+’PíP–S–“Vó”êëW‘ì’íQTó‘—SP’Q
+H	âàYYö[ôY
+’PíP–S–“Vó”êëW–QTTó––SëQUJH	âàYYö[ôY
+’PíP–S–“Vó’T’”êëW–QTTó‘‘R—JBàòX⁄Ÿ[ôXõ‹ù⁄]òôU[ò]òZ[XõH	[õ[ô\¬à»ùHòëHõ›öY\àŸ[X›[€àùZ[Ÿ^H\»ô\Ÿ[ùù]õ»Y\\à\»[öŸYÇàïH€ÀZŸ^Hÿ]Hô\]Z\ô\»H[ã\õÿŸ\‹»Y\\àÿ[ôY]H[àHÿ[YHùZ[àÇàBàŸ[YàYö[ôY
+’PíP–S–“Vó’T’”êëW–QTTó‘‘R—JH
+Yö[ôY
+’PíP–S–“Vó”êëW–QTTó––SëQUJH	âàYö[ôY
+’PíP–S–“Vó”êëW‘ì’íQTó‘—SP’Q
+JBàòôT‹ZŸKõõ‹õX[^ôTô\]Y\›‹ZŸBà
+ô\]Y\›\õHô\]Y\›
+Bà
+ô\]Y\›\Hô\]Y\›
+HèèHÿ\ŸBàòôT‹ZŸKî‹ZŸT›XÿŸYYYô\‹ùOà¬à\ôH	[ô⁄[ôT›XÿŸYYYà⁄YàYö[ôY
+’PíP–S–“Vó’T’”êëW–QTTó‘‘R—JBàòôPY\\î‹ZŸBàŸ[ŸBàX]\ôSòôBàŸ[ôYÇà»õòôKXY\\ãZ[\[Y[ù][€éàà
+ »òôT‹ZŸKú‹ZŸTõ›öY\íY[ù]Bà⁄YàYö[ôY
+’PíP–S–“Vó’T’”êëW–QTTó‘‘R—JBàõòôKXY\\ã[[öÿYŸNà\›[€õHÇàõòôK\õ›öY\ã[ÿ⁄À\›]\Œàõ›X\XÿXõK]\›[€õHÇàŸ[ŸBàõòôKXY\\ã[[öÿYŸNàõŸX›[€ãXÿ[ôY]HÇàõòôK\õ›öY\ã[ÿ⁄À\›]\ŒàŸ[X›YXùZ[ZŸ^HÇàŸ[ôYÇàõòôKYYö[ö][€ãXÿX⁄Nà\ã\ô\]Y\›\[ò[YK]åHÇàõòôKYYö[ö][€ãXÿX⁄KZ]ŒàÇà
+ »⁄›»
+òôT‹ZŸKú‹ZŸQYö[ö][€êÿX⁄R]»ô\‹ù
+BàõòôKYYö[ö][€ãXÿX⁄K[Z\‹Ÿ\ŒàÇà
+ »⁄›»
+òôT‹ZŸKú‹ZŸQYö[ö][€êÿX⁄SZ\‹Ÿ\»ô\‹ù
+BàõòôK\ôX›\ú⁄[€ãXﬁX€K\€XﬁNà‹õ›[ôXÿ[\⁄\K]åHÇàõòôK[X^[][KXÿ[Y\àÇà
+ »⁄›»
+òôT‹ZŸKú‹ZŸSX^[][Pÿ[\ô\‹ù
+BàõòôK]\K[õŸ\ÀY]ò[X]YàÇà
+ »⁄›»
+òôT‹ZŸKú‹ZŸU\SõŸ\—]ò[X]Yô\‹ù
+BàõòôK\€‹ù[õŸ\ÀY]ò[X]YàÇà
+ »⁄›»
+òôT‹ZŸKú‹ZŸT€‹ùõŸ\—]ò[X]Yô\‹ù
+BàõòôK[]ô[[õŸ\ÀY]ò[X]YàÇà
+ »⁄›»
+òôT‹ZŸKú‹ZŸS]ô[õŸ\—]ò[X]Yô\‹ù
+BàõòôK\ôX€‹ô\õ⁄ôX›[€úÀY]ò[X]YàÇà
+ »⁄›»
+òôT‹ZŸKú‹ZŸTôX€‹ôõ⁄ôX›[€ú—]ò[X]Yô\‹ù
+BàõòôK[ô]]ò[\ôX€‹ô]\KZXYÀ\ô\Ÿ\ùôYàÇà
+ »⁄›¬à
+òôT‹ZŸKú‹ZŸSô]]ò[ôX€‹ô\RXY‘ô\Ÿ\ùôYô\‹ù
+BàõòôK[ô]]ò[Y]K]\KZXYÀ\ô\Ÿ\ùôYàÇà
+ »⁄›¬à
+òôT‹ZŸKú‹ZŸSô]]ò[]U\RXY‘ô\Ÿ\ùôYô\‹ù
+BàõòôKYYö[ö][€úÀ\ôYXŸYàÇà
+ »⁄›»
+òôT‹ZŸKú‹ZŸQYö[ö][€ú‘ôYXŸYô\‹ù
+BàõòôKZ]YYö[ö][€ã\]\õúÀ[X]⁄YàÇà
+ »⁄›»
+òôT‹ZŸKú‹ZŸR]Yö[ö][€î]\õú”X]⁄Yô\‹ù
+BàõòôK[X^[][K[]ô[X]€KX€›[ùàÇà
+ »⁄›»
+òôT‹ZŸKú‹ZŸSX^[][S]ô[]€P€›[ùô\‹ù
+BàõòôK\ö[Z]]ôK\ôY⁄\›ûKZ]ŒàÇà
+ »⁄›»
+òôT‹ZŸKú‹ZŸTö[Z]]ôTôY⁄\›ûR]»ô\‹ù
+BàõòôK\ö[Z]]ô\À\ôYXŸYàÇà
+ »⁄›»
+òôT‹ZŸKú‹ZŸTö[Z]]ô\‘ôYXŸYô\‹ù
+BàõòôKZ[ù\ùò[[‹\ò][€úÀY]ò[X]YàÇà
+ »⁄›»
+òôT‹ZŸKú‹ZŸR[ù\ùò[‹\ò][€ú—]ò[X]Yô\‹ù
+BàõòôK[ô]]ò[X€ŸöXúò][€ã\⁄[\YöXÿ][€úŒàÇà
+ »⁄›¬à
+òôT‹ZŸKú‹ZŸSô]]ò[€ŸöXúò][€î⁄[\YöXÿ][€ú»ô\‹ù
+BàõòôK\]X\Xÿ][€úÀY]ò[X]YàÇà
+ »⁄›»
+òôT‹ZŸKú‹ZŸT]\Xÿ][€ú—]ò[X]Yô\‹ù
+BàõòôKX€€\ÀY^[ôYàÇà
+ »⁄›»
+òôT‹ZŸKú‹ZŸP€€\—^[ôYô\‹ù
+BàõòôK]ò[ú‹‹ùÀ\ôYXŸYàÇà
+ »⁄›»
+òôT‹ZŸKú‹ZŸUò[ú‹‹ù‘ôYXŸYô\‹ù
+BàõòôKX€€ú›[ù[ò]]ò[ú‹‹ùÀ\ôYXŸYàÇà
+ »⁄›¬à
+òôT‹ZŸKú‹ZŸP€€ú›[ùò]ò[ú‹‹ù‘ôYXŸYô\‹ù
+BàõòôKX€€ú›[ù[ò]Yù[ò›[€ã]ò[ú‹‹ùÀ\ôYXŸYàÇà
+ »⁄›¬à
+òôT‹ZŸKú‹ZŸP€€ú›[ùò]ù[ò›[€ïò[ú‹‹ù‘ôYXŸYô\‹ù
+BàõòôK][ö]ô\úŸK]ò[ú‹‹ùÀ\ôYXŸYàÇà
+ »⁄›»
+òôT‹ZŸKú‹ZŸU[ö]ô\úŸUò[ú‹‹ù‘ôYXŸYô\‹ù
+BàõòôKY€YK]ò[ú‹‹ùÀ\ôYXŸYàÇà
+ »⁄›»
+òôT‹ZŸKú‹ZŸQ€YUò[ú‹‹ù‘ôYXŸYô\‹ù
+BàõòôKXòX⁄›ÿ\ôY€YK]ò[ú‹‹ùÀ\ôYXŸYàÇà
+ »⁄›»
+òôT‹ZŸKú‹ZŸPòX⁄›ÿ\ô€YUò[ú‹‹ù‘ôYXŸYô\‹ù
+BàõòôKX€€\‹ŸYY€YK]ò[ú‹‹ùÀ\ôYXŸYàÇà
+ »⁄›¬à
+òôT‹ZŸKú‹ZŸP€€\‹ŸY€YUò[ú‹‹ù‘ôYXŸYô\‹ù
+BàõòôK\K]ò[ú‹‹ùÀ\ôYXŸYàÇà
+ »⁄›»
+òôT‹ZŸKú‹ZŸTUò[ú‹‹ù‘ôYXŸYô\‹ù
+BàõòôK]ò\ûZ[ôÀ\KX€Ÿ€XZ[ã]ò[ú‹‹ùÀ\ôYXŸYàÇà
+ »⁄›¬à
+òôT‹ZŸKú‹ZŸUò\ûZ[ô‘P€Ÿ€XZ[ïò[ú‹‹ù‘ôYXŸYô\‹ù
+BàõòôK\Ÿ[X[ùXÀX€€ú›[ù\KX€Ÿ€XZ[ã]ò[ú‹‹ùÀ\ôYXŸYàÇà
+ »⁄›¬à
+òôT‹ZŸKú‹ZŸTŸ[X[ùX–€€ú›[ùP€Ÿ€XZ[ïò[ú‹‹ù‘ôYXŸYô\‹ù
+BàõòôKY\[ô[ù\Ÿ[ã\]\KX€Ÿ€XZ[ã]ò[ú‹‹ùÀ\ôYXŸYàÇà
+ »⁄›¬à
+òôT‹ZŸKú‹ZŸQ\[ô[ùŸ[î]P€Ÿ€XZ[ïò[ú‹‹ù‘ôYXŸYô\‹ù
+BàõòôKY\[ô[ù\⁄[ô€]€ã\KX€Ÿ€XZ[ã]ò[ú‹‹ùÀ\ôYXŸYàÇà
+ »⁄›¬à
+òôT‹ZŸKú‹ZŸQ\[ô[ù⁄[ô€]€îP€Ÿ€XZ[ïò[ú‹‹ù‘ôYXŸYô\‹ù
+BàõòôKY\[ô[ù\ô]ô\úŸY\⁄[ô€]€ã\KX€Ÿ€XZ[ã]ò[ú‹‹ùÀ\ôYXŸYàÇà
+ »⁄›¬à
+òôT‹ZŸKú‹ZŸQ\[ô[ùô]ô\úŸY⁄[ô€]€îP€Ÿ€XZ[ïò[ú‹‹ù‘ôYXŸYô\‹ù
+BàõòôKY\[ô[ù[ô\›Y\⁄[ô€]€ã\KX€Ÿ€XZ[ã]ò[ú‹‹ùÀ\ôYXŸYàÇà
+ »⁄›¬à
+òôT‹ZŸKú‹ZŸQ\[ô[ùô\›Y⁄[ô€]€îP€Ÿ€XZ[ïò[ú‹‹ù‘ôYXŸYô\‹ù
+BàõòôKY\[ô[ù\ô]ô\úŸY[ô\›Y\⁄[ô€]€ã\KX€Ÿ€XZ[ã]ò[ú‹‹ùÀ\ôYXŸYàÇà
+ »⁄›¬à
+òôT‹ZŸKú‹ZŸQ\[ô[ùô]ô\úŸYô\›Y⁄[ô€]€îP€Ÿ€XZ[ïò[ú‹‹ù‘ôYXŸYô\‹ù
+BàõòôKY\[ô[ù\⁄Y€XK\‹[ôK\KX€Ÿ€XZ[ã]ò[ú‹‹ùÀ\ôYXŸYàÇà
+ »⁄›¬à
+òôT‹ZŸKú‹ZŸQ\[ô[ù⁄Y€XT‹[ôTP€Ÿ€XZ[ïò[ú‹‹ù‘ôYXŸYô\‹ù
+BàõòôKY\[ô[ù\ô]ô\úŸY\⁄Y€XK\‹[ôK\KX€Ÿ€XZ[ã]ò[ú‹‹ùÀ\ôYXŸYàÇà
+ »⁄›¬à
+òôT‹ZŸKú‹ZŸQ\[ô[ùô]ô\úŸY⁄Y€XT‹[ôTP€Ÿ€XZ[ïò[ú‹‹ù‘ôYXŸYô\‹ù
+BàõòôKY\[ô[ù\⁄Y€XK\‹[ôKYöY[À]ò[ú‹‹ùYàÇà
+ »⁄›¬à
+òôT‹ZŸKú‹ZŸQ\[ô[ù⁄Y€XT‹[ôQöY[’ò[ú‹‹ùYô\‹ù
+BàõòôKY\[ô[ù\⁄Y€XK\‹[ôK\›XõKYöY[À\ô\Ÿ\ùôYàÇà
+ »⁄›¬à
+òôT‹ZŸKú‹ZŸQ\[ô[ù⁄Y€XT‹[ôT›XõQöY[‘ô\Ÿ\ùôYô\‹ù
+BàõòôKY\[ô[ù\⁄Y€XK\‹[ôKZ[ô^Y\KYöY[À]ò[ú‹‹ùYàÇà
+ »⁄›¬à
+òôT‹ZŸKú‹ZŸQ\[ô[ù⁄Y€XT‹[ôR[ô^YQöY[’ò[ú‹‹ùYô\‹ù
+BàõòôKZ[ô^Y\KYöY[X\Xÿ][€úÀY]ò[X]YàÇà
+ »⁄›¬à
+òôT‹ZŸKú‹ZŸR[ô^YQöY[\Xÿ][€ú—]ò[X]Yô\‹ù
+BàõòôKZ[ô^Y\KY‹õ›[ô\^[ÿYYöY[À\ô\Ÿ\ùôYàÇà
+ »⁄›¬à
+òôT‹ZŸKú‹ZŸR[ô^YQ‹õ›[ô^[ÿYöY[‘ô\Ÿ\ùôYô\‹ù
+BàõòôKX€‹ŸY\›XõKYù[ò›[€ã]ò[Y\À]ò[Y]YàÇà
+ »⁄›¬à
+òôT‹ZŸKú‹ZŸP€‹ŸY›XõQù[ò›[€ïò[Y\’ò[Y]Yô\‹ù
+BàõòôKX€‹ŸY\›XõK\K]\K]öY]‹À]ò[Y]YàÇà
+ »⁄›¬à
+òôT‹ZŸKú‹ZŸP€‹ŸY›XõTU\UöY]‹’ò[Y]Yô\‹ù
+BàõòôK\ôX€‹ô]ò[ú‹‹ùÀ\ôYXŸYàÇà
+ »⁄›»
+òôT‹ZŸKú‹ZŸTôX€‹ôò[ú‹‹ù‘ôYXŸYô\‹ù
+BàõòôKY]K]ò[ú‹‹ùÀ\ôYXŸYàÇà
+ »⁄›»
+òôT‹ZŸKú‹ZŸQ]Uò[ú‹‹ù‘ôYXŸYô\‹ù
+BàõòôKY€YK][ô€YKXÿ[òŸ[][€úŒàÇà
+ »⁄›»
+òôT‹ZŸKú‹ZŸQ€YU[ô€YPÿ[òŸ[][€ú»ô\‹ù
+BàõòôKZ€€\À\ôYXŸYàÇà
+ »⁄›»
+òôT‹ZŸKú‹ZŸR€€\‘ôYXŸYô\‹ù
+BàõòôKYùY[[[Z]àà
+ »⁄›»òôT‹ZŸKú‹ZŸQùY[[Z]àõòôKYùY[X€€ú›[YYàÇà
+ »⁄›»
+òôT‹ZŸKú‹ZŸQùY[€€ú›[YYô\‹ù
+BàH[ô⁄[ôT›YŸPúôXZŸ›€Çà»[ô⁄[ôQ]ò[X][€ìò[õ‹ŸX€€ô»Bàù\›
+òôT‹ZŸKú‹ZŸQ]ò[X][€ìò[õ‹ŸX€€ô»ô\‹ù
+Bà[ô⁄[ôTôXYòX⁄”ò[õ‹ŸX€€ô»Bàù\›
+òôT‹ZŸKú‹ZŸTôXYòX⁄”ò[õ‹ŸX€€ô»ô\‹ù
+BàH[ô⁄[ôTô\›[à»ô\›[õ‹õX[\õHHòôT‹ZŸKú‹ZŸSõ‹õX[\õHô\‹ùàô\›[õ‹õX[\HHòôT‹ZŸKú‹ZŸSõ‹õX[\Hô\‹ùàBàòôT‹ZŸKî‹ZŸU[ú›\‹ùYõÿõ[HOà\ôH	[ô⁄[ôU[ú›\‹ùYà⁄YàYö[ôY
+’PíP–S–“Vó’T’”êëW–QTTó‘‘R—JBàòôPY\\î‹ZŸBà»õòôKXY\\ãZ[\[Y[ù][€éàà
+ »òôT‹ZŸKú‹ZŸTõ›öY\íY[ù]BàõòôKXY\\ã[[öÿYŸNà\›[€õHÇàõòôK\õ›öY\ã[ÿ⁄À\›]\Œàõ›X\XÿXõK]\›[€õHÇàBàŸ[ŸBàX]\ôSòôBà»õòôKXY\\ãZ[\[Y[ù][€éàà
+ »òôT‹ZŸKú‹ZŸTõ›öY\íY[ù]BàõòôKXY\\ã[[öÿYŸNàõŸX›[€ãXÿ[ôY]HÇàõòôK\õ›öY\ã[ÿ⁄À\›]\ŒàŸ[X›YXùZ[ZŸ^HÇàBàŸ[ôYÇà[\Q[ô⁄[ôT›YŸPúôXZŸ›€Çàõÿõ[BàòôT‹ZŸKî‹ZŸQùY[^]\›Yõÿõ[HOÇàòX⁄Ÿ[ôXõ‹ù⁄][ô⁄[ôU[Y[›]õÿõ[BàòôT‹ZŸKî‹ZŸTôX›\ú⁄]ôPﬁX€Hõÿõ[HOÇàòX⁄Ÿ[ôXõ‹ù⁄]òôQ^X›][€ëòZ[Yõÿõ[BàŸ[ŸBàòX⁄Ÿ[ôXõ‹ù⁄]òôU[ò]òZ[XõH	[õ[ô\¬à»ùHòëHY\\à\»õ›ôY[à€€ôöY›\ôYÇàïH€ÀZŸ^Hÿ]Hô\]Z\ô\»õ›HŸ[X›Y€€ôöYÀ€òôKXY\\ãõÿ⁄Àù›àÇàò[ôY\\à€ŸH[öŸYYÿZ[ú›[ô⁄[ôK\ô\]Y\›]åKàÇàïò[Y]Hõ›öY\àY[ù]H⁄]XZŸHô\öYûK[òôKXY\\ãX€€ùòX›àÇàîŸ[X›KX›XöXÿ[X⁄^ãY[ô⁄[ôOXYŸKXò\Ÿ[[ôH€õHõ‹àò\Ÿ[[ôHô\öYöXÿ][€ãàÇàBàŸ[ôYÇàòôPY\\î‹ZŸHOà»OÇàòX⁄Ÿ[ôXõ‹ù⁄][ùò[Y€€ôöY›\ò][€ÇàùH\›[€õHòëHY\\à‹ZŸHÿ[õõ›ôHŸ[X›Yõ›Y⁄H”HÇÇúù[êYŸPò\Ÿ[[ôHéà[ô⁄[ôTô\]Y\›Oà”H[ô⁄[ôTô\›[úù[êYŸPò\Ÿ[[ôHô\]Y\›H¬àõ‹õX[^ôY\HHõ‹õX[\ŸH
+ô\]Y\›\Hô\]Y\›
+Bàõ‹õX[^ôY\õHHò\Ÿ[[ôSõ‹õX[\ŸH
+ô\]Y\›\õHô\]Y\›
+Hõ‹õX[^ôY\Bà\ôH[ô⁄[ôTô\›[à»ô\›[õ‹õX[\õHHõ‹õX[^ôY\õBàô\›[õ‹õX[\HHõ‹õX[^ôY\BàBÇãKHõ»›]X»]ò[X]‹à\»ù\›Y»X[ùYòX›\ôHŸ[\ÿ€‹Y[ù\õò[ãKHﬁ[ù^à\»ÿ]H\»[Xô\ò][HôYõ‹ôHôY[\‹»€€ùô\ú⁄[€à[ô\BãKH\ò\›\ôK€»Hù]\ôHòëHY\\à]\›ô]\õàH€‹ŸYY]KYúôYH\õK›\BãKHZ\à⁄X⁄YŸH]Ÿ[àXÿŸ\»[àH›\úô[ù⁄Y€ò]\ôKÇùò[Y]Q[ô⁄[ôTô\›[éà[ô⁄[ôTô\›[Oà”H[ô⁄[ôTô\›[ùò[Y]Q[ô⁄[ôTô\›[ô\›[H¬à]\õHHô\›[õ‹õX[\õHô\›[àHHô\›[õ‹õX[\Hô\›[à[õ\‹»
+€‹ŸY
+\õKJJH	àòX⁄Ÿ[ôXõ‹ù⁄][ô⁄[ôTô\›[[ùò[Yàú›]X»[ô⁄[ôHô]\õôY[à‹[à\õH‹à\HÇà[õ\‹»
+õ”Y]\»
+\õKJJH	àòX⁄Ÿ[ôXõ‹ù⁄][ô⁄[ôTô\›[[ùò[Yàú›]X»[ô⁄[ôHô]\õôY[úô\€€ôYY]]ò\öXXõ\»Çà
+¬à⁄X⁄“[ù\õò[ò⁄X⁄’\HBà⁄X⁄“[ù\õò[ò⁄X⁄“[ù\õò[\õH€\\HBà\ôHô\›[à
+Hÿ]⁄\úõ‹ò»OÇàòX⁄Ÿ[ôXõ‹ù⁄][ô⁄[ôTô\›[[ùò[Yàú›]X»[ô⁄[ôHô]\õôYH\õK’\HZ\àôZôX›YûHYŸHÇÇãKH€€\[K][YK[€õHò][»õ›ôHXX⁄[ô⁄[ôK\ô\›[ÿ]Kà^H\ôHùZ[\¬ãKH\€€]Yô\öYöY\àö[ò\öY\»[ôÿ[õõ›ôHŸ[X›Yõ›Y⁄HõŸX›[€ÇãKH”KÇù\›[ô⁄[ôTô\›[éà[ô⁄[ôTô\›[Oà[ô⁄[ôTô\›[à⁄YàYö[ôY
+’PíP–S–“Vó’T’—Së“SëW”‘Só’TìJBù\›[ô⁄[ôTô\›[ô\›[Hô\›[à»ô\›[õ‹õX[\õHH[ù\õò[ïò\à◊BàBàŸ[YàYö[ôY
+’PíP–S–“Vó’T’—Së“SëW’SîëT””ëQ”QUJBù\›[ô⁄[ôTô\›[ô\›[Hô\›[à»ô\›[õ‹õX[\õHH[ù\õò[ìY]Uà
+Y]RYõ”[Ÿ[Sò[YR\⁄
+H◊BàBàŸ[YàYö[ôY
+’PíP–S–“Vó’T’—Së“SëW’TW”RT”PU“
+Bù\›[ô⁄[ôTô\›[ô\›[Hô\›[à»ô\›[õ‹õX[\õHH[ù\õò[ì]
+]›ö[ô»ö[ùò[Y[ô⁄[ôHô\›[äBàBàŸ[ŸBù\›[ô⁄[ôTô\›[HYàŸ[ôYÇÇãKH\KY\ôX›Y‹[]ô[]H^[ú⁄[€àúõ€HHåàù[ù[YKõ€›ŸYûBãKHYŸI‹»ôYXŸ\ãà\»\»H‹òX€Kÿò\Ÿ[[ôHYÿZ[ú›⁄X⁄HòëHY\\ÇãKH⁄[ôH⁄X⁄ŸYÇòò\Ÿ[[ôSõ‹õX[\ŸHéà\õHOà\HOà”H\õBòò\Ÿ[[ôSõ‹õX[\ŸH\õHHH¬àI»HôYXŸHBà]U\õHH\—]TôX€‹ô\HI»èèHÿ\ŸBàõ›[ô»Oà\ôH\õBàù\›
+ôX€‹ôò[YK\ò[Y]\ú HOà¬àôX€‹ôYàHúõ€SX^XôH◊“ST‘‘“PìW◊»	à\‘ôX€‹ôôX€‹ôò[YBà^[ú⁄[€àH]Q^[ôôX€‹ô»ôX€‹ôò[YH\ò[Y]\ú»ôX€‹ôYà\õBà\ôH	]Q^[ú⁄[€ï\õH\õH^[ú⁄[€Çàõ‹õX[\ŸH]U\õBÇãKHYŸHãéô]\õôYH]H^[ú⁄[€à\ôX›K⁄[HYŸHãéH‹ò\»òZ[\ôBãKH[àX^XôKàŸY\[ô»\»[ûH€€\]Xö[]H^Y\à]»H›[ô[€ôBãKHô\ùXÿ[€XŸH€€\[HYÿZ[ú›ãé[ôH[õôY[]ô\ûHôYH\ŸHãéKÇò€\‹»]Q^[ú⁄[€îô\›[ô\›[⁄\ôBà]Q^[ú⁄[€ï\õHéà\õHOàô\›[Oà\õBÇö[ú›[òŸH]Q^[ú⁄[€îô\›[
+[\ÿ€‹K€€íXY€€í[ôõÀ[ù\õò[ê\ô‹ H⁄\ôBà]Q^[ú⁄[€ï\õH»
+À€€ã[ôõÀ\ô‹ HHZ–€€à€€à[ôõ»\ô‹¬Çö[ú›[òŸH]Q^[ú⁄[€îô\›[
+X^XôH
+[\ÿ€‹K€€íXY€€í[ôõÀ[ù\õò[ê\ô‹ JH⁄\ôBà]Q^[ú⁄[€ï\õHò[òX⁄»Hÿ\ŸBàõ›[ô»Oàò[òX⁄¬àù\›
+À€€ã[ôõÀ\ô‹ HOàZ–€€à€€à[ôõ»\ô‹¬Çù‹ö]TõŸ‹ò[Héà⁄^ì‹[€ú»Oà\”XZ[àOàX\ìX\‹]ô[[Ÿ[Sò[YH⁄^ì[Ÿ[HOà”H
+
+Bù‹ö]TõŸ‹ò[H‹»»[Ÿ[\»H¬à]Yú»H€€òÿ]
+X\ô[[\»[Ÿ[\ Bà›]]\ôX›‹ûHH⁄^ì›]]\ôX›‹ûH‹¬àÿ⁄[YT]H›]]\ôX›‹ûHœàúõŸ‹ò[Kú‹»Çà[\]H›]]\ôX›‹ûHœàùôY[\‹ÀùÇà›Y⁄[ô‘]H›]]\ôX›‹ûHœàú›Y⁄[ôÀùÇàô\⁄YX[]H›]]\ôX›‹ûHœàù\Y\ô\⁄YX[ùÇàYò][X⁄Ÿ]]H›]]\ôX›‹ûHœàù\Y\ô\⁄YX[òö[àÇà›YŸU[Z[ô‹‘]H›]]\ôX›‹ûHœà›YŸU[Z[ô‹”ò[YBà›]X‘⁄[]H›]]\ôX›‹ûHœàô\⁄YX[›]X‘⁄[ò[YBà‹õ›[ôúöYŸT]H›]]\ôX›‹ûHœà\Y€Q‹õ›[ôúöYŸSò[YBàX⁄Ÿ]]Húõ€SX^XôHYò][X⁄Ÿ]]
+⁄^îX⁄Ÿ]ö[H‹ Bà⁄YàYö[ôY
+’PíP–S–“Vó–Q—WÃéJBàYòXŸHH›\íQÇà][ù\ôòXŸS[Ÿ[HHô]T⁄›»	U‹]ô[[Ÿ[Sò[YHYòXŸBà[ù\ôòXŸR\⁄H⁄›»	Qù[\⁄YòXŸBàŸ[ŸBà][ù\ôòXŸS[Ÿ[HHù[ò]òZ[XõKXYŸKLãéÇà[ù\ôòXŸR\⁄Hù[ò]òZ[XõKXYŸKLãéÇàŸ[ôYÇàYùS»	¬à‹ôX]Q\ôX›‹ûRYìZ\‹⁄[ô»ùYH›]]\ôX›‹ûBàô[[›ôRYë^\›»ÿ⁄[YT]àô[[›ôRYë^\›»ô\⁄YX[]àô[[›ôRYë^\›»Yò][X⁄Ÿ]]àô[[›ôRYë^\›»›YŸU[Z[ô‹‘]àô[[›ôRYë^\›»›]X‘⁄[]àô[[›ôRYë^\›»‹õ›[ôúöYŸT]àô[[›ôTX⁄Ÿ]Yë^\›»X⁄Ÿ]]à€X\îô\⁄YX[€TX⁄Ÿ]»›]]\ôX›‹ûBà[ùûHHZ]\à
+òX⁄Ÿ[ôXõ‹ù⁄][ùûTôZôX›Y
+H\ôH
+ö[ô[ùûH‹»Yú Bàÿ\ŸH€€\[Y\Yô\⁄YX[[ùûHŸÇàù\›ô\⁄YX[Oà¬àYùS»	‹ö]Qö[H›Y⁄[ô‘]à
+ô[ô\î›Y⁄[ô»‹»[ù\ôòXŸS[Ÿ[H[ù\ôòXŸR\⁄[ùûH›]X–€‹›\ôSõ›\XÿXõJBàù[ï[YYXõXÿ][€à›YŸU[Z[ô‹‘][ùûHúô\⁄YX[^ò][€àà	à[ôU\Yô\⁄YX[‹»ô\⁄YX[]X⁄Ÿ]][ùûHô\⁄YX[àõ›[ô»Oàù[ï[YYXõXÿ][€Çà›YŸU[Z[ô‹‘][ùûHúÿ⁄[YKX€ŸYŸ[ã\XõXÿ][€àà	àÿ\ŸHõ›ôT›]X–€‹›\ôHYú»[ùûHŸÇàYùòZ[\ôHOà¬àYùS»	¬à‹ö]Qö[H[\]	ô[ô\ë[\à
+›]X–€‹›\ôQòZ[\ôQYö[ö][€ú»òZ[\ôJBà
+›]X–€‹›\ôQòZ[\ôU[úô\€€ôYòZ[\ôJBà‹ö]Qö[H›Y⁄[ô‘]	ô[ô\î›Y⁄[ô»‹»[ù\ôòXŸS[Ÿ[H[ù\ôòXŸR\⁄[ùûH	à›]X–€‹›\ôR[ò€€\]Bà
+[ô›	›]X–€‹›\ôQòZ[\ôQYö[ö][€ú»òZ[\ôJBà
+›]X–€‹›\ôQòZ[\ôU[úô\€€ôYòZ[\ôJBà
+›]X–€‹›\ôQòZ[\ôPõÿ⁄Ÿ\ú»òZ[\ôJBà
+›]X–€‹›\ôQòZ[\ôU[ö€õ›€ê›XöXÿ[òZ[\ôJBà
+›]X–€‹›\ôQòZ[\ôTôX\€€àòZ[\ôJBà
+›]X–€‹›\ôQòZ[\ôS›Ÿ\ö[ô»òZ[\ôJBàòX⁄Ÿ[ôXõ‹ù⁄]
+›]X–€‹›\ôQòZ[\ôP€\‹»òZ[\ôJBà
+›]X–€‹›\ôQòZ[\ôTõÿõ[HòZ[\ôJBàöY⁄€‹›\ôHOàYùS»	¬à‹ö]Qö[H[\]à
+ô[ô\ë[\
+›]X–€‹›\ôQYö[ö][€ú»€‹›\ôJH◊JBà‹ö]Qö[H›Y⁄[ô‘]	ô[ô\î›Y⁄[ô»‹»[ù\ôòXŸS[Ÿ[H[ù\ôòXŸR\⁄[ùûH	à›]X–€‹›\ôP€€\]H
+[ô›	›]X–€‹›\ôQYö[ö][€ú»€‹›\ôJBà‹ö]Qö[Hÿ⁄[YT]
+›]X–€‹›\ôTõŸ‹ò[H€‹›\ôJBÇúù[ï[YYXõXÿ][€Çàéàö[T]àOà€€\[YYÇàOà›ö[ô¬àOà”H
+
+BàOà”H
+
+Búù[ï[YYXõXÿ][€à›YŸU[Z[ô‹‘][ùûHXõXÿ][€î›YŸHX›[€àH¬à
+›]€€YKXõXÿ][€ìò[õ‹ŸX€€ô HHYX\›\ôU€T›YŸH	à
+öY⁄	àX›[€äHÿ]⁄\úõ‹ò
+\ôHàYù
+BàYùS»	‹ö]Qö[H›YŸU[Z[ô‹‘]	àô[ô\î›YŸU[Z[ô‹»[ùûHXõXÿ][€î›YŸHXõXÿ][€ìò[õ‹ŸX€€ô¬àZ]\àõ›—\úõ‹à\ôH›]€€YBÇúô[ô\î›YŸU[Z[ô‹»éà€€\[YYàOà›ö[ô»Oà€‹ôçOà›ö[ô¬úô[ô\î›YŸU[Z[ô‹»[ùûHXõXÿ][€î›YŸHXõXÿ][€ìò[õ‹ŸX€€ô»H[õ[ô\»	à»ú›YŸW[\ŸY€ò[õ‹ŸX€€ô◊›]\»Çàù[Y\öX»ô[ô⁄[ôK]›[à	€€\[Y[ô⁄[ôU›[ò[õ‹ŸX€€ô»[ùûBà‹[€ò[õòôKY]ò[X][€àà	€€\[YòôQ]ò[X][€ìò[õ‹ŸX€€ô»[ùûBà‹[€ò[õòôK\ôXYòX⁄»à	€€\[YòôTôXYòX⁄”ò[õ‹ŸX€€ô»[ùûBàù[Y\öX»ô[ô⁄[ôK\ô\›[XYZ\‹⁄[€àà	à€€\[Yô\›[YZ\‹⁄[€ìò[õ‹ŸX€€ô»[ùûBàù[Y\öX»ö[ù\õò[\Ÿ[X[ùXÀX]Y]à	à€€\[Y[ù\õò[]Y]ò[õ‹ŸX€€ô»[ùûBàù[Y\öX»ùôY[\‹ÀX€€ùô\ú⁄[€àà	€€\[YôY[\‹”ò[õ‹ŸX€€ô»[ùûBàXõXÿ][€àúô\⁄YX[^ò][€àÇàXõXÿ][€àúÿ⁄[YKX€ŸYŸ[ã\XõXÿ][€àÇàBà⁄\ôBàù[Y\öX»›YŸHò[õ‹ŸX€€ô»Bà›YŸH
+ »óà
+ »⁄›»ò[õ‹ŸX€€ô»
+ »óYX\›\ôYÇà‹[€ò[›YŸHHÿ\ŸBàù\›ò[õ‹ŸX€€ô»Oàù[Y\öX»›YŸHò[õ‹ŸX€€ô¬àõ›[ô»Oà›YŸH
+ »óWõ›X\XÿXõHÇàXõXÿ][€à›YŸBà›YŸHOHXõXÿ][€î›YŸHHù[Y\öX»›YŸHXõXÿ][€ìò[õ‹ŸX€€ô¬à›\ù⁄\ŸHH›YŸH
+ »óWõ›X\XÿXõHÇÇãKHõ›ôH]ô\ûH€€ô][€àô\]Z\ôYôYõ‹ôHH\KY\ò\ŸY⁄^à]ÿ[àôBãKHXõ\⁄YàHô\›[\»[Xô\ò][HHÿ\Xö[]Hò]\à[àHõ€€X[éÇãKH€õHH›XÿŸ\‹Ÿù[õ€Ÿàÿ\úöY\»ô[ô\ôYÿ⁄[YH»H‹ö]\ãÇúõ›ôT›]X–€‹›\ôBàéà–€€\[YYóBàOà€€\[YYÇàOàZ]\à›]X–€‹›\ôQòZ[\ôH›]X–€‹›\ôBúõ›ôT›]X–€‹›\ôHYú»[ùûBà€€\[Yö[ô[ô’[YH[ùûHœHö[ô[ô‘›]X»BàòZ[\ôH◊Hòö[ô[ôÀ][YK[õ›\›]X»àõõ›\ù[àÇàú›]X»€‹›\ôHô\]Y\›Yõ‹àHõ€ã\›]X»[ùûHÇàù\›»H€€\[Y\Yô\⁄YX[[ùûHBàòZ[\ôH◊Hù\Y\ô\⁄YX[\ô\Ÿ[ùàõõ›\ù[àÇàú›]X»€‹›\ôHô\]Y\›Yõ‹àH\Yô\⁄YX[Çàõ›
+ù[€‹›\ôTù[ù[YPõÿ⁄Ÿ\ú HBàòZ[\ôH◊HúôXX⁄XõK\ù[ù[YKXõÿ⁄Ÿ\ú»àõõ›\ù[àÇàú›]X»€‹›\ôH€€ùZ[ú»ôXX⁄XõHù[ù[YHõÿ⁄Ÿ\ú»Çàõ›
+ù[€‹›\ôU[ö€õ›€ê›XöXÿ[
+HBàòZ[\ôH◊HúôXX⁄XõK][ö€õ›€ãX›XöXÿ[\ö[Z]]ôHàõõ›\ù[àÇàú›]X»€‹›\ôH€€ùZ[ú»[ö€õ›€à›XöXÿ[ö[Z]]ô\»ÇàZ\‹⁄[ô»à»H[úô\€€ôYBàòZ[\ôH[úô\€€ôYù[úô\€€ôYYYö[ö][€ú»àõõ›\ù[àà	àù[ú›\‹ùY[úô\€€ôYYö[ö][€àà
+ »ô]T⁄›»Z\‹⁄[ô¬àYùõÿõ[HHô[ô\ôYõŸ‹ò[HBàòZ[\ôH◊Húÿ⁄[YK[›Ÿ\ö[ôÀ\ôZôX›YàúôZôX›Yàõÿõ[BàöY⁄ÿ⁄[YHHô[ô\ôYõŸ‹ò[HBàöY⁄›]X–€‹›\ôBà»›]X–€‹›\ôQYö[ö][€ú»HôXX⁄XõBà›]X–€‹›\ôTõŸ‹ò[HHÿ⁄[YBàBà⁄\ôBà
+ôXX⁄XõK[úô\€€ôY
+HHôXX⁄XõQYö[ö][€ú»Yú»[ùûBàô[ô\ôYõŸ‹ò[HHô[ô\îõŸ‹ò[H[ùûHôXX⁄XõBà€‹›\ôTù[ù[YPõÿ⁄Ÿ\ú»HŸ]ù”\›	Ÿ]ôúõ€S\›	à€€\[Yù[ù[YPõÿ⁄Ÿ\ú»[ùûBà
+ »€€òÿ]X\
+\YôY[\‹–õÿ⁄Ÿ\ú»à€€\[Y\õJHôXX⁄XõBà€‹›\ôU[ö€õ›€ê›XöXÿ[HŸ]ù”\›	Ÿ]ôúõ€S\›	à€€\[Y[ö€õ›€ê›XöXÿ[ö[Z]]ô\»[ùûBà
+ »€€òÿ]X\
+\YôY[\‹’[ö€õ›€ê›XöXÿ[à€€\[Y\õJHôXX⁄XõBàòZ[\ôHZ\‹⁄[ô»ôX\€€à›Ÿ\ö[ô»õÿõ[HHYù›]X–€‹›\ôQòZ[\ôBà»›]X–€‹›\ôQòZ[\ôQYö[ö][€ú»HôXX⁄XõBà›]X–€‹›\ôQòZ[\ôU[úô\€€ôYHZ\‹⁄[ô¬à›]X–€‹›\ôQòZ[\ôPõÿ⁄Ÿ\ú»H€‹›\ôTù[ù[YPõÿ⁄Ÿ\ú¬à›]X–€‹›\ôQòZ[\ôU[ö€õ›€ê›XöXÿ[H€‹›\ôU[ö€õ›€ê›XöXÿ[à›]X–€‹›\ôQòZ[\ôTôX\€€àHôX\€€Çà›]X–€‹›\ôQòZ[\ôS›Ÿ\ö[ô»H›Ÿ\ö[ô¬à›]X–€‹›\ôQòZ[\ôTõÿõ[HHõÿõ[BàBÇú›]X–€‹›\ôQòZ[\ôP€\‹»éà›]X–€‹›\ôQòZ[\ôHOàòX⁄Ÿ[ôòZ[\ôP€\‹¬ú›]X–€‹›\ôQòZ[\ôP€\‹»òZ[\ôBà›]X–€‹›\ôQòZ[\ôTôX\€€àòZ[\ôHOHúÿ⁄[YK[›Ÿ\ö[ôÀ\ôZôX›YàBàÿ⁄[YS›Ÿ\ö[ô—òZ[Yà›\ù⁄\ŸHH[ú›\‹ùYõŸ‹ò[BÇö[ôU\Yô\⁄YX[àéà⁄^ì‹[€ú¬àOàö[T]àOàö[T]àOà€€\[YYÇàOà\Yô\⁄YX[àOà”H
+
+Bö[ôU\Yô\⁄YX[‹»X[öYô\›]X⁄Ÿ]][ùûHô\⁄YX[H¬à]õÿõ[HBàù\Yô\⁄YX[ô\]Z\ôYõ‹àÇà
+ »ô]T⁄›»
+€€\[Yò[YH[ùûJBà
+ »é»õÿ⁄Ÿ\úŒàÇà
+ »ô[ô\êõÿ⁄Ÿ\ú»
+€€\[Yù[ù[YPõÿ⁄Ÿ\ú»[ùûJBà⁄[à
+€€\[Yö[ô[ô’[YH[ùûHOHö[ô[ô’[ú›\‹ùY
+H	¬à⁄[à
+⁄^îô\⁄YX[€XﬁH‹»OHõX[öYô\›äH	¬à⁄X⁄ŸY€‹›\ôHHò[Y]U\Yô\⁄YX[€€ùòX›à
+\›ô\⁄YX[€€ùòX›ô\⁄YX[
+Bà€XŸT[àHùZ[ô\⁄YX[€XŸT[à[ùûH	àô\⁄YX[€‹›\ôT^[ÿY⁄X⁄ŸY€‹›\ôBàYùS»	‹ö]Qö[HX[öYô\›]à
+ô[ô\ï\Yô\⁄YX[àù[ú›\‹ùYYXY€õ‹›X»à[ùûH⁄X⁄ŸY€‹›\ôH€XŸT[äBàòX⁄Ÿ[ôXõ‹ù⁄][ú›\‹ùYõŸ‹ò[H	ÿ\ŸH€€\[Yö[ô[ô‘ôX\€€à[ùûHŸÇà[ö€õ›€ê›XöXÿ[ö[Z]]ôHOÇàù[ú›\‹ùY[ö€õ›€à›XöXÿ[ö[Z]]ôHõ‹àÇà
+ »ô]T⁄›»
+€€\[Yò[YH[ùûJBà
+ »é»ö[Z]]ô\ŒàÇà
+ »ô[ô\êõÿ⁄Ÿ\ú»
+€€\[Y[ö€õ›€ê›XöXÿ[ö[Z]]ô\»[ùûJBà»OÇàù[ú›\‹ùYö[ô[ôÀ][YH€\‹⁄YöXÿ][€àõ‹àÇà
+ »ô]T⁄›»
+€€\[Yò[YH[ùûJBà
+ »é»[ù\õò[[ôôY[\‹»õÿ⁄Ÿ\à]Y]»\ÿY‹ôYHÇàÿ\ŸH⁄^îô\⁄YX[€XﬁH‹»ŸÇàúôZôX›àOàòX⁄Ÿ[ôXõ‹ù⁄]ô\⁄YX[ô\]Z\ôYõÿõ[BàõX[öYô\›àOà¬à⁄X⁄ŸYô\⁄YX[Hò[Y]U\Yô\⁄YX[€€ùòX›à
+\›ô\⁄YX[€€ùòX›ô\⁄YX[
+Bà€XŸT[àHùZ[ô\⁄YX[€XŸT[à[ùûH	àô\⁄YX[€‹›\ôT^[ÿY⁄X⁄ŸYô\⁄YX[à»HùZ[ô\⁄YX[›]X‘⁄[[ùûH€XŸT[ÇàYùS»	‹ö]Qö[HX[öYô\›]à
+ô[ô\ï\Yô\⁄YX[õX[öYô\›[€õHà[ùûH⁄X⁄ŸYô\⁄YX[€XŸT[äBàòX⁄Ÿ[ôXõ‹ù⁄]ô\⁄YX[ô\]Z\ôYõÿõ[BàúX⁄Ÿ]àOà¬à⁄X⁄ŸYô\⁄YX[Hò[Y]U\Yô\⁄YX[€€ùòX›	à\›X⁄Ÿ]ô\⁄YX[
+\›ô\⁄YX[€€ùòX›ô\⁄YX[
+Bà€XŸT[àHùZ[ô\⁄YX[€XŸT[à[ùûH	àô\⁄YX[€‹›\ôT^[ÿY⁄X⁄ŸYô\⁄YX[à›]X‘⁄[HùZ[ô\⁄YX[›]X‘⁄[[ùûH€XŸT[Çàû]\»H[ò€ŸTù[ù[YTX⁄Ÿ]⁄X⁄ŸYô\⁄YX[àô\öYûTù[ù[YTX⁄Ÿ]⁄X⁄ŸYô\⁄YX[û]\¬à€TX⁄Ÿ]»H[ò€ŸTô\⁄YX[€TX⁄Ÿ]»‹»€XŸT[ÇàYùS»	¬à‹ö]Qö[HX[öYô\›]à
+ô[ô\ï\Yô\⁄YX[úX⁄Ÿ]]åàà[ùûH⁄X⁄ŸYô\⁄YX[€XŸT[äBàõ‹ìW»€TX⁄Ÿ]»	
+]€Pû]\ HOÇàû]T›ö[ôÀù‹ö]Qö[H]€Pû]\¬àõ‹ìW»›]X‘⁄[	⁄[OÇà¬à‹ö]Qö[Bà
+⁄^ì›]]\ôX›‹ûH‹»œàô\⁄YX[›]X‘⁄[ò[YJBà⁄[à‹ö]Qö[Bà
+⁄^ì›]]\ôX›‹ûH‹»œà\Y€Q‹õ›[ôúöYŸSò[YJBà\Y€Q‹õ›[ôúöYŸTÿ‹ö\à‹ö]TX⁄Ÿ]û]\»X⁄Ÿ]]û]\¬à€XﬁHOàòX⁄Ÿ[ôXõ‹ù⁄][ùò[Y€€ôöY›\ò][€à	àù[ö€õ›€à\Yô\⁄YX[€XﬁHà
+ »⁄›»€XﬁBÇô[ú›\ôT‹ùXõU\õHéà\õHOà\HOà”H
+
+Bô[ú›\ôT‹ùXõU\õH\õHHH¬à[õ\‹»
+€‹ŸY
+\õKJJH	àòX⁄Ÿ[ôXõ‹ù⁄]ô\⁄YX[^ò][€ëòZ[Yàõ€õH€‹ŸY\õ\»ÿ[à‹õ‹‹»HõÿŸ\‹»õ›[ô\ûHÇà[õ\‹»
+õ”Y]\»
+\õKJJH	àòX⁄Ÿ[ôXõ‹ù⁄]ô\⁄YX[^ò][€ëòZ[Yàù\Yô\⁄YX[›[€€ùZ[ú»õÿŸ\‹À[ÿÿ[Y]]ò\öXXõ\»ÇÇãKHHåàX⁄Ÿ]ÿ\úöY\»€õHH⁄X⁄ŸY[ù\õò[^[ÿYàSò[YHYö[ö][€ú¬ãKH›^H[àH€€ú›[Y\â‹»[ôXYK[ÿYY⁄Y€ò]\ôK⁄‹ŸH‹[]ô[[Ÿ[H[ôãKHù[[ù\ôòXŸH\⁄\ôH\ùŸàHX⁄Ÿ][ùô[‹KàŸY\[ô»H\ö]ôYãKH\ôX›Y\[ô[òﬁH[ùô[ù‹ûHXZŸ\»\»õ›[ô\ûHÿúŸ\ùòXõH[ôô]ô[ù»BãKHù]\ôHõŸXŸ\àúõ€HXõ\⁄[ô»H^[ÿY⁄‹ŸHX€\ôYô\]Z\ô[Y[ù»öYùãKHúõ€HHŸ\öX[^ôY\õK’\HZ\ãÇùò[Y]U\Yô\⁄YX[€€ùòX›éà\Yô\⁄YX[Oà”Hô\⁄YX[€‹›\ôBùò[Y]U\Yô\⁄YX[€€ùòX›ô\⁄YX[H¬à]\õHHô\⁄YX[\õHô\⁄YX[àHHô\⁄YX[\Hô\⁄YX[à\ö]ôY\[ô[ò⁄Y\»Hô\⁄YX[\[ô[òﬁSò[Y\»\õHBà[õ\‹»
+ô\⁄YX[\ôX›\[ô[ò⁄Y\»ô\⁄YX[OH\ö]ôY\[ô[ò⁄Y\ H	àòX⁄Ÿ[ôXõ‹ù⁄]ô\⁄YX[^ò][€ëòZ[Yàù\Yô\⁄YX[\[ô[òﬁH[ùô[ù‹ûHŸ\»õ›X]⁄]»\õK’\H^[ÿYÇà[ú›\ôT‹ùXõU\õH\õHBà
+¬à⁄X⁄“[ù\õò[ò⁄X⁄’\HBà⁄X⁄“[ù\õò[ò⁄X⁄“[ù\õò[\õH€\\HBà\ôH
+
+Bà
+Hÿ]⁄\úõ‹ò»OÇàòX⁄Ÿ[ôXõ‹ù⁄]ô\⁄YX[^ò][€ëòZ[Yàù\Yô\⁄YX[\õK’\HZ\àÿ\»ôZôX›YûHYŸHôYõ‹ôHXõXÿ][€àÇàô\€€ôTô\⁄YX[€‹›\ôHô\⁄YX[Çúô\⁄YX[€‹›\ôS[Z]éà[ùúô\⁄YX[€‹›\ôS[Z]HLÇúô\€€ôTô\⁄YX[€‹›\ôHéà\Yô\⁄YX[Oà”Hô\⁄YX[€‹›\ôBúô\€€ôTô\⁄YX[€‹›\ôHô\⁄YX[H¬à‹ò\Hô\€€ôQ\[ô[òﬁQ‹ò\
+ô\⁄YX[\ôX›\[ô[ò⁄Y\»ô\⁄YX[
+Bà\ôHô\⁄YX[€‹›\ôBà»ô\⁄YX[€‹›\ôT^[ÿYHô\⁄YX[àô\⁄YX[€‹›\ôTô\€€ôY\[ô[ò⁄Y\»H\[ô[òﬁQ‹ò\ô\€€ôY‹ò\àô\⁄YX[€‹›\ôQ^[ôYYö[ö][€ú»H\[ô[òﬁQ‹ò\^[ôY‹ò\àô\⁄YX[€‹›\ôT⁄Y€ò]\ôSX]ô\»H\[ô[òﬁQ‹ò\X]ô\»‹ò\àô\⁄YX[€‹›\ôQ^€YYô\Ÿ[ù][€ë\[ô[ò⁄Y\»Bà\[ô[òﬁQ‹ò\^€YYô\Ÿ[ù][€à‹ò\àBÇúô\€€ôQ\[ô[òﬁQ‹ò\éà‘Sò[YWHOà”H\[ô[òﬁQ‹ò\úô\€€ôQ\[ô[òﬁQ‹ò\H€»Ÿ]ô[\H◊H◊HŸ]ô[\Bà⁄\ôBà€»ŸY[à^[ôYX]ô\»^€YYô\Ÿ[ù][€à[ô[ô»Hÿ\ŸH[ô[ô»ŸÇà◊HOà\ôH\[ô[òﬁQ‹ò\à»\[ô[òﬁQ‹ò\ô\€€ôYHŸ]ù”\›ŸY[Çà\[ô[òﬁQ‹ò\^[ôYHô]ô\úŸH^[ôYà\[ô[òﬁQ‹ò\X]ô\»Hô]ô\úŸHX]ô\¬à\[ô[òﬁQ‹ò\^€YYô\Ÿ[ù][€àHŸ]ù”\›	àŸ]ôYôô\ô[òŸH^€YYô\Ÿ[ù][€àŸY[ÇàBàò[YHàô\›àò[YHŸ]õY[Xô\òŸY[àOÇà€»ŸY[à^[ôYX]ô\»^€YYô\Ÿ[ù][€àô\›àŸ]ú⁄^ôHŸY[àèHô\⁄YX[€‹›\ôS[Z]OÇàòX⁄Ÿ[ôXõ‹ù⁄]ô\⁄YX[^ò][€ëòZ[Y	àù\Yô\⁄YX[\[ô[òﬁH€‹›\ôH^ŸYY»Çà
+ »⁄›»ô\⁄YX[€‹›\ôS[Z]à
+ »àô\€€ôYSò[Y\»Çà›\ù⁄\ŸHOà¬àYö[ö][€îô\›[H€⁄›\ô\⁄YX[Yö[ö][€àò[YBàYö[ö][€àHÿ\ŸHYö[ö][€îô\›[ŸÇàYù»OàòX⁄Ÿ[ôXõ‹ù⁄]ô\⁄YX[^ò][€ëòZ[Y	àù\Yô\⁄YX[\[ô[òﬁH\»[ò]òZ[XõH[àH›\úô[ù⁄Y€ò]\ôNàÇà
+ »ô]T⁄›»ò[YBàöY⁄⁄X⁄ŸYYö[ö][€àOà\ôH⁄X⁄ŸYYö[ö][€Çà]ŸY[â»HŸ]ö[úŸ\ùò[YHŸY[ÇàYà\‘ô\⁄YX[⁄Y€ò]\ôSXYàò[YBà[à€»ŸY[â»^[ôY
+ò[YHàX]ô\ H^€YYô\Ÿ[ù][€àô\›à[ŸH¬à]^X›\[ô[ò⁄Y\»Bàô\⁄YX[Yö[ö][€ë\[ô[òﬁSò[Y\»Yö[ö][€Çà\ÿ€›ô\ôYH\›ô\⁄YX[Yö[ö][€ë\[ô[ò⁄Y\¬àYö[ö][€à^X›\[ô[ò⁄Y\¬à[Yö[ö][€ìò[Y\»Bàò[Y\“[àYö[ö][€àéàŸ]îŸ]Sò[YBàô\Ÿ[ù][€ì€õHHŸ]ô[]Hò[YH	àŸ]ôYôô\ô[òŸH[Yö[ö][€ìò[Y\»^X›\[ô[ò⁄Y\¬à[õ\‹»
+\ÿ€›ô\ôYOH^X›\[ô[ò⁄Y\ H	àòX⁄Ÿ[ôXõ‹ù⁄]ô\⁄YX[^ò][€ëòZ[Yàù\Yô\⁄YX[Yö[ö][€à\[ô[òﬁH€XŸHŸ\»õ›X]⁄]»⁄X⁄ŸY\KÿõŸHÇà€»ŸY[â»
+ò[YHà^[ôY
+HX]ô\¬à
+Ÿ]ù[ö[€à^€YYô\Ÿ[ù][€àô\Ÿ[ù][€ì€õJBà
+Ÿ]ù”\›\ÿ€›ô\ôY
+ »ô\›
+BÇòùZ[ô\⁄YX[€XŸT[àéà€€\[YYàOà\Yô\⁄YX[Oà”Hô\⁄YX[€XŸT[ÇòùZ[ô\⁄YX[€XŸT[à[ùûHô\⁄YX[Hÿ\ŸH€€\[Yö[ô[ô’[YH[ùûHŸÇàö[ô[ô”Z^YOà¬à]ŸYY»H\›ô\⁄YX[€TŸYY»	à€€X›ô\⁄YX[€TŸYY»◊H
+€€\[Y\õH[ùûJBà[õôYõÿ⁄Ÿ\ú»HŸ]ôúõ€S\›	à€€òÿ]X\ô\⁄YX[€TŸYYõÿ⁄Ÿ\ú»ŸYY¬à^X›Yõÿ⁄Ÿ\ú»HŸ]ôúõ€S\›
+€€\[YôY[\‹–õÿ⁄Ÿ\ú»[ùûJBà⁄[à
+ù[ŸYY H	àòX⁄Ÿ[ôXõ‹ù⁄]ô\⁄YX[^ò][€ëòZ[YàõZ^Yô\⁄YX[€XŸH[àõ›[ôõ»õÿ⁄Ÿ\ãZXYY\Y€HÇà[õ\‹»
+[õôYõÿ⁄Ÿ\ú»OH^X›Yõÿ⁄Ÿ\ú H	àòX⁄Ÿ[ôXõ‹ù⁄]ô\⁄YX[^ò][€ëòZ[YàõZ^Yô\⁄YX[€XŸH[àŸ\»õ›€›ô\à]ô\ûHôY[\‹»õÿ⁄Ÿ\àÇàÿ[ôY]\»H\›ô\⁄YX[€Pÿ[ôY]\»	Çà€€X›ô\⁄YX[€Pÿ[ôY]\»ô\⁄YX[àô\⁄YX[€XŸT[õôY	àò]ô\úŸH
+X]\öX[^ôR€Hÿ[ôY]\ HŸYY¬àö[ô[ô—[ò[ZX»Oà\ôH	ô\⁄YX[€XŸSõ›\XÿXõHù⁄€KY[ùûKY[ò[ZX»Çàö[ô[ô‘›]X»Oà\ôH	ô\⁄YX[€XŸSõ›\XÿXõHú›]XÀY[ùûHÇàö[ô[ô’[ú›\‹ùYOà\ôH	ô\⁄YX[€XŸSõ›\XÿXõHù[ú›\‹ùYY[ùûHÇà⁄\ôBàX]\öX[^ôR€Hÿ[ôY]\»ŸYYHÿ\ŸHX]⁄[ô–ÿ[ôY]\»ŸÇàÿÿ[ôY]WHOà¬à]\õHHô\⁄YX[€Pÿ[ôY]U\õHÿ[ôY]BàHHô\⁄YX[€Pÿ[ôY]U\Hÿ[ôY]Bà€›\òŸP€‹ŸYHô\⁄YX[€Pÿ[ôY]T€›\òŸP€‹ŸYÿ[ôY]Bà[ùö\õ€õY[ù\ö]HBàô\⁄YX[€Pÿ[ôY]Q[ùö\õ€õY[ù\ö]Hÿ[ôY]Bà\Yô\⁄YX[H\Yô\⁄YX[à»ô\⁄YX[\õHH\õBàô\⁄YX[\HHBàô\⁄YX[\ôX›\[ô[ò⁄Y\»Hô\⁄YX[\[ô[òﬁSò[Y\»\õHBàBà[õ\‹¬à
+
+€›\òŸP€‹ŸY	âà[ùö\õ€õY[ù\ö]HOH
+Bà
+õ›€›\òŸP€‹ŸYà	âà[ùö\õ€õY[ù\ö]Hàà	âà[ùö\õ€õY[ù\ö]HHô\⁄YX[€Q[ùö\õ€õY[ù[Z]à
+Bà
+H	àòX⁄Ÿ[ôXõ‹ù⁄]ô\⁄YX[^ò][€ëòZ[Y	àõZ^Yô\⁄YX[€H[ùö\õ€õY[ù\ö]H\»›]⁄YHKãàÇà
+ »⁄›»ô\⁄YX[€Q[ùö\õ€õY[ù[Z]à€‹›\ôHHò[Y]U\Yô\⁄YX[€€ùòX›\Yô\⁄YX[àÿ[XõPXöHH€\‹⁄YûTô\⁄YX[€Pÿ[XõPXöH[ùö\õ€õY[ù\ö]HBà\ôHô\⁄YX[€T[Çà»ô\⁄YX[€RYHô\⁄YX[€TŸYYYŸYYàô\⁄YX[€T]Hô\⁄YX[€TŸYY]ŸYYàô\⁄YX[€Põÿ⁄Ÿ\ú»Hô\⁄YX[€TŸYYõÿ⁄Ÿ\ú»ŸYYàô\⁄YX[€P€‹›\ôHH€‹›\ôBàô\⁄YX[€Pÿ[XõPXöHHÿ[XõPXöBàô\⁄YX[€T€›\òŸP€‹ŸYBàô\⁄YX[€Pÿ[ôY]T€›\òŸP€‹ŸYÿ[ôY]Bàô\⁄YX[€Q[ùö\õ€õY[ù\ö]HBàô\⁄YX[€Pÿ[ôY]Q[ùö\õ€õY[ù\ö]Hÿ[ôY]BàBà◊HOàòX⁄Ÿ[ôXõ‹ù⁄]ô\⁄YX[^ò][€ëòZ[Y	àõZ^Yô\⁄YX[€HÇà
+ »ô\⁄YX[€TŸYYYŸYYà
+ »à\»õ»[ö\]YH⁄X⁄ŸY[ù\õò[\õK’\HX]⁄Çà»OàòX⁄Ÿ[ôXõ‹ù⁄]ô\⁄YX[^ò][€ëòZ[Y	àõZ^Yô\⁄YX[€HÇà
+ »ô\⁄YX[€TŸYYYŸYYà
+ »à\»][\H⁄X⁄ŸY[ù\õò[\õK’\HX]⁄\»Çà⁄\ôBàX]⁄[ô–ÿ[ôY]\»Hö[\àX]⁄\»ÿ[ôY]\¬àX]⁄\»ÿ[ôY]HBàô\⁄YX[€Pÿ[ôY]UôY[\‹»ÿ[ôY]BàOHô\⁄YX[€TŸYYôY[\‹»ŸYYà	âàŸ]ôúõ€S\›
+ô\⁄YX[€TŸYYõÿ⁄Ÿ\ú»ŸYY
+BàŸ]ö\‘›XúŸ]ŸòŸ]ôúõ€S\›à
+\Y[ù\õò[õÿ⁄Ÿ\ú»	ô\⁄YX[€Pÿ[ôY]U\õHÿ[ôY]JBÇò€\‹⁄YûTô\⁄YX[€Pÿ[XõPXöBàéà[ùàOà\BàOà”Hô\⁄YX[€Pÿ[XõPXöBò€\‹⁄YûTô\⁄YX[€Pÿ[XõPXöH[ùö\õ€õY[ù\ö]HBà[ùö\õ€õY[ù\ö]HàHH¬à€ŸX‹»H€\‹⁄YûS‹ô\ôY‹õ›[ô[ùö\õ€õY[ù[ùö\õ€õY[ù\ö]HBàÿ\ŸH€ŸX‹»ŸÇàù\›‹ô\ôY€ŸX‹»Oà\ôH	àô\⁄YX[€S‹ô\ôY‹õ›[ô[ùö\õ€õY[ù[[Z[ò][€à‹ô\ôY€ŸX‹¬àõ›[ô»Oà¬à\[ô[ùBà€\‹⁄YûQ\[ô[ù‹õ›[ô[ùö\õ€õY[ù[ùö\õ€õY[ù\ö]HBà\ôH	Yà\[ô[ùà[àô\⁄YX[€Q\[ô[ù‹õ›[ô[ùö\õ€õY[ù[[Z[ò][€Çà[ŸHô\⁄YX[€SÿúŸ\ùò][€ì€õBà›\ù⁄\ŸHH€\‹⁄YûU[ò\ûHBà⁄\ôBà€\‹⁄YûU[ò\ûH[ò\ûU\HH¬àôYXŸY\HHôYXŸH[ò\ûU\BàôY⁄\›ûHHô\⁄YX[‹õ›[ô€ŸX‘ôY⁄\›ûBàÿ\ŸH[ù\õò[ù[ë[ôYXŸY\HŸÇà[ù\õò[îH€XZ[à¬àŸ]Y[ô»€XZ[àOHõ›Y[àOà¬àôYXŸY€XZ[àHôYXŸH
+[ù\õò[ù[ë€H€XZ[äBà\ôH	ÿ\ŸH[ù\õò[ù[ë[ôYXŸY€XZ[àŸÇà[ù\õò[ëYàX›X[◊HOÇàX^XôBàô\⁄YX[€SÿúŸ\ùò][€ì€õBàô\⁄YX[€U[ò\ûQ‹õ›[ô[[Z[ò][€Çà
+€⁄›\ô\⁄YX[‹õ›[ô€ŸX»ôY⁄\›ûHX›X[
+Bà»Oàô\⁄YX[€SÿúŸ\ùò][€ì€õBà»Oà\ôHô\⁄YX[€SÿúŸ\ùò][€ì€õBÇò€\‹⁄YûS‹ô\ôY‹õ›[ô[ùö\õ€õY[ùàéà[ùàOà\BàOà”H
+X^XôH‘ô\⁄YX[‹õ›[ô€ŸX◊JBò€\‹⁄YûS‹ô\ôY‹õ›[ô[ùö\õ€õY[ù\ö]HHH¬àôY⁄\›ûHHô\⁄YX[‹õ›[ô€ŸX‘ôY⁄\›ûBà€»ôY⁄\›ûH\ö]HBà⁄\ôBà€»»»H\ôH	ù\›◊Bà€»ôY⁄\›ûHô[XZ[ö[ô»›\úô[ù\HH¬àôYXŸY\HHôYXŸH›\úô[ù\Bàÿ\ŸH[ù\õò[ù[ë[ôYXŸY\HŸÇà[ù\õò[îH€XZ[à€Ÿ€XZ[ÇàŸ]Y[ô»€XZ[àOHõ›Y[àOà¬àôYXŸY€XZ[àHôYXŸH
+[ù\õò[ù[ë€H€XZ[äBà]€ŸX»Hÿ\ŸH[ù\õò[ù[ë[ôYXŸY€XZ[àŸÇà[ù\õò[ëYàX›X[◊HOÇà€⁄›\ô\⁄YX[‹õ›[ô€ŸX»ôY⁄\›ûHX›X[à»Oàõ›[ô¬àYàõ›
+€‹ŸYôYXŸY€XZ[äBà[à\ôHõ›[ô¬à[ŸHÿ\ŸH€ŸX»ŸÇàõ›[ô»Oà\ôHõ›[ô¬àù\›‹õ›[ô€ŸX»Oà[ô\êXú›òX›[€à€XZ[à€Ÿ€XZ[à	õŸHOà¬àô\›H€»ôY⁄\›ûH
+ô[XZ[ö[ô»HJHõŸBà\ôH	
+‹õ›[ô€ŸX»äH	àô\›à»Oà\ôHõ›[ô¬ÇãKHHö\⁄XõH[\ÿ€‹H⁄]]X\›€»€›»[ô]X\›€ôH€XZ[à]ãKH\[ô»€à[àX\õY\à€›à€‹ŸY€XZ[ú»]\›ôHùZ[[ÇãKHõ€€”ò]’€‹ôç–⁄\ã“[ù»‹[ÇãKH€XZ[ú»\ôHYZ]Y€õH\»\[ô[ùÿ[ôY]\Àà]ù[ù[YH]ô\ûHX›X[ãKHò[YH]\››[ôHô\ô\Ÿ[ùXõH\»õ€€”ò]’€‹ôç–⁄\ã“[ù[ôYŸH⁄X⁄‹»H€€\]BãKH\[ô[ù\Xÿ][€àYù\à[]\ò[»]ôHôY[à›\YYÇò€\‹⁄YûQ\[ô[ù‹õ›[ô[ùö\õ€õY[ùéà[ùOà\HOà”Hõ€€ò€\‹⁄YûQ\[ô[ù‹õ›[ô[ùö\õ€õY[ù\ö]HHH¬àôY⁄\›ûHHô\⁄YX[‹õ›[ô€ŸX‘ôY⁄\›ûBàYà\ö]HÇà[à\ôHò[ŸBà[ŸH€»ôY⁄\›ûH\ö]Hò[ŸHBà⁄\ôBà€»»ÿ]—\[ô[ù»H\ôHÿ]—\[ô[ùà€»ôY⁄\›ûHô[XZ[ö[ô»ÿ]—\[ô[ù›\úô[ù\HH¬àôYXŸY\HHôYXŸH›\úô[ù\Bàÿ\ŸH[ù\õò[ù[ë[ôYXŸY\HŸÇà[ù\õò[îH€XZ[à€Ÿ€XZ[ÇàŸ]Y[ô»€XZ[àOHõ›Y[àOà¬àôYXŸY€XZ[àHôYXŸH
+[ù\õò[ù[ë€H€XZ[äBà]€XZ[ê€‹ŸYH€‹ŸYôYXŸY€XZ[Çà€‹ŸY‹õ›[ôHÿ\ŸH[ù\õò[ù[ë[ôYXŸY€XZ[àŸÇà[ù\õò[ëYàX›X[◊HOÇàÿ\ŸH€⁄›\ô\⁄YX[‹õ›[ô€ŸX»ôY⁄\›ûHX›X[ŸÇàù\›»OàùYBàõ›[ô»Oàò[ŸBà»Oàò[ŸBàYà€XZ[ê€‹ŸY	âàõ›€‹ŸY‹õ›[ôà[à\ôHò[ŸBà[ŸH[ô\êXú›òX›[€à€XZ[à€Ÿ€XZ[à	õŸHOÇà€»ôY⁄\›ûH
+ô[XZ[ö[ô»HJBà
+ÿ]—\[ô[ùõ›€XZ[ê€‹ŸY
+HõŸBà»Oà\ôHò[ŸBÇãKHôK\ù[àYŸI‹»[ù\õò[⁄X⁄Ÿ\à⁄][àÿúŸ\ùò][€ã[€õHX›[€ãàBãKH⁄X⁄Ÿ\ãõ›ôY[\‹À›\Y\»H^X›Y\H[ô›\úô[ù[\ÿ€‹Hõ‹ÇãKHXX⁄›Xù\õKà€‹ŸYÿ[ôY]\»›^H[ò⁄[ôŸYà[à‹[ã€Y]KYúôYHÿ[ôY]BãKH\»[XôK[YùY›ô\à][\ÿ€‹KõŸX⁄[ô»H€‹ŸY\õK’\HX⁄Ÿ]¬ãKHH^X⁄][ùö\õ€õY[ù\ô›[Y[ù»ô[XZ[à\Y[ô\ôHô]ô\àôX€€ú›ùX›YãKHúõ€H\ò\ŸYôY[\‹»ﬁ[ù^Çò€€X›ô\⁄YX[€Pÿ[ôY]\¬àéà\Yô\⁄YX[àOà”H‘ô\⁄YX[€Pÿ[ôY]WBò€€X›ô\⁄YX[€Pÿ[ôY]\»ô\⁄YX[H¬àÿúŸ\ùôYHYùS»	ô]“S‘ôYà◊Bà]\õHHô\⁄YX[\õHô\⁄YX[àHHô\⁄YX[\Hô\⁄YX[àÿ\\ôH›Xù\õU\H›Xù\õHH¬à]€›\òŸP€‹ŸYH€‹ŸY
+›Xù\õK›Xù\õU\JBà⁄[Çà
+õ›
+ù[	\Y[ù\õò[õÿ⁄Ÿ\ú»›Xù\õJBà	âàõ”Y]\»
+›Xù\õK›Xù\õU\JBà
+H	¬à€€ù^HŸ]€€ù^[\ÿ€‹Bà][ùö\õ€õY[ù\ö]HBàYà€›\òŸP€‹ŸY[à[ŸH[ô›
+[”\›€€ù^
+Bàÿ[ôY]U\õHBàYà€›\òŸP€‹ŸY[à›Xù\õH[ŸH[S[H€€ù^›Xù\õBàÿ[ôY]U\HBàYà€›\òŸP€‹ŸY[à›Xù\õU\H[ŸH[TH€€ù^›Xù\õU\Bà⁄[à
+€‹ŸY
+ÿ[ôY]U\õKÿ[ôY]U\JJH	àYùS»	[ŸYûRS‘ôYâ»ÿúŸ\ùôYà
+
+ÿ[ôY]U\õBàÿ[ôY]U\Bà€›\òŸP€‹ŸYà[ùö\õ€õY[ù\ö]Bà
+HäBà\ôH›Xù\õBàX›[€àH⁄X⁄“[ù\õò[ôYò][X›[€Çà»⁄X⁄“[ù\õò[ú‹›X›[€àHÿ\\ôBàBà
+¬à»H⁄X⁄“[ù\õò[ò⁄X⁄“[ù\õò[	»X›[€à\õH€\\HBà\ôH
+
+Bà
+Hÿ]⁄\úõ‹ò»OÇàòX⁄Ÿ[ôXõ‹ù⁄]ô\⁄YX[^ò][€ëòZ[YàõZ^Yô\⁄YX[[ù\õò[›Xù\õH\ÿ€›ô\ûHÿ\»ôZôX›YûHYŸHÇàZ\ú»HYùS»	ôXYS‘ôYàÿúŸ\ùôYà][ö\]YTZ\ú»HX\ô[[\»	X\ôúõ€S\›à»
+
+ô]T⁄›»ÿ[ôY]U\õBàô]T⁄›»ÿ[ôY]U\Bà€›\òŸP€‹ŸYà[ùö\õ€õY[ù\ö]Bà
+Bà
+ÿ[ôY]U\õBàÿ[ôY]U\Bà€›\òŸP€‹ŸYà[ùö\õ€õY[ù\ö]Bà
+Bà
+Bà
+ÿ[ôY]U\õKÿ[ôY]U\K€›\òŸP€‹ŸY[ùö\õ€õY[ù\ö]JHHZ\ú¬àBàõ‹ìH[ö\]YTZ\ú»	à
+ÿ[ôY]U\õKÿ[ôY]U\K€›\òŸP€‹ŸY[ùö\õ€õY[ù\ö]JHOà¬àYùYôY[\‹»H€€\[P€‹ŸY\õHÿ[ôY]U\õBàÿ[ôY]UôY[\‹»Hÿ\ŸH›ö\ôY[\‹—[ùö\õ€õY[ùà[ùö\õ€õY[ù\ö]HYùYôY[\‹»ŸÇàù\›õŸHOà\ôHõŸBàõ›[ô»OàòX⁄Ÿ[ôXõ‹ù⁄]ô\⁄YX[^ò][€ëòZ[Yàõ[XôK[YùYZ^Y€HYõ›ô\Ÿ\ùôH]»[ùö\õ€õY[ù\ö]HÇà\ôHô\⁄YX[€Pÿ[ôY]Bà»ô\⁄YX[€Pÿ[ôY]U\õHHÿ[ôY]U\õBàô\⁄YX[€Pÿ[ôY]U\HHÿ[ôY]U\Bàô\⁄YX[€Pÿ[ôY]UôY[\‹»Hÿ[ôY]UôY[\‹¬àô\⁄YX[€Pÿ[ôY]T€›\òŸP€‹ŸYH€›\òŸP€‹ŸYàô\⁄YX[€Pÿ[ôY]Q[ùö\õ€õY[ù\ö]HH[ùö\õ€õY[ù\ö]BàBÇú›ö\ôY[\‹—[ùö\õ€õY[ùéà[ùOà\õHOàX^XôH\õBú›ö\ôY[\‹—[ùö\õ€õY[ù\ö]H\õBà\ö]HHHù\›\õBú›ö\ôY[\‹—[ùö\õ€õY[ù\ö]H
+[HõŸJHBà›ö\ôY[\‹—[ùö\õ€õY[ù
+\ö]HHJHõŸBú›ö\ôY[\‹—[ùö\õ€õY[ù»»Hõ›[ô¬Çúô\⁄YX[€Q[ùö\õ€õY[ù[Z]éà[ùúô\⁄YX[€Q[ùö\õ€õY[ù[Z]HçÇò€€X›ô\⁄YX[€TŸYY»éà‘›ö[ô◊HOà\õHOà‘ô\⁄YX[€TŸYYBò€€X›ô\⁄YX[€TŸYY»]\õBàù[ù[YPõÿ⁄Ÿ\ê]XY\õHBà»ô\⁄YX[€TŸYYà»ô\⁄YX[€TŸYYYHù\YZ€Pà
+ »ô[ô\îô\⁄YX[€T]]àô\⁄YX[€TŸYY]Hô[ô\îô\⁄YX[€T]]àô\⁄YX[€TŸYYõÿ⁄Ÿ\ú»H\YôY[\‹–õÿ⁄Ÿ\ú»\õBàô\⁄YX[€TŸYYôY[\‹»H\õBàBàBà›\ù⁄\ŸHHÿ\ŸH\õHŸÇàò\à»Oà◊Bàö[H»Oà◊BàYà»Oà◊Bà\ù[ò›[€à\ô›[Y[ù»OÇà€€X›ô\⁄YX[€TŸYY»
+]
+ »»ò\Yù[ò›[€àóJHù[ò›[€Çà
+ »€€òÿ]à»€€X›ô\⁄YX[€TŸYY¬à
+]
+ »»ò\X\ô›[Y[ùHà
+ »⁄›»[ô^JBà\ô›[Y[ùà
+[ô^\ô›[Y[ù
+HHö\ éà[ù
+HãóH\ô›[Y[ù¬àBà[HõŸHOà€€X›ô\⁄YX[€TŸYY»
+]
+ »»õ[XôKXõŸHóJHõŸBà]»Oà◊Bà€€à»Oà◊Bà]ò[YHõŸHOÇà€€X›ô\⁄YX[€TŸYY»
+]
+ »»õ]]ò[YHóJHò[YBà
+ »€€X›ô\⁄YX[€TŸYY»
+]
+ »»õ]XõŸHóJHõŸBàÿ\ŸH»»ò[òX⁄»[\õò]]ô\»OÇà€€X›ô\⁄YX[€TŸYY»
+]
+ »»òÿ\ŸKYò[òX⁄»óJHò[òX⁄¬à
+ »€€òÿ]à»€€X›ô\⁄YX[[\õò]]ôTŸYY¬à
+]
+ »»òÿ\ŸKX[\õò]]ôKHà
+ »⁄›»[ô^JBà[\õò]]ôBà
+[ô^[\õò]]ôJHHö\ éà[ù
+HãóH[\õò]]ô\¬àBà[ö]Oà◊Bà€‹ùOà◊Bà\ò\ŸYOà◊Bà€Ÿ\òŸH€Ÿ\òŸYOÇà€€X›ô\⁄YX[€TŸYY»
+]
+ »»ò€Ÿ\òŸKXõŸHóJH€Ÿ\òŸYà\úõ‹à»Oà◊BÇò€€X›ô\⁄YX[[\õò]]ôTŸYY»éà‘›ö[ô◊HOà[Oà‘ô\⁄YX[€TŸYYBò€€X›ô\⁄YX[[\õò]]ôTŸYY»]Hÿ\ŸBàP€€à»»õŸHOÇà€€X›ô\⁄YX[€TŸYY»
+]
+ »»ò€€ú›ùX›‹ãXõŸHóJHõŸBàQ›X\ô›X\ôõŸHOÇà€€X›ô\⁄YX[€TŸYY»
+]
+ »»ô›X\ô]\›óJH›X\ôà
+ »€€X›ô\⁄YX[€TŸYY»
+]
+ »»ô›X\ôXõŸHóJHõŸBàS]»õŸHOà€€X›ô\⁄YX[€TŸYY»
+]
+ »»õ]\ò[XõŸHóJHõŸBÇúô[ô\îô\⁄YX[€T]éà‘›ö[ô◊HOà›ö[ô¬úô[ô\îô\⁄YX[€T]Hÿ\ŸBà◊HOàúõ€›ÇàŸY€Y[ù»Oàõ⁄[ï⁄]›ŸY€Y[ù¬à⁄\ôBàõ⁄[ï⁄]›Hõ€åH
+YùöY⁄OàYù
+ »ãàà
+ »öY⁄
+BÇù\›ô\⁄YX[€TŸYY»éà‘ô\⁄YX[€TŸYYHOà‘ô\⁄YX[€TŸYYBà⁄YàYö[ôY
+’PíP–S–“Vó’T’‘ëT“QPS‘”P—W”ì◊“”T Bù\›ô\⁄YX[€TŸYY»»H◊BàŸ[ŸBù\›ô\⁄YX[€TŸYY»HYàŸ[ôYÇÇù\›ô\⁄YX[€Pÿ[ôY]\¬àéà‘ô\⁄YX[€Pÿ[ôY]WBàOà‘ô\⁄YX[€Pÿ[ôY]WBà⁄YàYö[ôY
+’PíP–S–“Vó’T’‘ëT“QPS‘”P—W”ì◊’TQ”PU“
+Bù\›ô\⁄YX[€Pÿ[ôY]\»»H◊BàŸ[ŸBù\›ô\⁄YX[€Pÿ[ôY]\»HYàŸ[ôYÇÇõ€⁄›\ô\⁄YX[Yö[ö][€àéàSò[YHOà”H
+Z]\à⁄Y—\úõ‹àYö[ö][€äBõ€⁄›\ô\⁄YX[Yö[ö][€àò[YHBà⁄YàYö[ôY
+’PíP–S–“Vó’T’‘ëT“QPS’SîëT””ëQ—TSëSê÷JBàYà\‘ô\⁄YX[⁄Y€ò]\ôSXYàò[YBà[àŸ]€€ú›[ôõ…»ò[YBà[ŸHòX⁄Ÿ[ôXõ‹ù⁄]ô\⁄YX[^ò][€ëòZ[Y	àù\Yô\⁄YX[\[ô[òﬁH\»[ò]òZ[XõH[àH›\úô[ù⁄Y€ò]\ôNàÇà
+ »ô]T⁄›»ò[YBàŸ[ŸBàŸ]€€ú›[ôõ…»ò[YBàŸ[ôYÇÇö\‘ô\⁄YX[⁄Y€ò]\ôSXYàéàSò[YHOàõ€€ö\‘ô\⁄YX[⁄Y€ò]\ôSXYàò[YHBàêYŸKêùZ[[ãàà\‘ôYö^Ÿòô[ô\ôYàêYŸKîö[Z]]ôKàà\‘ôYö^Ÿòô[ô\ôYà⁄\ôBàô[ô\ôYHô]T⁄›»ò[YBÇúô\⁄YX[\[ô[òﬁSò[Y\»éà\õHOà\HOà‘Sò[YWBúô\⁄YX[\[ô[òﬁSò[Y\»\õHHHŸ]ù”\›	Ÿ]ù[ö[€Çà
+ò[Y\“[à\õHéàŸ]îŸ]Sò[YJBà
+ò[Y\“[àHéàŸ]îŸ]Sò[YJBÇãKH€õH⁄X⁄ŸY\H[ôYö[ö][€ãXõŸHò[Y\»ÿ[àYôôX›⁄X⁄⁄[ô»‹ÇãKHõ‹õX[^ò][€àŸàHô\⁄YX[^[ÿYàYö[ö][€à\‹^Hõ‹õ\»\ôBãKHô\Ÿ[ù][€àY]Y]NàôX€‹ô[Hõ‹à]Y]ù]ô]ô\à][H[õ\ôŸBãKHH^X›]XõH⁄Y€ò]\ôH€XŸKÇúô\⁄YX[Yö[ö][€ë\[ô[òﬁSò[Y\»éàYö[ö][€àOàŸ]îŸ]Sò[YBúô\⁄YX[Yö[ö][€ë\[ô[òﬁSò[Y\»Yö[ö][€àHŸ]ù[ö[€Çà
+ò[Y\“[à
+Yï\HYö[ö][€äHéàŸ]îŸ]Sò[YJBà
+ò[Y\“[à
+QYàYö[ö][€äHéàŸ]îŸ]Sò[YJBÇãKH€€\[K][YK[€õHôY‹ô\‹⁄[€àò][à]ô\›‹ô\»Hõ‹õY\àúõÿYãKHò[Y\“[àYö[ö][€êò]ô\úÿ[€»Hÿ]Hõ›ô\»ô\Ÿ[ù][€àY]Y]BãKHÿ[õõ›⁄[[ùHôX€€YH[à^X›]XõH\[ô[òﬁHYÿZ[ãÇù\›ô\⁄YX[Yö[ö][€ë\[ô[ò⁄Y\¬àéàYö[ö][€ÇàOàŸ]îŸ]Sò[YBàOàŸ]îŸ]Sò[YBà⁄YàYö[ôY
+’PíP–S–“Vó’T’‘ëT“QPS‘ëT—SïUS”ó—TSëSê÷W”PR Bù\›ô\⁄YX[Yö[ö][€ë\[ô[ò⁄Y\»Yö[ö][€à»Bàò[Y\“[àYö[ö][€àéàŸ]îŸ]Sò[YBàŸ[ŸBù\›ô\⁄YX[Yö[ö][€ë\[ô[ò⁄Y\»»HYàŸ[ôYÇÇãKH€€\[K][YK[€õH[ùô[ù‹ûHò][à]õ›ô\»]\[ô[òﬁH]öY[òŸH\»BãKH⁄X⁄ŸYõŸXŸ\à€€ùòX›õ›X€‹ò]]ôHX[öYô\›^Çù\›ô\⁄YX[€€ùòX›éà\Yô\⁄YX[Oà\Yô\⁄YX[à⁄YàYö[ôY
+’PíP–S–“Vó’T’‘ëT“QPS—TSëSê÷W”RT”PU“
+Bù\›ô\⁄YX[€€ùòX›ô\⁄YX[Hô\⁄YX[‹ô\⁄YX[\ôX›\[ô[ò⁄Y\»H◊_BàŸ[ŸBù\›ô\⁄YX[€€ùòX›HYàŸ[ôYÇÇãKH\›[€õHõŸXŸ\àò][»^\ò⁄\ŸHH‹ùXö[]Hÿ]\»ôYõ‹ôHû]\»\ôBãKHXõ\⁄YàõŸX›[€à[ô‹ô[ò\ûHô\öYöXÿ][€àùZ[»\ŸHH⁄X⁄ŸYãKHô\⁄YX[[ò⁄[ôŸYÇù\›X⁄Ÿ]ô\⁄YX[éà\Yô\⁄YX[Oà\Yô\⁄YX[à⁄YàYö[ôY
+’PíP–S–“Vó’T’”‘Só’TìJBù\›X⁄Ÿ]ô\⁄YX[ô\⁄YX[Hô\⁄YX[à»ô\⁄YX[\õHH[ù\õò[ïò\à◊Bàô\⁄YX[\ôX›\[ô[ò⁄Y\»Hô\⁄YX[\[ô[òﬁSò[Y\¬à
+[ù\õò[ïò\à◊JBà
+ô\⁄YX[\Hô\⁄YX[
+BàBàŸ[YàYö[ôY
+’PíP–S–“Vó’T’’SîëT””ëQ”QUJBù\›X⁄Ÿ]ô\⁄YX[ô\⁄YX[Hô\⁄YX[à»ô\⁄YX[\õHH[ù\õò[ìY]Uà
+Y]RYõ”[Ÿ[Sò[YR\⁄
+H◊Bàô\⁄YX[\ôX›\[ô[ò⁄Y\»Hô\⁄YX[\[ô[òﬁSò[Y\¬à
+[ù\õò[ìY]Uà
+Y]RYõ”[Ÿ[Sò[YR\⁄
+H◊JBà
+ô\⁄YX[\Hô\⁄YX[
+BàBàŸ[ŸBù\›X⁄Ÿ]ô\⁄YX[HYàŸ[ôYÇÇô[ò€ŸTù[ù[YTX⁄Ÿ]éàô\⁄YX[€‹›\ôHOà”Hû]T›ö[ôÀêû]T›ö[ô¬à⁄YàYö[ôY
+’PíP–S–“Vó–Q—WÃéJBô[ò€ŸTù[ù[YTX⁄Ÿ]€‹›\ôHH¬àYòXŸHH›\íQÇà]ô\⁄YX[Hô\⁄YX[€‹›\ôT^[ÿY€‹›\ôBà]\õHHô\⁄YX[\õHô\⁄YX[àHHô\⁄YX[\Hô\⁄YX[à]X⁄Ÿ]éàù[ù[YTX⁄Ÿ]àX⁄Ÿ]Bà
+ù[ù[YTX⁄Ÿ]XY⁄X¬à
+ù[ù[YTX⁄Ÿ]ô\ú⁄[€Çà
+Qù[\⁄YòXŸBà
+ô]T⁄›»	U‹]ô[[Ÿ[Sò[YHYòXŸBà
+\õKJBà
+Bà
+Bà
+Bà
+Bà[ò€ŸYHŸ\öX[\ŸKô[ò€ŸHX⁄Ÿ]àYùS»	ò]‘Ÿ\öX[\ŸKúŸ\öX[^ôH[ò€ŸYàŸ[ŸBô[ò€ŸTù[ù[YTX⁄Ÿ]»HòX⁄Ÿ[ôXõ‹ù⁄]ô\⁄YX[^ò][€ëòZ[Y	àúX⁄Ÿ]›]]ô\]Z\ô\»[àYŸHãéHùZ[⁄]’PíP–S–“Vó–Q—WÃéH[òXõYÇàŸ[ôYÇÇãKHX€ŸH[ôôX⁄X⁄»H^X›û]\»ôYõ‹ôHXõ\⁄[ô»[Kà\»Ÿ\»õ›ãKHô\XŸHH€€ú›[Y\â‹»[ô\[ô[ù⁄X⁄‹Œ»]ô]ô[ù»õŸX⁄[ô»H€‹úù\ãKHX⁄Ÿ][àHö\ú›XŸKÇùô\öYûTù[ù[YTX⁄Ÿ]éàô\⁄YX[€‹›\ôHOàû]T›ö[ôÀêû]T›ö[ô»Oà”H
+
+Bà⁄YàYö[ôY
+’PíP–S–“Vó–Q—WÃéJBùô\öYûTù[ù[YTX⁄Ÿ]^X›Y€‹›\ôHû]\»H¬à[ò€ŸYHYùS»	\Ÿ\öX[^ôQ[ò€ŸYû]\¬àX€ŸYHù[ìX^XôU
+Ÿ\öX[\ŸKôX€ŸH[ò€ŸYéàX^XôU”Hù[ù[YTX⁄Ÿ]
+BàX⁄Ÿ]HX^XôBà
+òX⁄Ÿ[ôXõ‹ù⁄]ô\⁄YX[^ò][€ëòZ[YàúX⁄Ÿ]Ÿ[ãX⁄X⁄»€›[õ›X€ŸH]»›€àû]\»äBà\ôBàX€ŸYà]
+XY⁄XÀ
+ô\ú⁄[€ã
+À
+À
+\õKJJJJJHHX⁄Ÿ]à[õ\‹»
+XY⁄X»OH^X›Yù[ù[YTX⁄Ÿ]XY⁄X H	àòX⁄Ÿ[ôXõ‹ù⁄]ô\⁄YX[^ò][€ëòZ[YàúX⁄Ÿ]Ÿ[ãX⁄X⁄»õ›[ôH‹õ€ô»XY⁄X»XY\àÇà[õ\‹»
+ô\ú⁄[€àOH^X›Yù[ù[YTX⁄Ÿ]ô\ú⁄[€äH	àòX⁄Ÿ[ôXõ‹ù⁄]ô\⁄YX[^ò][€ëòZ[YàúX⁄Ÿ]Ÿ[ãX⁄X⁄»õ›[ôH‹õ€ô»õ‹õX]ô\ú⁄[€àÇà[õ\‹¬à
+ô\⁄YX[\[ô[òﬁSò[Y\»\õHBàOHô\⁄YX[\ôX›\[ô[ò⁄Y\¬à
+ô\⁄YX[€‹›\ôT^[ÿY^X›Y€‹›\ôJBà
+H	àòX⁄Ÿ[ôXõ‹ù⁄]ô\⁄YX[^ò][€ëòZ[YàúX⁄Ÿ]Ÿ[ãX⁄X⁄»õ›[ôH⁄[ôŸYô\⁄YX[\[ô[òﬁH[ùô[ù‹ûHÇà[ú›\ôT‹ùXõU\õH\õHBà⁄X⁄“[ù\õò[ò⁄X⁄’\HBà⁄X⁄“[ù\õò[ò⁄X⁄“[ù\õò[\õH€\\HBàŸ[ŸBùô\öYûTù[ù[YTX⁄Ÿ]»»HòX⁄Ÿ[ôXõ‹ù⁄]ô\⁄YX[^ò][€ëòZ[Y	àúX⁄Ÿ]ô\öYöXÿ][€àô\]Z\ô\»[àYŸHãéHùZ[⁄]’PíP–S–“Vó–Q—WÃéH[òXõYÇàŸ[ôYÇÇô[ò€ŸTô\⁄YX[€TX⁄Ÿ]¬àéà⁄^ì‹[€ú¬àOàô\⁄YX[€XŸT[ÇàOà”H ö[T]û]T›ö[ôÀêû]T›ö[ô WBô[ò€ŸTô\⁄YX[€TX⁄Ÿ]»‹»Hÿ\ŸBàô\⁄YX[€XŸSõ›\XÿXõH»Oà\ôH◊Bàô\⁄YX[€XŸT[õôY€\»Oàõ‹ìBà
+ö\ Héà[ù
+HãóH€\ H	
+[ô^€JHOà¬à]€‹›\ôHHô\⁄YX[€P€‹›\ôH€Bà]H⁄^ì›]]\ôX›‹ûH‹»œàô\⁄YX[€TX⁄Ÿ]ò[YH[ô^àû]\»H[ò€ŸTù[ù[YTX⁄Ÿ]€‹›\ôBàô\öYûTù[ù[YTX⁄Ÿ]€‹›\ôHû]\¬à\ôH
+]û]\ BÇà⁄YàYö[ôY
+’PíP–S–“Vó–Q—WÃéJBô\Ÿ\öX[^ôQ[ò€ŸYéàû]T›ö[ôÀêû]T›ö[ô»OàS»Ÿ\öX[\ŸKë[ò€ŸYô\Ÿ\öX[^ôQ[ò€ŸYHò]‘Ÿ\öX[\ŸKô\Ÿ\öX[^ôBàŸ[ôYÇÇúô[[›ôRYë^\›»éàö[T]OàS»
+
+Búô[[›ôRYë^\›»]H¬à^\›»HŸ\—ö[Q^\›]àYà^\›»[àô[[›ôQö[H][ŸH\ôH
+
+BÇò€X\îXõ\⁄Y\ùYòX›»éà⁄^ì‹[€ú»OàS»
+
+Bò€X\îXõ\⁄Y\ùYòX›»‹»H¬à]›]]\ôX›‹ûHH⁄^ì›]]\ôX›‹ûH‹¬àô[[›ôRYë^\›»
+›]]\ôX›‹ûHœàúõŸ‹ò[Kú‹»äBàô[[›ôRYë^\›»
+›]]\ôX›‹ûHœàùôY[\‹ÀùäBàô[[›ôRYë^\›»
+›]]\ôX›‹ûHœàú›Y⁄[ôÀùäBàô[[›ôRYë^\›»
+›]]\ôX›‹ûHœà›YŸU[Z[ô‹”ò[YJBàô[[›ôRYë^\›»
+›]]\ôX›‹ûHœàù\Y\ô\⁄YX[ùäBàô[[›ôRYë^\›»
+›]]\ôX›‹ûHœàù\Y\ô\⁄YX[òö[àäBàô[[›ôRYë^\›»
+›]]\ôX›‹ûHœàô\⁄YX[›]X‘⁄[ò[YJBà€X\îô\⁄YX[€TX⁄Ÿ]»›]]\ôX›‹ûBàX^XôH
+\ôH
+
+JHô[[›ôTX⁄Ÿ]Yë^\›»
+⁄^îX⁄Ÿ]ö[H‹ BÇò€X\îô\⁄YX[€TX⁄Ÿ]»éàö[T]OàS»
+
+Bò€X\îô\⁄YX[€TX⁄Ÿ]»›]]\ôX›‹ûHH¬à^\›»HŸ\—\ôX›‹ûQ^\››]]\ôX›‹ûBà⁄[à^\›»	¬àò[Y\»H\›\ôX›‹ûH›]]\ôX›‹ûBàõ‹ìW»ò[Y\»	ò[YHOÇà⁄[Çà
+ù\Y\ô\⁄YX[Z€KHà\‘ôYö^Ÿòò[YBà	âàãòö[àà\‘›Yôö^Ÿòò[YBà
+H	àô[[›ôRYë^\›»
+›]]\ôX›‹ûHœàò[YJBÇúô[[›ôTX⁄Ÿ]Yë^\›»éàö[T]OàS»
+
+Búô[[›ôTX⁄Ÿ]Yë^\›»ãHàH\ôH
+
+Búô[[›ôTX⁄Ÿ]Yë^\›»]Hô[[›ôRYë^\›»]Çù‹ö]TX⁄Ÿ]û]\»éàö[T]Oàû]T›ö[ôÀêû]T›ö[ô»OàS»
+
+B∏◊û˘∂âûÀk∫wµÁH
+›XöXÿ[X⁄^ã\õﬁKX⁄[ô[àõﬁKZY
+JJJHÇàà
+›XöXÿ[X⁄^ãY[]K\õﬁK\Z\àõﬁKZY
+HÇàà
+Ÿ]Hô[[›ôY
+
+»ô[[›ôYJJJJJJJJHÇàà
+›XöXÿ[X⁄^ã\õﬁKZY»ãõY]WäJHÇààô[[›ôY
+JHÇàäYö[ôH
+›XöXÿ[X⁄^ãYÿÀ\õﬁY\À][õÿ⁄ŸY
+HÇàà
+]€‹
+
+›[
+JHÇàà
+]
+
+ô[[›ôY
+›XöXÿ[X⁄^ãYÿÀ\õﬁK\\‹ JJHÇàà
+Yà
+Hô[[›ôY
+HÇàà›[Çàà
+€‹
+
+»›[ô[[›ôY
+JJJJJHÇàäYö[ôH
+›XöXÿ[X⁄^ãYÿÀ\õﬁY\ HÇàà
+›XöXÿ[X⁄^ã]⁄]\õﬁK\›‹ôK[ÿ⁄»Çàà›XöXÿ[X⁄^ãYÿÀ\õﬁY\À][õÿ⁄ŸY
+JHÇàäYö[ôH
+›XöXÿ[X⁄^ã[X]\öX[^ôK[[ŸH\ô›[Y[ù HÇàà
+]
+
+õ€€Z€\»Çàà
+›XöXÿ[X⁄^ã\ôYö^Y]ò[Y\»Çàà›XöXÿ[X⁄^ã[X]\öX[^ôKXõ€€Z€K\ôYö^\ô›[Y[ù JHÇàà
+õ€€X\ô›[Y[ù»Çàà
+›XöXÿ[X⁄^ã\ôYö^Y]ò[Y\»Çàà›XöXÿ[X⁄^ã[X]\öX[^ôKXõ€€X\ô›[Y[ù\ôYö^\ô›[Y[ù JHÇàà
+ò]Z€\»Çàà
+›XöXÿ[X⁄^ã\ôYö^Y]ò[Y\»Çàà›XöXÿ[X⁄^ã[X]\öX[^ôK[ò]Z€K\ôYö^\ô›[Y[ù JHÇàà
+ò]X\ô›[Y[ù»Çàà
+›XöXÿ[X⁄^ã\ôYö^Y]ò[Y\»Çàà›XöXÿ[X⁄^ã[X]\öX[^ôK[ò]X\ô›[Y[ù\ôYö^\ô›[Y[ù JJHÇàà
+€€ôÇàà
+
+[ô
+H
+[ô›õ€€Z€\ HJHÇàà
+H
+[ô›õ€€X\ô›[Y[ù HJHÇàà
+ù[»ò]Z€\ H
+ù[»ò]X\ô›[Y[ù JHÇààòõ€€äHÇàà
+
+[ô
+H
+[ô›ò]Z€\ HJHÇàà
+H
+[ô›ò]X\ô›[Y[ù HJHÇàà
+ù[»õ€€Z€\ H
+ù[»õ€€X\ô›[Y[ù JHÇààõò]äHÇàà
+[ŸHÇàà
+›XöXÿ[X⁄^ãXúöYŸKYòZ[Çààê–÷ãUTQPîíQ—KTì÷WàÇààúŸ[X›^X›H€ôHX]⁄[ô»õ€€‹àò]õﬁH€ŸX◊äJJJJHÇàäYö[ôH
+›XöXÿ[X⁄^ã[X]\öX[^ôKX\Xÿ][€ã\õﬁHÇàà[ôH€K]\H\Xÿ][€àõﬁKZY
+HÇàà
+›XöXÿ[X⁄^ãYÿÀ\õﬁY\ HÇàà
+[õ\‹»
+[ô
+›XöXÿ[X⁄^ã]ò[Y]\YZ€KZ[ôO»[ôJHÇàà
+›XöXÿ[X⁄^ã\ÿYôK\[ò[YO»€K]\JHÇàà
+›ö[ôœ»\Xÿ][€äHÇàà
+›XöXÿ[X⁄^ã\ÿYôK\õﬁKZY»õﬁKZY
+JHÇàà
+›XöXÿ[X⁄^ãXúöYŸKYòZ[Çààê–÷ãUTQPîíQ—KTì÷WàÇààö[ùò[Yõ›[ô\Xÿ][€àõﬁH€€ôöY›\ò][€óäJHÇàà
+]
+à
+
+X⁄Ÿ][ò[YH
+›XöXÿ[X⁄^ã\õﬁK\X⁄Ÿ][ò[YHõﬁKZY
+JHÇàà
+X⁄Ÿ]\]
+›XöXÿ[X⁄^ãXXú€€]KX\ùYòX›X⁄Ÿ][ò[YJJHÇàà
+Y]K[ò[YH
+›XöXÿ[X⁄^ã\õﬁK[Y]K[ò[YHõﬁKZY
+JHÇàà
+Y]K\]
+›XöXÿ[X⁄^ãXXú€€]KX\ùYòX›Y]K[ò[YJJJHÇàà
+⁄[à
+‹à
+ö[KY^\›œ»X⁄Ÿ]\]
+H
+ö[KY^\›œ»Y]K\]
+JHÇàà
+›XöXÿ[X⁄^ãXúöYŸKYòZ[Çààê–÷ãUTQPîíQ—KTì÷WàúõﬁHQ[ôXYH^\›◊äJHÇàà
+][ùàê’PíP–S–“Vó’TQ”S—WàõX]\öX[^ôK\õﬁWäHÇàà
+][ùàê’PíP–S–“Vó’TQ‘ì÷W“QàõﬁKZY
+HÇàà
+][ùàê’PíP–S–“Vó’TQ‘ì÷W‘P“—U”êSQWàX⁄Ÿ][ò[YJHÇàà
+][ùàê’PíP–S–“Vó’TQ‘ëT’S‘P“—UàX⁄Ÿ]\]
+HÇàà
+][ùàê’PíP–S–“Vó’TQ‘ì÷W”QUW”êSQWàY]K[ò[YJHÇàà
+][ùàê’PíP–S–“Vó’TQ‘ëT’S”QUWàY]K\]
+HÇàà
+][ùàê’PíP–S–“Vó’TQ‘ì÷W‘TëSï“QàãóäHÇàà
+][ùàê’PíP–S–“Vó’TQ‘ì÷W‘’‘ëW—TóàÇàà›XöXÿ[X⁄^ãX\ùYòX›Y\ôX›‹ûJHÇàà
+][ùàÇààê’PíP–S–“Vó’TQ–””î’SQTóàÇàà
+›ö[ôÀX\[ôÇààä3Æ»
+›XöXÿ[⁄^í€Hàà€K]\HäH8°§àà\Xÿ][€àäWäJHÇàà
+]
+
+õﬁH
+›XöXÿ[X⁄^ãYõ‹òŸK]\YZ€H[ôJJJHÇàà
+[õ\‹»Çàà
+[ô
+ôX›‹è»õﬁJH
+H
+ôX›‹ã[[ô›õﬁJH HÇàà
+\O»
+ôX›‹ã\ôYàõﬁH
+HÇàà	ÿ›XöXÿ[X⁄^ã]\Y]ò[YK\õﬁK]åJHÇàà
+›ö[ôœO»
+ôX›‹ã\ôYàõﬁHJHõﬁKZY
+HÇàà
+›ö[ôœO»
+ôX›‹ã\ôYàõﬁHäHX⁄Ÿ][ò[YJHÇàà
+›XöXÿ[X⁄^ã\õﬁK\Z\ãY^\›œ»õﬁKZY
+HÇàà
+\O»
+ôX›‹ã\ôYàÇàà
+›XöXÿ[X⁄^ã\ôXY\õﬁK[Y]HõﬁKZY
+H HÇàà	ÿX›]ôJJHÇàà
+›XöXÿ[X⁄^ãXúöYŸKYòZ[Çààê–÷ãUTQPîíQ—KTì’–””àÇààòõ›[ô\Xÿ][€àõﬁHY[ù]HZ\€X]⁄äJHÇààõﬁJJJHÇàäYö[ôH
+›XöXÿ[X⁄^ã[X]\öX[^ôKY‹õ›[ô\õﬁH€€ôöY HÇàà
+›XöXÿ[X⁄^ãYÿÀ\õﬁY\ HÇàà
+]
+à
+
+€ŸX»
+ôX›‹ã\ôYà€€ôöY»
+JHÇàà
+Y
+ôX›‹ã\ôYà€€ôöY»JJHÇàà
+\ô›[Y[ù
+ôX›‹ã\ôYà€€ôöY»äJHÇàà
+€K]\H
+ôX›‹ã\ôYà€€ôöY» JHÇàà
+õﬁKZY
+ôX›‹ã\ôYà€€ôöY»
+JHÇàà
+[ùûH
+\‹€ÿ»Y›XöXÿ[X⁄^ã]\YZ€\ JJHÇàà
+[õ\‹»[ùûHÇàà
+›XöXÿ[X⁄^ãXúöYŸKYòZ[Çààê–÷ãUTQPîíQ—KTì÷WàÇàà
+›ö[ôÀX\[ôù[ö€õ›€àõﬁH€›\òŸH€NààY
+JJHÇàà
+[õ\‹»
+›XöXÿ[X⁄^ã\ÿYôK\õﬁKZY»õﬁKZY
+HÇàà
+›XöXÿ[X⁄^ãXúöYŸKYòZ[Çààê–÷ãUTQPîíQ—KTì÷Wàö[ùò[YõﬁHQäJHÇàà
+]
+à
+
+[ôH
+Ÿà[ùûJJHÇàà
+X⁄Ÿ][ò[YH
+›XöXÿ[X⁄^ã\õﬁK\X⁄Ÿ][ò[YHõﬁKZY
+JHÇàà
+X⁄Ÿ]\]
+›XöXÿ[X⁄^ãXXú€€]KX\ùYòX›X⁄Ÿ][ò[YJJJHÇàà
+[õ\‹»Çàà
+[ô
+›XöXÿ[X⁄^ã]ò[Y]\YZ€KZ[ôO»[ôJHÇàà
+›ö[ôœO»
+ôX›‹ã\ôYà[ôH HÇàà
+›ö[ôÀX\[ô€ŸX»Çààã][ò\ûKY‹õ›[ôY[[Z[ò][€ã]åWäJJHÇàà
+›XöXÿ[X⁄^ãXúöYŸKYòZ[Çààê–÷ãUTQPîíQ—KTì÷WàÇààú€›\òŸH€HŸ\»õ››\‹ùHõﬁH\ô›[Y[ù€ŸX◊äJHÇàà
+[õ\‹»Çàà
+Yà
+›ö[ôœO»€ŸX»òõ€€äHÇàà
+‹à
+›ö[ôœO»\ô›[Y[ùùùYWäHÇàà
+›ö[ôœO»\ô›[Y[ùôò[ŸWäJHÇàà
+›XöXÿ[X⁄^ã]ò[Y[ò]X\ô›[Y[ù»\ô›[Y[ù
+JHÇàà
+›XöXÿ[X⁄^ãXúöYŸKYòZ[Çààê–÷ãUTQPîíQ—KTì÷WàÇàà
+›ö[ôÀX\[ôö[ùò[Yà€ŸX»àõﬁH\ô›[Y[ùäJJHÇàà
+[õ\‹»
+›XöXÿ[X⁄^ã\ÿYôK\[ò[YO»€K]\JHÇàà
+›XöXÿ[X⁄^ãXúöYŸKYòZ[Çààê–÷ãUTQPîíQ—KTì÷WàúõﬁH\H]\›ôHHÿYôHSò[YWäJHÇàà
+⁄[à
+‹à
+ö[KY^\›œ»X⁄Ÿ]\]
+HÇàà
+ö[KY^\›œ»Çàà
+›XöXÿ[X⁄^ãXXú€€]KX\ùYòX›Çàà
+›XöXÿ[X⁄^ã\õﬁK[Y]K[ò[YHõﬁKZY
+JJJHÇàà
+›XöXÿ[X⁄^ãXúöYŸKYòZ[Çààê–÷ãUTQPîíQ—KTì÷WàúõﬁHQ[ôXYH^\›◊äJHÇàà
+][ùàê’PíP–S–“Vó’TQ”S—WàõX]\öX[^ôK\õﬁWäHÇàà
+][ùàê’PíP–S–“Vó’TQ‘ì÷W“QàõﬁKZY
+HÇàà
+][ùàê’PíP–S–“Vó’TQ‘ì÷W‘P“—U”êSQWàX⁄Ÿ][ò[YJHÇàà
+][ùàê’PíP–S–“Vó’TQ‘ëT’S‘P“—UàX⁄Ÿ]\]
+HÇàà
+][ùàê’PíP–S–“Vó’TQ‘ì÷W”QUW”êSQWàÇàà
+›XöXÿ[X⁄^ã\õﬁK[Y]K[ò[YHõﬁKZY
+JHÇàà
+][ùàê’PíP–S–“Vó’TQ‘ëT’S”QUWàÇàà
+›XöXÿ[X⁄^ãXXú€€]KX\ùYòX›Çàà
+›XöXÿ[X⁄^ã\õﬁK[Y]K[ò[YHõﬁKZY
+JJHÇàà
+][ùàê’PíP–S–“Vó’TQ‘ì÷W‘TëSï“QàãóäHÇàà
+][ùàê’PíP–S–“Vó’TQ‘ì÷W‘’‘ëW—TóàÇàà›XöXÿ[X⁄^ãX\ùYòX›Y\ôX›‹ûJHÇàà
+][ùàÇààê’PíP–S–“Vó’TQ–””î’SQTóàÇàà
+›ö[ôÀX\[ôÇààä3Æ»
+›XöXÿ[⁄^í€Hàà€K]\Hà
+H8°§à›XöXÿ[⁄^í€HàÇàà
+Yà
+›ö[ôœO»€ŸX»òõ€€äHÇàà
+›ö[ôÀX\[ôêYŸKêùZ[[ãêõ€€óà\ô›[Y[ù
+HÇàà\ô›[Y[ù
+HÇààäWäJHÇàà
+]
+
+õﬁH
+›XöXÿ[X⁄^ãYõ‹òŸK]\YZ€H[ôJJJHÇàà
+[õ\‹»Çàà
+[ô
+ôX›‹è»õﬁJH
+H
+ôX›‹ã[[ô›õﬁJH HÇàà
+\O»
+ôX›‹ã\ôYàõﬁH
+HÇàà	ÿ›XöXÿ[X⁄^ã]\Y]ò[YK\õﬁK]åJHÇàà
+›ö[ôœO»
+ôX›‹ã\ôYàõﬁHJHõﬁKZY
+HÇàà
+›ö[ôœO»
+ôX›‹ã\ôYàõﬁHäHX⁄Ÿ][ò[YJHÇàà
+›XöXÿ[X⁄^ã\õﬁK\Z\ãY^\›œ»õﬁKZY
+HÇàà
+\O»
+ôX›‹ã\ôYàÇàà
+›XöXÿ[X⁄^ã\ôXY\õﬁK[Y]HõﬁKZY
+H HÇàà	ÿX›]ôJJHÇàà
+›XöXÿ[X⁄^ãXúöYŸKYòZ[Çààê–÷ãUTQPîíQ—KTì’–””àÇààõX]\öX[^ôYõﬁHY[ù]HZ\€X]⁄äJHÇààõﬁJJJJHÇàäYö[ôH
+›XöXÿ[X⁄^ãY\ö]ôK\õﬁH€€ôöY HÇàà
+›XöXÿ[X⁄^ãYÿÀ\õﬁY\ HÇàà
+]
+à
+
+€›\òŸKZY
+ôX›‹ã\ôYà€€ôöY»
+JHÇàà
+€€ú›[Y\à
+ôX›‹ã\ôYà€€ôöY»JJHÇàà
+õﬁKZY
+ôX›‹ã\ôYà€€ôöY»äJJHÇàà
+[õ\‹»Çàà
+[ô
+›XöXÿ[X⁄^ã\ÿYôK\õﬁKZY»€›\òŸKZY
+HÇàà
+›XöXÿ[X⁄^ã\ÿYôK\õﬁKZY»õﬁKZY
+HÇàà
+õ›
+›ö[ôœO»€›\òŸKZYõﬁKZY
+JHÇàà
+›XöXÿ[X⁄^ã\ÿYôK\[ò[YO»€€ú›[Y\äJHÇàà
+›XöXÿ[X⁄^ãXúöYŸKYòZ[Çààê–÷ãUTQPîíQ—KTì÷WàÇààö[ùò[Y\ö]ôYõﬁH€›\òŸK\ôŸ]‹à€€ú›[Y\óäJHÇàà
+[õ\‹»
+›XöXÿ[X⁄^ã\õﬁK\Z\ãY^\›œ»€›\òŸKZY
+HÇàà
+›XöXÿ[X⁄^ãXúöYŸKYòZ[Çààê–÷ãUTQPîíQ—KTì÷Wàú€›\òŸHõﬁHŸ\»õ›^\›äJHÇàà
+]
+à
+
+€›\òŸK[Y]H
+›XöXÿ[X⁄^ã\ôXY\õﬁK[Y]H€›\òŸKZY
+JHÇàà
+X⁄Ÿ][ò[YH
+›XöXÿ[X⁄^ã\õﬁK\X⁄Ÿ][ò[YHõﬁKZY
+JHÇàà
+X⁄Ÿ]\]
+›XöXÿ[X⁄^ãXXú€€]KX\ùYòX›X⁄Ÿ][ò[YJJHÇàà
+Y]K[ò[YH
+›XöXÿ[X⁄^ã\õﬁK[Y]K[ò[YHõﬁKZY
+JHÇàà
+Y]K\]
+›XöXÿ[X⁄^ãXXú€€]KX\ùYòX›Y]K[ò[YJJJHÇàà
+[õ\‹»
+\O»
+ôX›‹ã\ôYà€›\òŸK[Y]H H	ÿX›]ôJHÇàà
+›XöXÿ[X⁄^ãXúöYŸKYòZ[Çààê–÷ãUTQPîíQ—KTì÷Wàú€›\òŸHõﬁH\»ô[X\ŸYäJHÇàà
+⁄[à
+‹à
+ö[KY^\›œ»X⁄Ÿ]\]
+H
+ö[KY^\›œ»Y]K\]
+JHÇàà
+›XöXÿ[X⁄^ãXúöYŸKYòZ[Çààê–÷ãUTQPîíQ—KTì÷Wàô\ö]ôYõﬁHQ[ôXYH^\›◊äJHÇàà
+][ùàê’PíP–S–“Vó’TQ”S—WàõX]\öX[^ôK\õﬁWäHÇàà
+][ùàê’PíP–S–“Vó’TQ‘ì÷W“QàõﬁKZY
+HÇàà
+][ùàê’PíP–S–“Vó’TQ‘ì÷W‘P“—U”êSQWàX⁄Ÿ][ò[YJHÇàà
+][ùàê’PíP–S–“Vó’TQ‘ëT’S‘P“—UàX⁄Ÿ]\]
+HÇàà
+][ùàê’PíP–S–“Vó’TQ‘ì÷W”QUW”êSQWàY]K[ò[YJHÇàà
+][ùàê’PíP–S–“Vó’TQ‘ëT’S”QUWàY]K\]
+HÇàà
+][ùàê’PíP–S–“Vó’TQ‘ì÷W‘TëSï“Qà€›\òŸKZY
+HÇàà
+][ùàê’PíP–S–“Vó’TQ‘ì÷W‘’‘ëW—TóàÇàà›XöXÿ[X⁄^ãX\ùYòX›Y\ôX›‹ûJHÇàà
+][ùàê’PíP–S–“Vó’TQ–””î’SQTóà€€ú›[Y\äHÇàà
+]
+
+õﬁHÇàà
+›XöXÿ[X⁄^ãYõ‹òŸK]\YZ€HÇàà
+ôX›‹à	ÿ›XöXÿ[X⁄^ã]\YZ€KZ[\‹ù]åHÇàà€›\òŸKZYÇàà
+›XöXÿ[X⁄^ã\õﬁK\X⁄Ÿ][ò[YH€›\òŸKZY
+HÇààõõ€ôWäJJJHÇàà
+[õ\‹»Çàà
+[ô
+ôX›‹è»õﬁJH
+H
+ôX›‹ã[[ô›õﬁJH HÇàà
+\O»
+ôX›‹ã\ôYàõﬁH
+HÇàà	ÿ›XöXÿ[X⁄^ã]\Y]ò[YK\õﬁK]åJHÇàà
+›ö[ôœO»
+ôX›‹ã\ôYàõﬁHJHõﬁKZY
+HÇàà
+›ö[ôœO»
+ôX›‹ã\ôYàõﬁHäHX⁄Ÿ][ò[YJHÇàà
+›XöXÿ[X⁄^ã\õﬁK\Z\ãY^\›œ»õﬁKZY
+HÇàà
+]
+
+Y]HÇàà
+›XöXÿ[X⁄^ã\ôXY\õﬁK[Y]HõﬁKZY
+JJHÇàà
+[ô
+›ö[ôœO»
+ôX›‹ã\ôYàY]HäH€›\òŸKZY
+HÇàà
+\O»
+ôX›‹ã\ôYàY]H H	ÿX›]ôJJJJHÇàà
+›XöXÿ[X⁄^ãXúöYŸKYòZ[Çààê–÷ãUTQPîíQ—KTì’–””àÇààô\ö]ôYõﬁHY[ù]HZ\€X]⁄äJHÇààõﬁJJJJHÇàäYö[ôH
+›XöXÿ[X⁄^ãX€€ú›[YK\õﬁH€€ôöY HÇàà
+]
+
+õﬁKZY
+ôX›‹ã\ôYà€€ôöY»
+JHÇàà
+€€ú›[Y\à
+ôX›‹ã\ôYà€€ôöY»JJJHÇàà
+[õ\‹»
+[ô
+›XöXÿ[X⁄^ã\ÿYôK\õﬁKZY»õﬁKZY
+HÇàà
+›XöXÿ[X⁄^ã\ÿYôK\[ò[YO»€€ú›[Y\äJHÇàà
+›XöXÿ[X⁄^ãXúöYŸKYòZ[Çààê–÷ãUTQPîíQ—KTì÷Wàö[ùò[YõﬁHQ‹à€€ú›[Y\àSò[YWäJHÇàà
+›XöXÿ[X⁄^ã]⁄]\õﬁK\›‹ôK[ÿ⁄»Çàà
+[XôH
+
+HÇàà
+›XöXÿ[X⁄^ãYÿÀ\õﬁY\À][õÿ⁄ŸY
+HÇàà
+]
+à
+
+X⁄Ÿ][ò[YH
+›XöXÿ[X⁄^ã\õﬁK\X⁄Ÿ][ò[YHõﬁKZY
+JHÇàà
+X⁄Ÿ]\]Çàà
+›XöXÿ[X⁄^ãXXú€€]KX\ùYòX›X⁄Ÿ][ò[YJJJHÇàà
+[õ\‹»
+ö[KY^\›œ»X⁄Ÿ]\]
+HÇàà
+›XöXÿ[X⁄^ãXúöYŸKYòZ[Çààê–÷ãUTQPîíQ—KTì÷WàÇààúõﬁHX⁄Ÿ]Ÿ\»õ›^\›äJHÇàà
+[õ\‹»Çàà
+\O»Çàà
+ôX›‹ã\ôYà
+›XöXÿ[X⁄^ã\ôXY\õﬁK[Y]HõﬁKZY
+H HÇàà	ÿX›]ôJHÇàà
+›XöXÿ[X⁄^ãXúöYŸKYòZ[Çààê–÷ãUTQPîíQ—KTì÷WàúõﬁH\»ô[X\ŸYäJHÇàà
+][ùàê’PíP–S–“Vó’TQ”S—Wàô‹õ›[ôäHÇàà
+][ùàê’PíP–S–“Vó’TQ–””î’SQTóà€€ú›[Y\äHÇàà
+›XöXÿ[X⁄^ãYõ‹òŸK]\YZ€HÇàà
+ôX›‹à	ÿ›XöXÿ[X⁄^ã]\YZ€KZ[\‹ù]åHÇààõﬁKZYX⁄Ÿ][ò[YHõõ€ôWäJJJJJJHÇàäYö[ôH
+›XöXÿ[X⁄^ã[X\\õﬁH€€ôöY HÇàà
+]
+à
+
+€›\òŸKZY
+ôX›‹ã\ôYà€€ôöY»
+JHÇàà
+X\\à
+ôX›‹ã\ôYà€€ôöY»JJHÇàà
+\ôŸ]ZY
+ôX›‹ã\ôYà€€ôöY»äJHÇàà
+ô\›[X€€ú›[Y\à
+ôX›‹ã\ôYà€€ôöY» JJHÇàà
+[õ\‹»
+[ô
+›XöXÿ[X⁄^ã\ÿYôK\õﬁKZY»€›\òŸKZY
+HÇàà
+›XöXÿ[X⁄^ã\ÿYôK\[ò[YO»X\\äJHÇàà
+›XöXÿ[X⁄^ãXúöYŸKYòZ[Çààê–÷ãUTQPîíQ—KTì÷WàÇààö[ùò[YX\€›\òŸHõﬁHQ‹àù[ò›[€àSò[YWäJHÇàà
+[õ\‹»
+õ›
+\O»
+Yà\ôŸ]ZY›ŸäHÇàà
+Yàô\›[X€€ú›[Y\à›ŸäJJHÇàà
+›XöXÿ[X⁄^ãXúöYŸKYòZ[Çààê–÷ãUTQPîíQ—KTì÷WàÇààõX\ô\]Z\ô\»^X›H€ôH\ôŸ]õﬁH‹àô\›[€€ú›[Y\óäJHÇàà
+⁄[à\ôŸ]ZYÇàà
+[õ\‹»
+[ô
+›XöXÿ[X⁄^ã\ÿYôK\õﬁKZY»\ôŸ]ZY
+HÇàà
+õ›
+›ö[ôœO»€›\òŸKZY\ôŸ]ZY
+JJHÇàà
+›XöXÿ[X⁄^ãXúöYŸKYòZ[Çààê–÷ãUTQPîíQ—KTì÷WàÇààö[ùò[YX\\ôŸ]õﬁHQäJJHÇàà
+⁄[àô\›[X€€ú›[Y\àÇàà
+[õ\‹»
+›XöXÿ[X⁄^ã\ÿYôK\[ò[YO»ô\›[X€€ú›[Y\äHÇàà
+›XöXÿ[X⁄^ãXúöYŸKYòZ[Çààê–÷ãUTQPîíQ—KTì÷WàÇààö[ùò[YX\ô\›[€€ú›[Y\àSò[YWäJJHÇàà
+Yà\ôŸ]ZYÇàà
+›XöXÿ[X⁄^ãY\ö]ôK\õﬁHÇàà
+ôX›‹à€›\òŸKZYX\\à\ôŸ]ZY
+JHÇàà
+›XöXÿ[X⁄^ã]⁄]\õﬁK\›‹ôK[ÿ⁄»Çàà
+[XôH
+
+HÇàà
+›XöXÿ[X⁄^ãYÿÀ\õﬁY\À][õÿ⁄ŸY
+HÇàà
+[õ\‹»
+›XöXÿ[X⁄^ã\õﬁK\Z\ãY^\›œ»€›\òŸKZY
+HÇàà
+›XöXÿ[X⁄^ãXúöYŸKYòZ[Çààê–÷ãUTQPîíQ—KTì÷WàÇààõX\€›\òŸHõﬁHŸ\»õ›^\›äJHÇàà
+[õ\‹»Çàà
+\O»Çàà
+ôX›‹ã\ôYàÇàà
+›XöXÿ[X⁄^ã\ôXY\õﬁK[Y]H€›\òŸKZY
+H HÇàà	ÿX›]ôJHÇàà
+›XöXÿ[X⁄^ãXúöYŸKYòZ[Çààê–÷ãUTQPîíQ—KTì÷WàÇààõX\€›\òŸHõﬁH\»ô[X\ŸYäJHÇàà
+][ùàê’PíP–S–“Vó’TQ”S—WàõX\Y‹õ›[ôäHÇàà
+][ùàê’PíP–S–“Vó’TQ”PTTóàX\\äHÇàà
+][ùàÇààê’PíP–S–“Vó’TQ–””î’SQTóàô\›[X€€ú›[Y\äHÇàà
+›XöXÿ[X⁄^ãYõ‹òŸK]\YZ€HÇàà
+ôX›‹à	ÿ›XöXÿ[X⁄^ã]\YZ€KZ[\‹ù]åHÇàà€›\òŸKZYÇàà
+›XöXÿ[X⁄^ã\õﬁK\X⁄Ÿ][ò[YH€›\òŸKZY
+HÇààõõ€ôWäJJJJJJHÇàäYö[ôH
+›XöXÿ[X⁄^ãYõ‹\õﬁHõﬁKZY
+HÇàà
+[õ\‹»
+›XöXÿ[X⁄^ã\ÿYôK\õﬁKZY»õﬁKZY
+HÇàà
+›XöXÿ[X⁄^ãXúöYŸKYòZ[Çààê–÷ãUTQPîíQ—KTì÷Wàö[ùò[YõﬁHQäJHÇàà
+›XöXÿ[X⁄^ã]⁄]\õﬁK\›‹ôK[ÿ⁄»Çàà
+[XôH
+
+HÇàà
+›XöXÿ[X⁄^ãYÿÀ\õﬁY\À][õÿ⁄ŸY
+HÇàà
+]
+à
+
+X⁄Ÿ][ò[YH
+›XöXÿ[X⁄^ã\õﬁK\X⁄Ÿ][ò[YHõﬁKZY
+JHÇàà
+X⁄Ÿ]\]Çàà
+›XöXÿ[X⁄^ãXXú€€]KX\ùYòX›X⁄Ÿ][ò[YJJJHÇàà
+[õ\‹»
+›XöXÿ[X⁄^ã\õﬁK\Z\ãY^\›œ»õﬁKZY
+HÇàà
+›XöXÿ[X⁄^ãXúöYŸKYòZ[Çààê–÷ãUTQPîíQ—KTì÷WàÇààúõﬁHX⁄Ÿ]Ÿ\»õ›^\›äJHÇàà
+]
+
+Y]H
+›XöXÿ[X⁄^ã\ôXY\õﬁK[Y]HõﬁKZY
+JJHÇàà
+⁄[à
+\O»
+ôX›‹ã\ôYàY]H H	ÿX›]ôJHÇàà
+›XöXÿ[X⁄^ã]‹ö]K\õﬁK\›]HÇààõﬁKZYY]H	‹ô[X\ŸY
+JJHÇàà
+›XöXÿ[X⁄^ãYÿÀ\õﬁY\À][õÿ⁄ŸY
+HÇàà
+Yà
+›XöXÿ[X⁄^ã\õﬁK\Z\ãY^\›œ»õﬁKZY
+HÇàà
+ôX›‹àÇàà	ÿ›XöXÿ[X⁄^ã]\Y]ò[YK\õﬁK\ô]Z[ôY]åHõﬁKZY
+HÇàà
+ôX›‹àÇàà	ÿ›XöXÿ[X⁄^ã]\Y]ò[YK\õﬁKYõ‹Y]åHõﬁKZY
+JJJJJHÇàäYö[ôH›XöXÿ[X⁄^ã\⁄[X\ô›[Y[ù»
+€€[X[ô[[ôKX\ô›[Y[ù JHÇàäYö[ôH›XöXÿ[X⁄^ã\Ÿ[X›Y]\YZ€HÇàà
+›XöXÿ[X⁄^ã\Ÿ[X›]\YZ€H›XöXÿ[X⁄^ã\⁄[X\ô›[Y[ù JHÇàäYö[ôH›XöXÿ[X⁄^ã[ÿúŸ\ùôKX[»Çàà
+Y[Xô\àãK[ÿúŸ\ùôKX[Y‹õ›[ôà›XöXÿ[X⁄^ã\⁄[X\ô›[Y[ù JHÇàäYö[ôH›XöXÿ[X⁄^ãZ€KX€€ú›[Y\ú»Çàà
+›XöXÿ[X⁄^ã\ô\]Y\›YZ€KX€€ú›[Y\ú»›XöXÿ[X⁄^ã\⁄[X\ô›[Y[ù JHÇàäYö[ôH›XöXÿ[X⁄^ãXÿ[\ô\]Y\›YÇàà
+›XöXÿ[X⁄^ãXÿ[\ô\]Y\›Y»›XöXÿ[X⁄^ã\⁄[X\ô›[Y[ù JHÇàäYö[ôH›XöXÿ[X⁄^ãXÿ[X€€ôöY»Çàà
+Yà›XöXÿ[X⁄^ãXÿ[\ô\]Y\›YÇàà
+]
+
+[ŸHÇàà
+›XöXÿ[X⁄^ãXÿ[[[ŸHÇàà›XöXÿ[X⁄^ã\⁄[X\ô›[Y[ù JJHÇàà
+ôX›‹àÇàà[ŸHÇàà
+›XöXÿ[X⁄^ãY^X›K[€ôKXÿ[]ò[YHÇàà
+€€ôÇàà
+
+›ö[ôœO»[ŸHòõ€€äHÇàà›XöXÿ[X⁄^ãXÿ[Xõ€€Z€K\ôYö^
+HÇàà
+
+›ö[ôœO»[ŸHõò]äHÇàà›XöXÿ[X⁄^ãXÿ[[ò]Z€K\ôYö^
+HÇàà
+
+›ö[ôœO»[ŸHù€‹ôçäHÇàà›XöXÿ[X⁄^ãXÿ[]€‹ôçZ€K\ôYö^
+HÇàà
+
+›ö[ôœO»[ŸHò⁄\óäHÇàà›XöXÿ[X⁄^ãXÿ[X⁄\ãZ€K\ôYö^
+HÇàà
+
+›ö[ôœO»[ŸHö[ùäHÇàà›XöXÿ[X⁄^ãXÿ[Z[ùZ€K\ôYö^
+HÇàà
+[ŸH›XöXÿ[X⁄^ãXÿ[Y‹õ›[ôZ€K\ôYö^
+JHÇààòÿ[XõH€HQà›XöXÿ[X⁄^ã\⁄[X\ô›[Y[ù HÇàà
+Yà
+›ö[ôœO»[ŸHô‹õ›[ôäHÇàà
+›XöXÿ[X⁄^ãXÿ[Y‹õ›[ôX\ô›[Y[ù»Çàà›XöXÿ[X⁄^ã\⁄[X\ô›[Y[ù HÇàà
+›XöXÿ[X⁄^ãY^X›K[€ôKXÿ[]ò[YHÇàà
+€€ôÇàà
+
+›ö[ôœO»[ŸHòõ€€äHÇàà›XöXÿ[X⁄^ãXÿ[Xõ€€X\ô›[Y[ù\ôYö^
+HÇàà
+
+›ö[ôœO»[ŸHõò]äHÇàà›XöXÿ[X⁄^ãXÿ[[ò]X\ô›[Y[ù\ôYö^
+HÇàà
+
+›ö[ôœO»[ŸHù€‹ôçäHÇàà›XöXÿ[X⁄^ãXÿ[]€‹ôçX\ô›[Y[ù\ôYö^
+HÇàà
+
+›ö[ôœO»[ŸHò⁄\óäHÇàà›XöXÿ[X⁄^ãXÿ[X⁄\ãX\ô›[Y[ù\ôYö^
+HÇàà
+[ŸH›XöXÿ[X⁄^ãXÿ[Z[ùX\ô›[Y[ù\ôYö^
+JHÇààô‹õ›[ô\ô›[Y[ùà›XöXÿ[X⁄^ã\⁄[X\ô›[Y[ù JHÇàà
+›XöXÿ[X⁄^ãY^X›K[€ôKXÿ[]ò[YHÇàà›XöXÿ[X⁄^ãXÿ[Z€K]\K\ôYö^ö€H\HSò[YWàÇàà›XöXÿ[X⁄^ã\⁄[X\ô›[Y[ù HÇàà
+›XöXÿ[X⁄^ãXÿ[XX›[€àÇàà›XöXÿ[X⁄^ã\⁄[X\ô›[Y[ù JJHÇààŸäJHÇàäYö[ôH›XöXÿ[X⁄^ãX]]ÀXö[ô\ô\]Y\›YÇàà
+›XöXÿ[X⁄^ãX]]ÀXö[ô\ô\]Y\›Y»Çàà›XöXÿ[X⁄^ã\⁄[X\ô›[Y[ù JHÇàäYö[ôH›XöXÿ[X⁄^ãX]]ÀXö[ôX€€ôöY»Çàà
+Yà›XöXÿ[X⁄^ãX]]ÀXö[ô\ô\]Y\›YÇàà
+]
+
+[ŸHÇàà
+›XöXÿ[X⁄^ãX]]ÀXö[ô[[ŸHÇàà›XöXÿ[X⁄^ã\⁄[X\ô›[Y[ù JJHÇàà
+ôX›‹àÇàà[ŸHÇàà
+›XöXÿ[X⁄^ãY^X›K[€ôKX]]ÀXö[ô]ò[YHÇàà
+€€ôÇàà
+
+›ö[ôœO»[ŸHòõ€€äHÇàà›XöXÿ[X⁄^ãX]]ÀXö[ôXõ€€Z€K\ôYö^
+HÇàà
+
+›ö[ôœO»[ŸHõò]äHÇàà›XöXÿ[X⁄^ãX]]ÀXö[ô[ò]Z€K\ôYö^
+HÇàà
+
+›ö[ôœO»[ŸHù€‹ôçäHÇàà›XöXÿ[X⁄^ãX]]ÀXö[ô]€‹ôçZ€K\ôYö^
+HÇàà
+
+›ö[ôœO»[ŸHò⁄\óäHÇàà›XöXÿ[X⁄^ãX]]ÀXö[ôX⁄\ãZ€K\ôYö^
+HÇàà
+
+›ö[ôœO»[ŸHö[ùäHÇàà›XöXÿ[X⁄^ãX]]ÀXö[ôZ[ùZ€K\ôYö^
+HÇàà
+[ŸH›XöXÿ[X⁄^ãX]]ÀXö[ôY‹õ›[ôZ€K\ôYö^
+JHÇààò]]ÀXõ›[ô€HQà›XöXÿ[X⁄^ã\⁄[X\ô›[Y[ù HÇàà
+Yà
+›ö[ôœO»[ŸHõ‹ô\ôYY‹õ›[ôäHÇàà
+›XöXÿ[X⁄^ãY[ùûKY‹õ›[ô]ò[Y\»Çàà›XöXÿ[X⁄^ã\⁄[X\ô›[Y[ù HÇàà
+›XöXÿ[X⁄^ãY^X›K[€ôKX]]ÀXö[ô]ò[YHÇàà
+€€ôÇàà
+
+›ö[ôœO»[ŸHòõ€€äHÇàà›XöXÿ[X⁄^ãY[ùûKXõ€€X\ô›[Y[ù\ôYö^
+HÇàà
+
+›ö[ôœO»[ŸHõò]äHÇàà›XöXÿ[X⁄^ãY[ùûK[ò]X\ô›[Y[ù\ôYö^
+HÇàà
+
+›ö[ôœO»[ŸHù€‹ôçäHÇàà›XöXÿ[X⁄^ãY[ùûK]€‹ôçX\ô›[Y[ù\ôYö^
+HÇàà
+
+›ö[ôœO»[ŸHò⁄\óäHÇàà›XöXÿ[X⁄^ãY[ùûKX⁄\ãX\ô›[Y[ù\ôYö^
+HÇàà
+[ŸH›XöXÿ[X⁄^ãY[ùûKZ[ùX\ô›[Y[ù\ôYö^
+JHÇààô[ùûH‹õ›[ô\ô›[Y[ùàÇàà›XöXÿ[X⁄^ã\⁄[X\ô›[Y[ù JHÇàà
+›XöXÿ[X⁄^ãY^X›K[€ôKX]]ÀXö[ô]ò[YHÇàà›XöXÿ[X⁄^ãX]]ÀXö[ôZ€K]\K\ôYö^Çààò]]ÀXõ›[ô€H\HSò[YWà›XöXÿ[X⁄^ã\⁄[X\ô›[Y[ù HÇàà
+›XöXÿ[X⁄^ãX]]ÀXö[ôXX›[€àÇàà›XöXÿ[X⁄^ã\⁄[X\ô›[Y[ù JJHÇààŸäJHÇàäYö[ôH›XöXÿ[X⁄^ã\õﬁK\ô\]Y\›YÇàà
+›XöXÿ[X⁄^ã\õﬁK\ô\]Y\›Y»›XöXÿ[X⁄^ã\⁄[X\ô›[Y[ù JHÇàäYö[ôH›XöXÿ[X⁄^ã\õﬁKX€€ôöY»Çàà
+Yà›XöXÿ[X⁄^ã\õﬁK\ô\]Y\›YÇàà
+]
+
+[ŸHÇàà
+›XöXÿ[X⁄^ã[X]\öX[^ôK[[ŸHÇàà›XöXÿ[X⁄^ã\⁄[X\ô›[Y[ù JJHÇàà
+ôX›‹àÇàà[ŸHÇàà
+›XöXÿ[X⁄^ãY^X›K[€ôK\õﬁK]ò[YHÇàà
+Yà
+›ö[ôœO»[ŸHòõ€€äHÇàà›XöXÿ[X⁄^ã[X]\öX[^ôKXõ€€Z€K\ôYö^Çàà›XöXÿ[X⁄^ã[X]\öX[^ôK[ò]Z€K\ôYö^
+HÇààú€›\òŸH€HQà›XöXÿ[X⁄^ã\⁄[X\ô›[Y[ù HÇàà
+›XöXÿ[X⁄^ãY^X›K[€ôK\õﬁK]ò[YHÇàà
+Yà
+›ö[ôœO»[ŸHòõ€€äHÇàà›XöXÿ[X⁄^ã[X]\öX[^ôKXõ€€X\ô›[Y[ù\ôYö^Çàà›XöXÿ[X⁄^ã[X]\öX[^ôK[ò]X\ô›[Y[ù\ôYö^
+HÇààô‹õ›[ô\ô›[Y[ùà›XöXÿ[X⁄^ã\⁄[X\ô›[Y[ù HÇàà
+›XöXÿ[X⁄^ãY^X›K[€ôK\õﬁK]ò[YHÇàà›XöXÿ[X⁄^ã[X]\öX[^ôKZ€K]\K\ôYö^Çààö€H\HSò[YWà›XöXÿ[X⁄^ã\⁄[X\ô›[Y[ù HÇàà
+›XöXÿ[X⁄^ãY^X›K[€ôK\õﬁK]ò[YHÇàà›XöXÿ[X⁄^ã\õﬁKZY\ôYö^ÇààúõﬁHQà›XöXÿ[X⁄^ã\⁄[X\ô›[Y[ù JJHÇààŸäJHÇàäYö[ôH›XöXÿ[X⁄^ãX€€ú›[YK\õﬁK\ô\]Y\›YÇàà
+‹àÇàà
+›XöXÿ[X⁄^ã\ôYö^\ô\]Y\›Y»Çàà›XöXÿ[X⁄^ãX€€ú›[YK\õﬁK\ôYö^›XöXÿ[X⁄^ã\⁄[X\ô›[Y[ù HÇàà
+›XöXÿ[X⁄^ã\ôYö^\ô\]Y\›Y»Çàà›XöXÿ[X⁄^ã\õﬁKX€€ú›[Y\ã\ôYö^›XöXÿ[X⁄^ã\⁄[X\ô›[Y[ù JJHÇàäYö[ôH›XöXÿ[X⁄^ãX€€ú›[YK\õﬁKX€€ôöY»Çàà
+Yà›XöXÿ[X⁄^ãX€€ú›[YK\õﬁK\ô\]Y\›YÇàà
+ôX›‹àÇàà
+›XöXÿ[X⁄^ãY^X›K[€ôK\õﬁK]ò[YHÇàà›XöXÿ[X⁄^ãX€€ú›[YK\õﬁK\ôYö^ÇààúõﬁHQà›XöXÿ[X⁄^ã\⁄[X\ô›[Y[ù HÇàà
+›XöXÿ[X⁄^ãY^X›K[€ôK\õﬁK]ò[YHÇàà›XöXÿ[X⁄^ã\õﬁKX€€ú›[Y\ã\ôYö^ÇààúõﬁH€€ú›[Y\àSò[YWà›XöXÿ[X⁄^ã\⁄[X\ô›[Y[ù JHÇààŸäJHÇàäYö[ôH›XöXÿ[X⁄^ã[X\\õﬁK\ô\]Y\›YÇàà
+‹àÇàà
+›XöXÿ[X⁄^ã\ôYö^\ô\]Y\›Y»Çàà›XöXÿ[X⁄^ã[X\\õﬁK\ôYö^›XöXÿ[X⁄^ã\⁄[X\ô›[Y[ù HÇàà
+›XöXÿ[X⁄^ã\ôYö^\ô\]Y\›Y»Çàà›XöXÿ[X⁄^ã[X\\õﬁKYù[ò›[€ã\ôYö^Çàà›XöXÿ[X⁄^ã\⁄[X\ô›[Y[ù HÇàà
+›XöXÿ[X⁄^ã\ôYö^\ô\]Y\›Y»Çàà›XöXÿ[X⁄^ã[X\\õﬁK\ô\›[X€€ú›[Y\ã\ôYö^Çàà›XöXÿ[X⁄^ã\⁄[X\ô›[Y[ù JJHÇàäYö[ôH›XöXÿ[X⁄^ã[X\\õﬁKX€€ôöY»Çàà
+Yà›XöXÿ[X⁄^ã[X\\õﬁK\ô\]Y\›YÇàà
+ôX›‹àÇàà
+›XöXÿ[X⁄^ãY^X›K[€ôK\õﬁK]ò[YHÇàà›XöXÿ[X⁄^ã[X\\õﬁK\ôYö^ÇààõX\€›\òŸHõﬁHQà›XöXÿ[X⁄^ã\⁄[X\ô›[Y[ù HÇàà
+›XöXÿ[X⁄^ãY^X›K[€ôK\õﬁK]ò[YHÇàà›XöXÿ[X⁄^ã[X\\õﬁKYù[ò›[€ã\ôYö^ÇààõX\ù[ò›[€àSò[YWà›XöXÿ[X⁄^ã\⁄[X\ô›[Y[ù HÇàà
+›XöXÿ[X⁄^ã^ô\õÀ[‹ã[€ôK\õﬁK]ò[YHÇàà›XöXÿ[X⁄^ã\õﬁKZY\ôYö^ÇààõX\\ôŸ]õﬁHQà›XöXÿ[X⁄^ã\⁄[X\ô›[Y[ù HÇàà
+›XöXÿ[X⁄^ã^ô\õÀ[‹ã[€ôK\õﬁK]ò[YHÇàà›XöXÿ[X⁄^ã[X\\õﬁK\ô\›[X€€ú›[Y\ã\ôYö^ÇààõX\ô\›[€€ú›[Y\àSò[YWà›XöXÿ[X⁄^ã\⁄[X\ô›[Y[ù JHÇààŸäJHÇàäYö[ôH›XöXÿ[X⁄^ãYõ‹\õﬁK\ô\]Y\›YÇàà
+›XöXÿ[X⁄^ã\ôYö^\ô\]Y\›Y»Çàà›XöXÿ[X⁄^ãYõ‹\õﬁK\ôYö^›XöXÿ[X⁄^ã\⁄[X\ô›[Y[ù JHÇàäYö[ôH›XöXÿ[X⁄^ãYõ‹\õﬁKZYÇàà
+Yà›XöXÿ[X⁄^ãYõ‹\õﬁK\ô\]Y\›YÇàà
+›XöXÿ[X⁄^ãY^X›K[€ôK\õﬁK]ò[YHÇàà›XöXÿ[X⁄^ãYõ‹\õﬁK\ôYö^ÇààúõﬁHQà›XöXÿ[X⁄^ã\⁄[X\ô›[Y[ù HÇààŸäJHÇàäYö[ôH›XöXÿ[X⁄^ãY\ö]ôK\õﬁK\ô\]Y\›YÇàà
+‹àÇàà
+›XöXÿ[X⁄^ã\ôYö^\ô\]Y\›Y»Çàà›XöXÿ[X⁄^ãY\ö]ôK\õﬁK\ôYö^›XöXÿ[X⁄^ã\⁄[X\ô›[Y[ù HÇàà
+›XöXÿ[X⁄^ã\ôYö^\ô\]Y\›Y»Çàà›XöXÿ[X⁄^ãY\ö]ôK\õﬁKX€€ú›[Y\ã\ôYö^Çàà›XöXÿ[X⁄^ã\⁄[X\ô›[Y[ù JJHÇàäYö[ôH›XöXÿ[X⁄^ãY\ö]ôK\õﬁKX€€ôöY»Çàà
+Yà›XöXÿ[X⁄^ãY\ö]ôK\õﬁK\ô\]Y\›YÇàà
+ôX›‹àÇàà
+›XöXÿ[X⁄^ãY^X›K[€ôK\õﬁK]ò[YHÇàà›XöXÿ[X⁄^ãY\ö]ôK\õﬁK\ôYö^Çààú€›\òŸHõﬁHQà›XöXÿ[X⁄^ã\⁄[X\ô›[Y[ù HÇàà
+›XöXÿ[X⁄^ãY^X›K[€ôK\õﬁK]ò[YHÇàà›XöXÿ[X⁄^ãY\ö]ôK\õﬁKX€€ú›[Y\ã\ôYö^Çààô\ö]ôYõﬁH€€ú›[Y\àSò[YWàÇàà›XöXÿ[X⁄^ã\⁄[X\ô›[Y[ù HÇàà
+›XöXÿ[X⁄^ãY^X›K[€ôK\õﬁK]ò[YHÇàà›XöXÿ[X⁄^ã\õﬁKZY\ôYö^Çààù\ôŸ]õﬁHQà›XöXÿ[X⁄^ã\⁄[X\ô›[Y[ù JHÇààŸäJHÇàäYö[ôH›XöXÿ[X⁄^ãYÿÀ\õﬁY\ÀX€›[ùÇàà
+[ô›Çàà
+ö[\àÇàà
+[XôH
+\ô›[Y[ù
+HÇàà
+›ö[ôœO»\ô›[Y[ù›XöXÿ[X⁄^ãYÿÀ\õﬁY\ÀX\ô›[Y[ù
+JHÇàà›XöXÿ[X⁄^ã\⁄[X\ô›[Y[ù JJHÇàä⁄[à
+à›XöXÿ[X⁄^ãYÿÀ\õﬁY\ÀX€›[ùJHÇàà
+›XöXÿ[X⁄^ãXúöYŸKYòZ[Çààê–÷ãUTQPîíQ—KTì÷Wàô\Xÿ]HõﬁH–»\ô›[Y[ùäJHÇàäYö[ôH›XöXÿ[X⁄^ãYÿÀ\õﬁY\À\ô\]Y\›YÇàà
+H›XöXÿ[X⁄^ãYÿÀ\õﬁY\ÀX€›[ùJJHÇàäYö[ôH›XöXÿ[X⁄^ã\õﬁK[‹\ò][€ãX€›[ùÇàà
+
+»
+Yà›XöXÿ[X⁄^ã\õﬁK\ô\]Y\›YH
+HÇàà
+Yà›XöXÿ[X⁄^ãY\ö]ôK\õﬁK\ô\]Y\›YH
+HÇàà
+Yà›XöXÿ[X⁄^ãX€€ú›[YK\õﬁK\ô\]Y\›YH
+HÇàà
+Yà›XöXÿ[X⁄^ã[X\\õﬁK\ô\]Y\›YH
+HÇàà
+Yà›XöXÿ[X⁄^ãYõ‹\õﬁK\ô\]Y\›YH
+HÇàà
+Yà›XöXÿ[X⁄^ãYÿÀ\õﬁY\À\ô\]Y\›YH
+JJHÇàä⁄[à
+[ô›XöXÿ[X⁄^ãX]]ÀXö[ô\ô\]Y\›YÇàà
+‹à›XöXÿ[X⁄^ãXÿ[\ô\]Y\›YÇàà
+à›XöXÿ[X⁄^ã\õﬁK[‹\ò][€ãX€›[ù
+HÇàà›XöXÿ[X⁄^ã[ÿúŸ\ùôKX[»Çàà›XöXÿ[X⁄^ã\Ÿ[X›Y]\YZ€HÇàà
+Z\è»›XöXÿ[X⁄^ãZ€KX€€ú›[Y\ú JJHÇàà
+›XöXÿ[X⁄^ãXúöYŸKYòZ[Çààê–÷ãUTQPîíQ—KQSïíTì”ìQSïàÇààò]]€X]X»[ùö\õ€õY[ùö[ô[ô»€€ôõX›»⁄][õ›\à^X›][€à[ŸWäJHÇàä⁄[à
+‹à
+à›XöXÿ[X⁄^ã\õﬁK[‹\ò][€ãX€›[ùJHÇàà
+[ô
+à›XöXÿ[X⁄^ã\õﬁK[‹\ò][€ãX€›[ù
+HÇàà
+‹à›XöXÿ[X⁄^ãXÿ[\ô\]Y\›YÇàà›XöXÿ[X⁄^ãX]]ÀXö[ô\ô\]Y\›YÇàà›XöXÿ[X⁄^ã[ÿúŸ\ùôKX[»Çàà›XöXÿ[X⁄^ã\Ÿ[X›Y]\YZ€HÇàà
+Z\è»›XöXÿ[X⁄^ãZ€KX€€ú›[Y\ú JJJHÇàà
+›XöXÿ[X⁄^ãXúöYŸKYòZ[Çààê–÷ãUTQPîíQ—KTì÷WàÇààúõﬁH‹\ò][€à€€ôõX›»⁄][õ›\à^X›][€à[ŸWäJHÇàä⁄[à
+[ô›XöXÿ[X⁄^ãXÿ[\ô\]Y\›YÇàà
+‹à›XöXÿ[X⁄^ãX]]ÀXö[ô\ô\]Y\›YÇàà›XöXÿ[X⁄^ã[ÿúŸ\ùôKX[»Çàà›XöXÿ[X⁄^ã\Ÿ[X›Y]\YZ€JJHÇàà
+›XöXÿ[X⁄^ãXúöYŸKYòZ[Çààê–÷ãUTQPîíQ—KP–SàÇààòÿ[XõH[[Z[ò][€à€€ôõX›»⁄][õ›\à^X›][€à[ŸWäJHÇàä⁄[à
+[ô›XöXÿ[X⁄^ã[ÿúŸ\ùôKX[»Çàà›XöXÿ[X⁄^ã\Ÿ[X›Y]\YZ€JHÇàà
+›XöXÿ[X⁄^ãXúöYŸKYòZ[Çààê–÷ãUTQPîíQ—KS–î—TïêUS”óàÇààòò]⁄ÿúŸ\ùò][€à€€ôõX›»⁄]⁄[ô€KZ€Hõ‹ò⁄[ô◊äJHÇàä⁄[à
+[ô
+õ››XöXÿ[X⁄^ã[ÿúŸ\ùôKX[ HÇàà
+Z\è»›XöXÿ[X⁄^ãZ€KX€€ú›[Y\ú JHÇàà
+›XöXÿ[X⁄^ãXúöYŸKYòZ[Çààê–÷ãUTQPîíQ—KS–î—TïêUS”óàÇààö€H€€ú›[Y\àX\[ô‹»ô\]Z\ôHK[ÿúŸ\ùôKX[Y‹õ›[ôäJHÇàäYö[ôH›XöXÿ[X⁄^ã]ò[Y]YZ€KX€€ú›[Y\ú»Çàà
+Yà›XöXÿ[X⁄^ã[ÿúŸ\ùôKX[»Çàà
+›XöXÿ[X⁄^ã]ò[Y]KZ€KX€€ú›[Y\ú»Çàà›XöXÿ[X⁄^ãZ€KX€€ú›[Y\ú HÇàà	 
+JJHÇàä\‹^HÇàà
+€€ôÇàà
+›XöXÿ[X⁄^ã\õﬁK\ô\]Y\›YÇàà
+›XöXÿ[X⁄^ã[X]\öX[^ôKY‹õ›[ô\õﬁH›XöXÿ[X⁄^ã\õﬁKX€€ôöY JHÇàà
+›XöXÿ[X⁄^ãY\ö]ôK\õﬁK\ô\]Y\›YÇàà
+›XöXÿ[X⁄^ãY\ö]ôK\õﬁH›XöXÿ[X⁄^ãY\ö]ôK\õﬁKX€€ôöY JHÇàà
+›XöXÿ[X⁄^ãX€€ú›[YK\õﬁK\ô\]Y\›YÇàà
+›XöXÿ[X⁄^ãX€€ú›[YK\õﬁHÇàà›XöXÿ[X⁄^ãX€€ú›[YK\õﬁKX€€ôöY JHÇàà
+›XöXÿ[X⁄^ã[X\\õﬁK\ô\]Y\›YÇàà
+›XöXÿ[X⁄^ã[X\\õﬁH›XöXÿ[X⁄^ã[X\\õﬁKX€€ôöY JHÇàà
+›XöXÿ[X⁄^ãYõ‹\õﬁK\ô\]Y\›YÇàà
+›XöXÿ[X⁄^ãYõ‹\õﬁH›XöXÿ[X⁄^ãYõ‹\õﬁKZY
+JHÇàà
+›XöXÿ[X⁄^ãYÿÀ\õﬁY\À\ô\]Y\›YÇàà
+ôX›‹à	ÿ›XöXÿ[X⁄^ã]\Y]ò[YK\õﬁKYÿÀ]åHÇàà
+›XöXÿ[X⁄^ãYÿÀ\õﬁY\ JJHÇàà
+›XöXÿ[X⁄^ãX]]ÀXö[ô\ô\]Y\›YÇàà
+
+€€ôÇàà
+
+›ö[ôœO»
+ôX›‹ã\ôYà›XöXÿ[X⁄^ãX]]ÀXö[ôX€€ôöY»
+HÇààòõ€€äHÇàà›XöXÿ[X⁄^ãX]]À[ÿúŸ\ùôKXõ›[ôXõ€€
+HÇàà
+
+›ö[ôœO»
+ôX›‹ã\ôYà›XöXÿ[X⁄^ãX]]ÀXö[ôX€€ôöY»
+HÇààõò]äHÇàà›XöXÿ[X⁄^ãX]]À[ÿúŸ\ùôKXõ›[ô[ò]
+HÇàà
+
+›ö[ôœO»
+ôX›‹ã\ôYà›XöXÿ[X⁄^ãX]]ÀXö[ôX€€ôöY»
+HÇààù€‹ôçäHÇàà›XöXÿ[X⁄^ãX]]À[ÿúŸ\ùôKXõ›[ô]€‹ôç
+HÇàà
+
+›ö[ôœO»
+ôX›‹ã\ôYà›XöXÿ[X⁄^ãX]]ÀXö[ôX€€ôöY»
+HÇààò⁄\óäHÇàà›XöXÿ[X⁄^ãX]]À[ÿúŸ\ùôKXõ›[ôX⁄\äHÇàà
+
+›ö[ôœO»
+ôX›‹ã\ôYà›XöXÿ[X⁄^ãX]]ÀXö[ôX€€ôöY»
+HÇààö[ùäHÇàà›XöXÿ[X⁄^ãX]]À[ÿúŸ\ùôKXõ›[ôZ[ù
+HÇàà
+[ŸH›XöXÿ[X⁄^ãX]]À[ÿúŸ\ùôKXõ›[ôY‹õ›[ô
+JHÇàà›XöXÿ[X⁄^ãX]]ÀXö[ôX€€ôöY»Çà
+ »X[ô€TSò[YH
+€€\[Yò[YH[ùûJH
+ »äJHÇàà
+›XöXÿ[X⁄^ãXÿ[\ô\]Y\›YÇàà
+›XöXÿ[X⁄^ãXÿ[Y‹õ›[ôZ€H›XöXÿ[X⁄^ãXÿ[X€€ôöY JHÇàà
+›XöXÿ[X⁄^ã[ÿúŸ\ùôKX[»Çàà
+›XöXÿ[X⁄^ã[ÿúŸ\ùôKX[Y‹õ›[ôÇàà›XöXÿ[X⁄^ã]ò[Y]YZ€KX€€ú›[Y\ú JHÇàà
+›XöXÿ[X⁄^ã\Ÿ[X›Y]\YZ€HÇàà
+›XöXÿ[X⁄^ãYõ‹òŸK]\YZ€H›XöXÿ[X⁄^ã\Ÿ[X›Y]\YZ€JJHÇàà
+[ŸHà
+ »X[ô€TSò[YH
+€€\[Yò[YH[ùûJH
+ »äJJHÇàäô]€[ôJHÇàBà⁄\ôBà[\‹ù»HX\ôúõ€S\›à»
+ô\⁄YX[€T]€K
+[ô^€JJBà
+[ô^€JHHö\ Héà[ù
+HãóH€\¬àBàYôôX›]ôR[\‹ù»H\›ô\⁄YX[⁄[[\‹ù»[\‹ù¬Çù\›ô\⁄YX[⁄[[\‹ù¬àéàX\ìX\›ö[ô»
+[ùô\⁄YX[€T[äBàOàX\ìX\›ö[ô»
+[ùô\⁄YX[€T[äBà⁄YàYö[ôY
+’PíP–S–“Vó’T’‘ëT“QPS‘“S’Sê”’ëTëQ
+Bù\›ô\⁄YX[⁄[[\‹ù»»HX\ô[\BàŸ[ŸBù\›ô\⁄YX[⁄[[\‹ù»HYàŸ[ôYÇÇù\Y€Q‹õ›[ôúöYŸTÿ‹ö\éà›ö[ô¬ù\Y€Q‹õ›[ôúöYŸTÿ‹ö\H[õ[ô\¬à»à»Kÿö[ã‹⁄ÇààÇàúŸ]]HÇààÇàòúöYŸWŸ\úõ‹ä
+H»Çààö[ùà	 ÿﬁãXúöYŸKY\úõ‹ã]åH	\»	\ Wâ»âWàâóàÇàà^]â◊àÇàüHÇààÇàöYà»^àâ–’PíP–S–“Vó’TQ‘ïSìëTéã_WàN»[àÇààúöYŸWŸ\úõ‹à–÷ãUTQPîíQ—KP””ëíQ»ù[õô\àçÇàôöHÇàöYà»^àâ–’PíP–S–“Vó–Q—W—UQTéã_WàN»[àÇààúöYŸWŸ\úõ‹à–÷ãUTQPîíQ—KP””ëíQ»YŸKY]Y\àçÇàôöHÇàöYà»^àâ–’PíP–S–“Vó’TQ‘”’Tê—Nã_WàN»[àÇààúöYŸWŸ\úõ‹à–÷ãUTQPîíQ—KP””ëíQ»€›\òŸHçÇàôöHÇàöYà»^àâ–’PíP–S–“Vó’TQ“Sê”QNã_WàN»[àÇààúöYŸWŸ\úõ‹à–÷ãUTQPîíQ—KP””ëíQ»[ò€YHçÇàôöHÇàöYà»^àâ–’PíP–S–“Vó’TQ–””î’SQTéã_WàN»[àÇààúöYŸWŸ\úõ‹à–÷ãUTQPîíQ—KP””ëíQ»€€ú›[Y\àçÇàôöHÇàöYà»^àâ–’PíP–S–“Vó’TQ‘P“—Uã_WàN»[àÇààúöYŸWŸ\úõ‹à–÷ãUTQPîíQ—KP””ëíQ»X⁄Ÿ]çÇàôöHÇàöYà»H^â’PíP–S–“Vó’TQ‘ïSìëTóàHÇàà»HYâ’PíP–S–“Vó–Q—W—UQTóàHÇàà»HYàâ’PíP–S–“Vó’TQ‘”’Tê—WàHÇàà»HYâ’PíP–S–“Vó’TQ“Sê”QWàHÇàà»HYàâ’PíP–S–“Vó’TQ‘P“—UàN»[àÇààúöYŸWŸ\úõ‹à–÷ãUTQPîíQ—KP””ëíQ»[ùò[Y\]çÇàôöHÇààÇàòúöYŸW€[ŸOI–’PíP–S–“Vó’TQ”S—NãY‹õ›[ôHÇàòúöYŸW‹ô\›[›[\HÇàòúöYŸW€Y]W›[\HÇàòúöYŸW€X\Y›[\HÇàòúöYŸW‹›‹ôW€ÿ⁄œHÇàòúöYŸW‹›‹ôW€ÿ⁄◊€›€ô\èHÇàòúöYŸW‹›‹ôW€ÿ⁄◊ÿX‹]Z\ôYLÇàòúöYŸWÿ›\úô[ù‹õﬁWÿû]\œLÇàòúöYŸW‹X⁄Ÿ]‹Xõ\⁄YLÇàòÿ\ŸHâúöYŸW€[ŸWà[àÇàà‹õ›[ô
+HÇààŒ»ÇààX\Y‹õ›[ô
+HÇààYà»^àâ–’PíP–S–“Vó’TQ”PTTéã_WàN»[àÇààúöYŸWŸ\úõ‹à–÷ãUTQPîíQ—KP””ëíQ»X\\àçÇààöHÇààŒ»ÇààX]\öX[^ôK\õﬁJHÇààYà»^àâ–’PíP–S–“Vó’TQ‘ëT’S‘P“—Uã_WàHÇàà»^àâ–’PíP–S–“Vó’TQ‘ëT’S”QUNã_WàHÇàà»^àâ–’PíP–S–“Vó’TQ‘ì÷W“Qã_WàHÇàà»^àâ–’PíP–S–“Vó’TQ‘ì÷W‘P“—U”êSQNã_WàHÇàà»^àâ–’PíP–S–“Vó’TQ‘ì÷W”QUW”êSQNã_WàHÇàà»^àâ–’PíP–S–“Vó’TQ‘ì÷W‘TëSï“Qã_WàHÇàà»^àâ–’PíP–S–“Vó’TQ‘ì÷W‘’‘ëW—Téã_WàN»[àÇààúöYŸWŸ\úõ‹à–÷ãUTQPîíQ—KP””ëíQ»õﬁKX€€ôöY»çÇààöHÇààYà»HYâ’PíP–S–“Vó’TQ‘ì÷W‘’‘ëW—TóàN»[àÇààúöYŸWŸ\úõ‹à–÷ãUTQPîíQ—KP””ëíQ»õﬁK\›‹ôHçÇààöHÇààÿ\ŸHâ’PíP–S–“Vó’TQ‘ì÷W“Qà[àÇàà
+ñ»PKVòK^åNWÀWJà
+HÇààúöYŸWŸ\úõ‹à–÷ãUTQPîíQ—KTì÷HõﬁKZYçHŒ»Çàà\ÿX»Çààÿ\ŸHâ’PíP–S–“Vó’TQ‘ì÷W‘TëSï“Qà[àÇààäHŒ»Çàà
+ñ»PKVòK^åNWÀWJü	… HÇààúöYŸWŸ\úõ‹à–÷ãUTQPîíQ—KTì÷HõﬁK\\ô[ùZYçHŒ»Çàà\ÿX»ÇààYà»â»–’PíP–S–“Vó’TQ‘ì÷W“QWàY›çHÇàà»â»–’PíP–S–“Vó’TQ‘ì÷W‘TëSï“QWàY›çHÇàà»YHâ’PíP–S–“Vó’TQ‘ëT’S‘P“—UàHÇàà»YHâ’PíP–S–“Vó’TQ‘ëT’S”QUWàN»[àÇààúöYŸWŸ\úõ‹à–÷ãUTQPîíQ—KTì÷HõﬁKY^\›À[‹ã]€À[€ô»çHÇààöHÇààÿ\ŸHâ’PíP–S–“Vó’TQ‘ëT’S‘P“—Uà[àÇààâ’PíP–S–“Vó’TQ‘ì÷W‘’‘ëW—Tóã›\Y\õﬁKJãòö[äHŒ»Çàà
+äHúöYŸWŸ\úõ‹à–÷ãUTQPîíQ—KP””ëíQ»õﬁK\X⁄Ÿ]\]çŒ»Çàà\ÿX»Çààÿ\ŸHâ’PíP–S–“Vó’TQ‘ëT’S”QUWà[àÇààâ’PíP–S–“Vó’TQ‘ì÷W‘’‘ëW—Tóã›\Y\õﬁKJãõY]JHŒ»Çàà
+äHúöYŸWŸ\úõ‹à–÷ãUTQPîíQ—KP””ëíQ»õﬁK[Y]K\]çŒ»Çàà\ÿX»ÇààõﬁW€X^ÿ€›[ùI–’PíP–S–“Vó’TQ‘ì÷W”PV–”’SïãLçMüHÇààõﬁW€X^ÿû]\œI–’PíP–S–“Vó’TQ‘ì÷W”PV–ñUTŒãMçÃLçHÇààÿ\ŸHâõﬁW€X^ÿ€›[ùà[àÇàà	…ﬂ
+ñ»LNWJäHúöYŸWŸ\úõ‹à–÷ãUTQPîíQ—KTUS’H€›[ùÃ»Œ»Çàà\ÿX»Çààÿ\ŸHâõﬁW€X^ÿû]\◊à[àÇàà	…ﬂ
+ñ»LNWJäHúöYŸWŸ\úõ‹à–÷ãUTQPîíQ—KTUS’Hû]\»Ã»Œ»Çàà\ÿX»ÇààYà»âõﬁW€X^ÿ€›[ùà[HHÇàà»âõﬁW€X^ÿ€›[ùàY›çMLÕàHÇàà»âõﬁW€X^ÿû]\◊à[HHÇàà»âõﬁW€X^ÿû]\◊àY›LÃÕÕNçN»[àÇààúöYŸWŸ\úõ‹à–÷ãUTQPîíQ—KTUS’Hò[ôŸHÃ»ÇààöHÇààúöYŸW‹ô\›[›[\Wâ’PíP–S–“Vó’TQ‘ëT’S‘P“—Uù\â	àÇààúöYŸW€Y]W›[\Wâ’PíP–S–“Vó’TQ‘ëT’S”QUKù\â	àÇààYà»YHâúöYŸW‹ô\›[›[\àHÇàà»YHâúöYŸW€Y]W›[\àN»[àÇààúöYŸWŸ\úõ‹à–÷ãUTQPîíQ—KTì÷HõﬁK][\Y^\›»çHÇààöHÇààŒ»Çàà
+äHÇààúöYŸWŸ\úõ‹à–÷ãUTQPîíQ—KTì÷H[ùò[Y[[ŸHçHÇààŒ»Çàô\ÿX»ÇààÇàòúöYŸW›\I
+Z›[\Yâ’TTéãK›\Kÿ›XöXÿ[X⁄^ãXúöYŸKñäHÇààúöYŸWŸ\úõ‹à–÷ãUTQPîíQ—KP””ëíQ»[\\àçÇàöYà»âúöYŸW€[ŸWàHX\Y‹õ›[ôN»[àÇààúöYŸW€X\Y›[\WâúöYŸW›\€X\Yòö[óàÇàôöHÇàòúöYŸWÿ€X[ù\
+
+H»ÇààõHYàâúöYŸW›\‹››]àâúöYŸW›\‹›\úóàâúöYŸW€X\Y›[\àÇààõY\àâúöYŸW›\àèãŸ]ã€ù[ùYHÇààYà»âúöYŸW€[ŸWàHX]\öX[^ôK\õﬁHH	âàÇàà»[àâúöYŸW‹ô\›[›[\àN»[àÇààõHYàâúöYŸW‹ô\›[›[\àÇààöHÇààYà»âúöYŸW€[ŸWàHX]\öX[^ôK\õﬁHH	âàÇàà»[àâúöYŸW€Y]W›[\àN»[àÇààõHYàâúöYŸW€Y]W›[\àÇààöHÇààYà»âúöYŸW‹›‹ôW€ÿ⁄◊ÿX‹]Z\ôYàY\HHN»[àÇààõHYàâúöYŸW‹›‹ôW€ÿ⁄◊€›€ô\óàÇààõY\àâúöYŸW‹›‹ôW€ÿ⁄◊àèãŸ]ã€ù[ùYHÇààúöYŸW‹›‹ôW€ÿ⁄◊ÿX‹]Z\ôYLÇààöHÇàüHÇàùò\úöYŸWÿ€X[ù\VUTSïTìHÇààÇàòúöYŸWÿX‹]Z\ôW‹õﬁW‹›‹ôW€ÿ⁄ 
+H»ÇààúöYŸW‹›‹ôW€ÿ⁄œWâ’PíP–S–“Vó’TQ‘ì÷W‘’‘ëW—TãÀù\Y\õﬁK\›‹ôKõÿ⁄◊àÇààúöYŸW‹›‹ôW€ÿ⁄◊€›€ô\èWâúöYŸW‹›‹ôW€ÿ⁄À€›€ô\óàÇààÿ⁄◊ÿ][\LÇàà⁄[HHZŸ\àâúöYŸW‹›‹ôW€ÿ⁄◊àèãŸ]ã€ù[»»Çààÿ⁄◊ÿ][\I
+
+ÿ⁄◊ÿ][\
+»JJHÇààÿ⁄◊€›€ô\ó‹YHÇààYà»YàâúöYŸW‹›‹ôW€ÿ⁄◊€›€ô\óàN»[àÇààQîœHôXY\àÿ⁄◊€›€ô\ó‹YâúöYŸW‹›‹ôW€ÿ⁄◊€›€ô\óàùYHÇààöHÇààÿ\ŸHâÿ⁄◊€›€ô\ó‹Yà[àÇàà	…ﬂ
+ñ»LNWJäHÇààYà»âÿ⁄◊ÿ][\àYŸHLN»[àÇààõHYàâúöYŸW‹›‹ôW€ÿ⁄◊€›€ô\óàÇààõY\àâúöYŸW‹›‹ôW€ÿ⁄◊àèãŸ]ã€ù[ùYHÇààöHÇààŒ»Çàà
+äHÇààYàH⁄[Lâÿ⁄◊€›€ô\ó‹YàèãŸ]ã€ù[»[àÇààõHYàâúöYŸW‹›‹ôW€ÿ⁄◊€›€ô\óàÇààõY\àâúöYŸW‹›‹ôW€ÿ⁄◊àèãŸ]ã€ù[ùYHÇààöHÇààŒ»Çàà\ÿX»ÇààYà»âÿ⁄◊ÿ][\àYŸHLN»[àÇààúöYŸWŸ\úõ‹à–÷ãUTQPîíQ—KTUS’Hÿ⁄À][Y[›]Ã»ÇààöHÇàà€Y\åHÇàà€ôHÇààúöYŸW‹›‹ôW€ÿ⁄◊ÿX‹]Z\ôYLHÇààYàHö[ùà	…\◊â»â	ààâúöYŸW‹›‹ôW€ÿ⁄◊€›€ô\óé»[àÇààúöYŸWŸ\úõ‹à–÷ãUTQPîíQ—KTUS’Hÿ⁄À[›€ô\àÃ»ÇààöHÇàüHÇààÇàòúöYŸW€YX\›\ôW‹õﬁW‹›‹ôJ
+H»ÇààúöYŸW‹õﬁW‹›‹ôWÿ€›[ùLÇààúöYŸWÿ›\úô[ù‹õﬁWÿû]\œLÇààõ‹àõﬁW€Y]H[àâ’PíP–S–“Vó’TQ‘ì÷W‘’‘ëW—Tóã›\Y\õﬁKJãõY]N»»Çàà»YàâõﬁW€Y]WàH€€ù[ùYHÇààõﬁW‹X⁄Ÿ]I‹õﬁW€Y]IKõY]_Kòö[àÇàà»YàâõﬁW‹X⁄Ÿ]àH€€ù[ùYHÇààõﬁW‹X⁄Ÿ]ÿû]\œI
+ÿ»X»âõﬁW‹X⁄Ÿ]ààY	»	 HÇààõﬁW€Y]Wÿû]\œI
+ÿ»X»âõﬁW€Y]WààY	»	 HÇààúöYŸW‹õﬁW‹›‹ôWÿ€›[ùI
+
+úöYŸW‹õﬁW‹›‹ôWÿ€›[ù
+»JJHÇààúöYŸWÿ›\úô[ù‹õﬁWÿû]\œI
+
+úöYŸWÿ›\úô[ù‹õﬁWÿû]\»
+»õﬁW‹X⁄Ÿ]ÿû]\»
+»õﬁW€Y]Wÿû]\ JHÇàà€ôHÇàüHÇààÇàöYà»âúöYŸW€[ŸWàHX]\öX[^ôK\õﬁHN»[àÇààúöYŸWÿX‹]Z\ôW‹õﬁW‹›‹ôW€ÿ⁄»ÇààYà»YHâ’PíP–S–“Vó’TQ‘ëT’S‘P“—UàHÇàà»YHâ’PíP–S–“Vó’TQ‘ëT’S”QUWàN»[àÇààúöYŸWŸ\úõ‹à–÷ãUTQPîíQ—KTì÷HXõ\⁄X€€ôõX›çHÇààöHÇààYà»â’PíP–S–“Vó’TQ‘ì÷W‘TëSï“QàOHàN»[àÇàà\ô[ù‹X⁄Ÿ]Wâ’PíP–S–“Vó’TQ‘ì÷W‘’‘ëW—Tã›\Y\õﬁKI’PíP–S–“Vó’TQ‘ì÷W‘TëSï“Qòö[óàÇàà\ô[ù€Y]OWâ’PíP–S–“Vó’TQ‘ì÷W‘’‘ëW—Tã›\Y\õﬁKI’PíP–S–“Vó’TQ‘ì÷W‘TëSï“QõY]WàÇààYà»HYàâ\ô[ù‹X⁄Ÿ]àH»HYàâ\ô[ù€Y]WàHÇààH‹ô\Q\Hóà◊
+ÿﬁã\õﬁK[Y]K]åHâ’PíP–S–“Vó’TQ‘ì÷W‘TëSï“Qàäü–KVòK^åNWÀWJ WàX›]ôW
+Iàâ\ô[ù€Y]Wé»[àÇààúöYŸWŸ\úõ‹à–÷ãUTQPîíQ—KTì÷H[òX›]ôK\\ô[ùçHÇààöHÇààöHÇààúöYŸW€YX\›\ôW‹õﬁW‹›‹ôHÇààYà»âúöYŸW‹õﬁW‹›‹ôWÿ€›[ùàYŸHâõﬁW€X^ÿ€›[ùàN»[àÇààúöYŸWŸ\úõ‹à–÷ãUTQPîíQ—KTUS’H€›[ùY^ŸYYYÃ»ÇààöHÇààYà»âúöYŸWÿ›\úô[ù‹õﬁWÿû]\◊àY›âõﬁW€X^ÿû]\◊àN»[àÇààúöYŸWŸ\úõ‹à–÷ãUTQPîíQ—KTUS’Hû]\ÀX[ôXYKY^ŸYYYÃ»ÇààöHÇàôöHÇààÇàöYà»âúöYŸW€[ŸWàHX]\öX[^ôK\õﬁHN»[àÇààYŸWŸ]Y\èWâ’PíP–S–“Vó–Q—W—UQTóàâ’PíP–S–“Vó’TQ‘ïSìëTóàÇàà]åÇààKX›XöXÿ[Z[\‹ùWâ’PíP–S–“Vó’TQ–””î’SQTóàÇààKX›XöXÿ[]\õKYö[OWâ’PíP–S–“Vó’TQ‘P“—UàÇààKX›XöXÿ[\ô\›[]\õKYö[OWâúöYŸW‹ô\›[›[\àÇààK[õÀ[Xúò\öY\»ÇààK[õÀ]‹ö]KZ[ù\ôòXŸ\»ÇààZHâ’PíP–S–“Vó’TQ“Sê”QWàÇààâ’PíP–S–“Vó’TQ‘”’Tê—WàÇàààâúöYŸW›\‹››]àèàâúöYŸW›\‹›\úóàÇàô[Yà»âúöYŸW€[ŸWàHX\Y‹õ›[ôN»[àÇààYŸWŸ]Y\èWâ’PíP–S–“Vó–Q—W—UQTóàâ’PíP–S–“Vó’TQ‘ïSìëTóàÇàà]åÇààKX›XöXÿ[Z[\‹ùWâ’PíP–S–“Vó’TQ”PTTóàÇààKX›XöXÿ[]\õKYö[OWâ’PíP–S–“Vó’TQ‘P“—UàÇààKX›XöXÿ[\ô\›[]\õKYö[OWâúöYŸW€X\Y›[\àÇààK[õÀ[Xúò\öY\»ÇààK[õÀ]‹ö]KZ[ù\ôòXŸ\»ÇààZHâ’PíP–S–“Vó’TQ“Sê”QWàÇààâ’PíP–S–“Vó’TQ‘”’Tê—WàÇàààâúöYŸW›\‹››]àèàâúöYŸW›\‹›\úóàÇààX\\ó‹›]\œI»ÇààYà»âX\\ó‹›]\◊à[ôHN»[àÇààúöYŸWŸ\úõ‹à–÷ãUTQPîíQ—KTïSìëTãQVUâX\\ó‹›]\◊àÃÇààöHÇààYà»\»âúöYŸW›\‹››]àHÇàà»\»âúöYŸW›\‹›\úóàHÇàà»H\»âúöYŸW€X\Y›[\àN»[àÇààúöYŸWŸ\úõ‹à–÷ãUTQPîíQ—KQTïKS’UUX\Y\ô\›[ÃHÇààöHÇààYŸWŸ]Y\èWâ’PíP–S–“Vó–Q—W—UQTóàâ’PíP–S–“Vó’TQ‘ïSìëTóàÇàà]åÇààKX›XöXÿ[Z[\‹ùWâ’PíP–S–“Vó’TQ–””î’SQTóàÇààKX›XöXÿ[]\õKYö[OWâúöYŸW€X\Y›[\àÇààK[õÀ[Xúò\öY\»ÇààK[õÀ]‹ö]KZ[ù\ôòXŸ\»ÇààZHâ’PíP–S–“Vó’TQ“Sê”QWàÇààâ’PíP–S–“Vó’TQ‘”’Tê—WàÇàààâúöYŸW›\‹››]àèàâúöYŸW›\‹›\úóàÇàô[ŸHÇààYŸWŸ]Y\èWâ’PíP–S–“Vó–Q—W—UQTóàâ’PíP–S–“Vó’TQ‘ïSìëTóàÇàà]åÇààKX›XöXÿ[Z[\‹ùWâ’PíP–S–“Vó’TQ–””î’SQTóàÇààKX›XöXÿ[]\õKYö[OWâ’PíP–S–“Vó’TQ‘P“—UàÇààK[õÀ[Xúò\öY\»ÇààK[õÀ]‹ö]KZ[ù\ôòXŸ\»ÇààZHâ’PíP–S–“Vó’TQ“Sê”QWàÇààâ’PíP–S–“Vó’TQ‘”’Tê—WàÇàààâúöYŸW›\‹››]àèàâúöYŸW›\‹›\úóàÇàôöHÇàúù[õô\ó‹›]\œI»ÇàöYà»âù[õô\ó‹›]\◊à[ôHN»[àÇààúöYŸWŸ\úõ‹à–÷ãUTQPîíQ—KTïSìëTãQVUâù[õô\ó‹›]\◊àÃÇàôöHÇàöYà»\»âúöYŸW›\‹›\úóàN»[àÇààúöYŸWŸ\úõ‹à–÷ãUTQPîíQ—KQTïKS’UU›\úàÃHÇàôöHÇàöYà»âúöYŸW€[ŸWàHX]\öX[^ôK\õﬁHN»[àÇààYà»\»âúöYŸW›\‹››]àHÇàà»H\»âúöYŸW‹ô\›[›[\àN»[àÇààúöYŸWŸ\úõ‹à–÷ãUTQPîíQ—KQTïKS’UUõﬁK\ô\›[ÃHÇààöHÇààö[ùà	» ÿﬁã\õﬁK[Y]K]åHâ\◊àâ\◊àX›]ôJWâ»Çààâ’PíP–S–“Vó’TQ‘ì÷W“QàÇààâ’PíP–S–“Vó’TQ‘ì÷W‘TëSï“QààâúöYŸW€Y]W›[\àÇààúöYŸWŸ\úõ‹à–÷ãUTQPîíQ—KTì÷HY]K][\]‹ö]HçHÇààúöYŸW€ô]◊‹X⁄Ÿ]ÿû]\œI
+ÿ»X»âúöYŸW‹ô\›[›[\ààY	»	 HÇààúöYŸW€ô]◊€Y]Wÿû]\œI
+ÿ»X»âúöYŸW€Y]W›[\ààY	»	 HÇààúöYŸW‹õ⁄ôX›Y‹õﬁWÿû]\œI
+
+úöYŸWÿ›\úô[ù‹õﬁWÿû]\»
+»úöYŸW€ô]◊‹X⁄Ÿ]ÿû]\»
+»úöYŸW€ô]◊€Y]Wÿû]\ JHÇààYà»âúöYŸW‹õ⁄ôX›Y‹õﬁWÿû]\◊àY›âõﬁW€X^ÿû]\◊àN»[àÇààúöYŸWŸ\úõ‹à–÷ãUTQPîíQ—KTUS’Hû]\ÀY^ŸYYYÃ»ÇààöHÇààYàHàâúöYŸW‹ô\›[›[\àâ’PíP–S–“Vó’TQ‘ëT’S‘P“—UàèãŸ]ã€ù[»[àÇààúöYŸWŸ\úõ‹à–÷ãUTQPîíQ—KTì÷HXõ\⁄X€€ôõX›çHÇààöHÇààúöYŸW‹X⁄Ÿ]‹Xõ\⁄YLHÇààYàHàâúöYŸW€Y]W›[\àâ’PíP–S–“Vó’TQ‘ëT’S”QUWàèãŸ]ã€ù[»[àÇààYà»âúöYŸW‹X⁄Ÿ]‹Xõ\⁄YàY\HHN»[àÇààõHYàâ’PíP–S–“Vó’TQ‘ëT’S‘P“—UàÇààúöYŸW‹X⁄Ÿ]‹Xõ\⁄YLÇààöHÇààúöYŸWŸ\úõ‹à–÷ãUTQPîíQ—KTì÷HXõ\⁄X€€ôõX›çHÇààöHÇààõHYàâúöYŸW‹ô\›[›[\àÇààõHYàâúöYŸW€Y]W›[\àÇààúöYŸW‹ô\›[›[\HÇààúöYŸW€Y]W›[\HÇààYà»H\»â’PíP–S–“Vó’TQ‘ëT’S‘P“—UàHÇàà»H\»â’PíP–S–“Vó’TQ‘ëT’S”QUWàN»[àÇààúöYŸWŸ\úõ‹à–÷ãUTQPîíQ—KTì’–””õﬁK\Xõ\⁄ÃàÇààöHÇààö[ùà	 ÿﬁã\õﬁK]åHâ\◊àâ\◊äWâ»Çààâ’PíP–S–“Vó’TQ‘ì÷W“QàÇààâ’PíP–S–“Vó’TQ‘ì÷W‘P“—U”êSQWàÇàà^]ÇàôöHÇàõ[ôWÿ€›[ùI
+ÿ»[âúöYŸW›\‹››]ààY	»	»
+HÇàöYà»â[ôWÿ€›[ùàOHHN»[àÇààúöYŸWŸ\úõ‹à–÷ãUTQPîíQ—KQTïKS’UU[ôKX€›[ùÃHÇàôöHÇàíQîœHôXY\à‹õ›[ô‹ô\›[âúöYŸW›\‹››]àÇàòÿ\ŸHâ‹õ›[ô‹ô\›[à[àÇààùY_ò[ŸJHÇààö[ùà	 ÿﬁãY‹õ›[ô]åHõ€€	\ Wâ»â‹õ›[ô‹ô\›[àÇààŒ»Çàà	…ﬂ
+ñ»LNWJäHÇààúöYŸWŸ\úõ‹à–÷ãUTQPîíQ—KQTïKS’UU‹õ›[ô\ô\›[ÃHÇààŒ»Çàà
+äHÇààö[ùà	 ÿﬁãY‹õ›[ô]åHò]	\ Wâ»â‹õ›[ô‹ô\›[àÇààŒ»Çàô\ÿX»ÇàBÇúô[ô\îô\⁄YX[€\»éà›ö[ô»Oàô\⁄YX[€XŸT[àOà‘›ö[ô◊Búô[ô\îô\⁄YX[€\»\ùYòX›Hÿ\ŸBàô\⁄YX[€XŸSõ›\XÿXõH»Oà◊Bàô\⁄YX[€XŸT[õôY€\»Oà€€òÿ]à»]€‹›\ôHHô\⁄YX[€P€‹›\ôH€Bàô\⁄YX[Hô\⁄YX[€‹›\ôT^[ÿY€‹›\ôBàöY[›Yôö^ò[YHBàúô\⁄YX[\€XŸKZ€KHà
+ »⁄›»[ô^
+ »ãHà
+ »›Yôö^
+ »éàà
+ »ò[YBà[à»öY[öYà
+ô\⁄YX[€RY€JBàöY[ú]à
+ô\⁄YX[€T]€JBàöY[òõÿ⁄Ÿ\ú»à
+ô[ô\êõÿ⁄Ÿ\ú»	ô\⁄YX[€Põÿ⁄Ÿ\ú»€JBàöY[õX]\öX[^ò][€ààò⁄X⁄ŸYÇàöY[ò€‹ŸYàùùYHÇàöY[ú€›\òŸKX€‹ŸYà	àô[ô\êõ€€X[à
+ô\⁄YX[€T€›\òŸP€‹ŸY€JBàöY[úX⁄Ÿ]X€‹ŸYàùùYHÇàöY[ô[ùö\õ€õY[ùXXöHà	àYàô\⁄YX[€T€›\òŸP€‹ŸY€Bà[àõõ€ôHÇà[ŸHõ[XôK[YùYY^X⁄]Y[ùö\õ€õY[ù]åHÇàöY[ô[ùö\õ€õY[ùX\ö]Hà	à⁄›»
+ô\⁄YX[€Q[ùö\õ€õY[ù\ö]H€JBàöY[ô[ùö\õ€õY[ùXö[ô[ôÀXXöHà	àô\⁄YX[€P]]€X]X—[ùö\õ€õY[ùö[ô[ô–XöH€BàöY[õY]KYúôYHàùùYHÇàöY[ù\X⁄X⁄ŸYàùùYHÇàöY[òÿ[XõKXXöHà	àô[ô\îô\⁄YX[€Pÿ[XõPXöH
+ô\⁄YX[€Pÿ[XõPXöH€JBàöY[ò\ùYòX›à	àYà\ùYòX›OHúX⁄Ÿ]]åàÇà[àô\⁄YX[€TX⁄Ÿ]ò[YH[ô^à[ŸHõõ€ôHÇàöY[ô\ôX›Y\[ô[òﬁKX€›[ùà	à⁄›»
+[ô›	ô\⁄YX[\ôX›\[ô[ò⁄Y\»ô\⁄YX[
+BàöY[ô\ôX›Y\[ô[ò⁄Y\»à	àô[ô\êõÿ⁄Ÿ\ú»
+ô\⁄YX[\ôX›\[ô[ò⁄Y\»ô\⁄YX[
+BàöY[ô\[ô[òﬁK\€XŸHàò⁄X⁄ŸY]\JŸYö[ö][€ãXõŸK]åHÇàöY[úô\€€ôYY\[ô[òﬁKX€›[ùà	à⁄›»
+[ô›	ô\⁄YX[€‹›\ôTô\€€ôY\[ô[ò⁄Y\»€‹›\ôJBàöY[úô\€€ôYY\[ô[ò⁄Y\»à	àô[ô\êõÿ⁄Ÿ\ú»
+ô\⁄YX[€‹›\ôTô\€€ôY\[ô[ò⁄Y\»€‹›\ôJBàöY[ô^[ôYYYö[ö][€ú»à	àô[ô\êõÿ⁄Ÿ\ú»
+ô\⁄YX[€‹›\ôQ^[ôYYö[ö][€ú»€‹›\ôJBàöY[ú⁄Y€ò]\ôK[X]ô\»à	àô[ô\êõÿ⁄Ÿ\ú»
+ô\⁄YX[€‹›\ôT⁄Y€ò]\ôSX]ô\»€‹›\ôJBàöY[ô^€YY\ô\Ÿ[ù][€ãY\[ô[òﬁKX€›[ùà	à⁄›¬à
+[ô›	ô\⁄YX[€‹›\ôQ^€YYô\Ÿ[ù][€ë\[ô[ò⁄Y\»€‹›\ôJBàöY[ô^€YY\ô\Ÿ[ù][€ãY\[ô[ò⁄Y\»à	àô[ô\êõÿ⁄Ÿ\ú¬à
+ô\⁄YX[€‹›\ôQ^€YYô\Ÿ[ù][€ë\[ô[ò⁄Y\»€‹›\ôJBàöY[ù\Hà
+ô]T⁄›»	ô\⁄YX[\Hô\⁄YX[
+BàöY[ù\õHà
+ô]T⁄›»	ô\⁄YX[\õHô\⁄YX[
+BàBà
+[ô^€JHHö\ Héà[ù
+HãóH€\¬àBÇúô[ô\îô\⁄YX[€Pÿ[XõPXöHéàô\⁄YX[€Pÿ[XõPXöHOà›ö[ô¬úô[ô\îô\⁄YX[€Pÿ[XõPXöHHÿ\ŸBàô\⁄YX[€SÿúŸ\ùò][€ì€õHOàõõ€ôHÇàô\⁄YX[€U[ò\ûQ‹õ›[ô[[Z[ò][€à€ŸX»OÇàô[ô\îô\⁄YX[‹õ›[ô€ŸX»€ŸX¬à
+ »ã][ò\ûKY‹õ›[ôY[[Z[ò][€ã]åHÇàô\⁄YX[€S‹ô\ôY‹õ›[ô[ùö\õ€õY[ù[[Z[ò][€à€ŸX‹»OÇàõ‹ô\ôYHÇà
+ »[ù\òÿ[]Hä»à
+X\ô[ô\îô\⁄YX[‹õ›[ô€ŸX»€ŸX‹ Bà
+ »ãY‹õ›[ôY[ùö\õ€õY[ùY[[Z[ò][€ã]åHÇàô\⁄YX[€Q\[ô[ù‹õ›[ô[ùö\õ€õY[ù[[Z[ò][€àOÇàô\[ô[ùY‹õ›[ôY[ùö\õ€õY[ùY[[Z[ò][€ã]åHÇÇúô[ô\îô\⁄YX[‹õ›[ô€ŸX»éàô\⁄YX[‹õ›[ô€ŸX»Oà›ö[ô¬úô[ô\îô\⁄YX[‹õ›[ô€ŸX»Bà‹õ›[ô€ŸX—\ÿ‹ö\‹ìò[YHàô\⁄YX[‹õ›[ô€ŸX—\ÿ‹ö\‹ÇÇúô[ô\îô\⁄YX[‹õ›[ô€ŸX‘ôY⁄\›ûHéà›ö[ô¬úô[ô\îô\⁄YX[‹õ›[ô€ŸX‘ôY⁄\›ûHBà[ù\òÿ[]Hãà
+X\ô[ô\îô\⁄YX[‹õ›[ô€ŸX»[ô\⁄YX[‹õ›[ô€ŸX‹ BÇúô[ô\îÿ⁄[YQ‹õ›[ô€ŸX‘ôY⁄\›ûHéà›ö[ô¬úô[ô\îÿ⁄[YQ‹õ›[ô€ŸX‘ôY⁄\›ûHBàäYö[ôH›XöXÿ[X⁄^ãY‹õ›[ôX€ŸXÀ\ôY⁄\›ûK]åH	 Çà
+ »[ù€‹ô¬à
+X\
+ÿ⁄[YT›ö[ô»àô[ô\îô\⁄YX[‹õ›[ô€ŸX H[ô\⁄YX[‹õ›[ô€ŸX‹ Bà
+ »äJHÇÇúô[ô\îÿ⁄[YQ‹õ›[ô€ŸX—\ÿ‹ö\‹ú»éà›ö[ô¬úô[ô\îÿ⁄[YQ‹õ›[ô€ŸX—\ÿ‹ö\‹ú»Bà[õ[ô\»	à»äYö[ôH›XöXÿ[X⁄^ãY‹õ›[ôX€ŸXÀY\ÿ‹ö\‹úÀ]åHÇàà
+\›ÇàBà
+ »X\ô[ô\ë\ÿ‹ö\‹àô\⁄YX[‹õ›[ô€ŸX—\ÿ‹ö\‹ú¬à
+ »»à
+JHóBà⁄\ôBàô[ô\ë\ÿ‹ö\‹à\ÿ‹ö\‹àBàà
+ôX›‹àÇà
+ »ÿ⁄[YT›ö[ô»
+‹õ›[ô€ŸX—\ÿ‹ö\‹ìò[YH\ÿ‹ö\‹äBà
+ »àÇà
+ »ÿ⁄[YT›ö[ô¬à
+‹õ›[ô€ŸX—\ÿ‹ö\‹ìò[YH\ÿ‹ö\‹Çà
+ »ã][ò\ûKY‹õ›[ôY[[Z[ò][€ã]åHÇà
+Bà
+ »àÇà
+ »ÿ⁄[YT›ö[ô»
+‹õ›[ô€ŸX—\ÿ‹ö\‹ìò[YH\ÿ‹ö\‹à
+ »éàäBà
+ »àÇà
+ »‹õ›[ô€ŸX—\ÿ‹ö\‹ê\ô›[Y[ùò[Y]‹à\ÿ‹ö\‹Çà
+ »àÇà
+ »‹õ›[ô€ŸX—\ÿ‹ö\‹ê\ô›[Y[ùôZYöY\à\ÿ‹ö\‹Çà
+ »àÇà
+ »‹õ›[ô€ŸX—\ÿ‹ö\‹ë[ùûT\úŸ\à\ÿ‹ö\‹Çà
+ »àÇà
+ »‹õ›[ô€ŸX—\ÿ‹ö\‹ïò[YTôZYöY\à\ÿ‹ö\‹Çà
+ »äHÇÇúô\⁄YX[€P]]€X]X‘⁄[ô€Q‹õ›[ô€ŸX¬àéàô\⁄YX[€T[ÇàOàX^XôHô\⁄YX[‹õ›[ô€ŸX¬úô\⁄YX[€P]]€X]X‘⁄[ô€Q‹õ›[ô€ŸX»€Bàô\⁄YX[€T€›\òŸP€‹ŸY€HHõ›[ô¬àô\⁄YX[€Q[ùö\õ€õY[ù\ö]H€HœHHHõ›[ô¬à›\ù⁄\ŸHHÿ\ŸHô\⁄YX[€Pÿ[XõPXöH€HŸÇàô\⁄YX[€U[ò\ûQ‹õ›[ô[[Z[ò][€à€ŸX»Oàù\›€ŸX¬à»Oàõ›[ô¬Çúô\⁄YX[€T›\‹ù‘\ú⁄\›[ù\Yò[YTõﬁHéàô\⁄YX[€T[àOàõ€€úô\⁄YX[€T›\‹ù‘\ú⁄\›[ù\Yò[YTõﬁH€HBàô\⁄YX[€T›\‹ù–]]€X]X—‹õ›[ô[ùö\õ€õY[ù€Bàÿ\ŸHô\⁄YX[€Pÿ[XõPXöH€HŸÇàô\⁄YX[€U[ò\ûQ‹õ›[ô[[Z[ò][€à»OàùYBà»Oàò[ŸBÇúô\⁄YX[€T›\‹ù–]]€X]X—‹õ›[ô[ùö\õ€õY[ùéàô\⁄YX[€T[àOàõ€€úô\⁄YX[€T›\‹ù–]]€X]X—‹õ›[ô[ùö\õ€õY[ù€HBàÿ\ŸHô\⁄YX[€P]]€X]X‘⁄[ô€Q‹õ›[ô€ŸX»€HŸÇàù\›»OàùYBàõ›[ô»OÇàô\⁄YX[€T›\‹ù–]]€X]X”‹ô\ôY‹õ›[ô[ùö\õ€õY[ù€Bàô\⁄YX[€T›\‹ù–]]€X]X—\[ô[ù‹õ›[ô[ùö\õ€õY[ù€BÇúô\⁄YX[€T›\‹ù–]]€X]X—\[ô[ù‹õ›[ô[ùö\õ€õY[ùàéàô\⁄YX[€T[ÇàOàõ€€úô\⁄YX[€T›\‹ù–]]€X]X—\[ô[ù‹õ›[ô[ùö\õ€õY[ù€HBàõ›
+ô\⁄YX[€T€›\òŸP€‹ŸY€JBà	âàô\⁄YX[€Q[ùö\õ€õY[ù\ö]H€HàBà	âàô\⁄YX[€Q[ùö\õ€õY[ù\ö]H€HHô\⁄YX[€Q[ùö\õ€õY[ù[Z]à	âàô\⁄YX[€Pÿ[XõPXöH€BàOHô\⁄YX[€Q\[ô[ù‹õ›[ô[ùö\õ€õY[ù[[Z[ò][€ÇÇúô\⁄YX[€T›\‹ù–]]€X]X”‹ô\ôY‹õ›[ô[ùö\õ€õY[ùàéàô\⁄YX[€T[ÇàOàõ€€úô\⁄YX[€T›\‹ù–]]€X]X”‹ô\ôY‹õ›[ô[ùö\õ€õY[ù€HBàõ›
+ô\⁄YX[€T€›\òŸP€‹ŸY€JBà	âàô\⁄YX[€Q[ùö\õ€õY[ù\ö]H€HàBà	âàÿ\ŸHô\⁄YX[€Pÿ[XõPXöH€HŸÇàô\⁄YX[€S‹ô\ôY‹õ›[ô[ùö\õ€õY[ù[[Z[ò][€à€ŸX‹»OÇà[ô›€ŸX‹»OHô\⁄YX[€Q[ùö\õ€õY[ù\ö]H€Bà»Oàò[ŸBÇúô\⁄YX[€S‹ô\ôY‹õ›[ô[ùö\õ€õY[ù€ŸX‹¬àéàô\⁄YX[€T[ÇàOà‘ô\⁄YX[‹õ›[ô€ŸX◊Búô\⁄YX[€S‹ô\ôY‹õ›[ô[ùö\õ€õY[ù€ŸX‹»€HBàÿ\ŸHô\⁄YX[€Pÿ[XõPXöH€HŸÇàô\⁄YX[€S‹ô\ôY‹õ›[ô[ùö\õ€õY[ù[[Z[ò][€à€ŸX‹»Oà€ŸX‹¬à»Oà◊BÇúô\⁄YX[€P]]€X]X—[ùö\õ€õY[ùö[ô[ô–XöHéàô\⁄YX[€T[àOà›ö[ô¬úô\⁄YX[€P]]€X]X—[ùö\õ€õY[ùö[ô[ô–XöH€Bàô\⁄YX[€T›\‹ù–]]€X]X—\[ô[ù‹õ›[ô[ùö\õ€õY[ù€HBàô\[ô[ùY‹õ›[ôX⁄^ã[^Xÿ[Xö[ô[ôÀ]åHÇàô\⁄YX[€T›\‹ù–]]€X]X”‹ô\ôY‹õ›[ô[ùö\õ€õY[ù€HBàõ‹ô\ôYHÇà
+ »[ù\òÿ[]Hä»Çà
+X\ô[ô\îô\⁄YX[‹õ›[ô€ŸX»	àô\⁄YX[€S‹ô\ôY‹õ›[ô[ùö\õ€õY[ù€ŸX‹»€JBà
+ »ãX⁄^ã[^Xÿ[Xö[ô[ôÀ]åHÇà›\ù⁄\ŸHHÿ\ŸHô\⁄YX[€P]]€X]X‘⁄[ô€Q‹õ›[ô€ŸX»€HŸÇàù\›€ŸX»OÇàú⁄[ô€KHÇà
+ »ô[ô\îô\⁄YX[‹õ›[ô€ŸX»€ŸX¬à
+ »ãX⁄^ã[^Xÿ[Xö[ô[ôÀ]åHÇàõ›[ô»Oàõõ€ôHÇÇòòX⁄Ÿ[ôXõ‹ù⁄]éàòX⁄Ÿ[ôòZ[\ôP€\‹»Oà›ö[ô»Oà”HBòòX⁄Ÿ[ôXõ‹ù⁄]òZ[\ôP€\‹»Y\‹ÿYŸHHYùS»	[—\úõ‹à	\Ÿ\ë\úõ‹à	àê›XöXÿ[⁄^àòX⁄Ÿ[ô»à
+ »òZ[\ôP€ŸHòZ[\ôP€\‹»
+ »óNàà
+ »Y\‹ÿYŸBÇôòZ[\ôP€ŸHéàòX⁄Ÿ[ôòZ[\ôP€\‹»Oà›ö[ô¬ôòZ[\ôP€ŸHHÿ\ŸBà[ùò[Y€€ôöY›\ò][€àOàê–÷ãRSïêSQP””ëíQ»Çà[ùûTôZôX›YOàê–÷ãQSïñKTëRëP’QÇàòôU[ò]òZ[XõHOàê–÷ãSêëKUSêUêRSPìHÇàòôU[ú›\‹ùYôX]\ôHOàê–÷ãSêëKUSî’T‘ïQÇà[ô⁄[ôU[Y[›]Oàê–÷ãQSë“SëKUSQS’UÇàòôQ^X›][€ëòZ[YOàê–÷ãSêëKQêRSQÇà[ô⁄[ôTô\›[[ùò[YOàê–÷ãQSë“SëKTëT’SRSïêSQÇà[ú›\‹ùYõŸ‹ò[HOàê–÷ãUSî’T‘ïQÇàô\⁄YX[ô\]Z\ôYOàê–÷ãTëT“QPSTëTURTëQÇàô\⁄YX[^ò][€ëòZ[YOàê–÷ãTëT“QPSVêUS”ãQêRSQÇàÿ⁄[YS›Ÿ\ö[ô—òZ[YOàê–÷ãT–“SQKS’—TíSëÀQêRSQÇÇúô[ô\îõŸ‹ò[Héà€€\[YYàOà–€€\[YYóHOàZ]\à›ö[ô»›ö[ô¬úô[ô\îõŸ‹ò[H[ùûHYú»H¬àò[Y]P⁄^ê€‹ôPXöBàYö[ö][€ú»Hò]ô\úŸHô[ô\ëYö[ö][€àYú¬à\ôH	[õ[ô\»	à»é»Ÿ[ô\ò]YûH›XöXÿ[⁄^àåKåY]ãàÇàé»›]X»€‹›\ôH]Y]YûH›XöXÿ[⁄^ãàÇàé»⁄^à€‹ôHPíNàà
+ »⁄^ê€‹ôPXöUô\ú⁄[€àX€\ôY⁄^ê€‹ôPXöH
+ »ãàÇàà»X⁄^úÿ⁄[YHÇàBà
+ »Yö[ö][€ú¬à
+ »»ä\‹^Hà
+ »X[ô€TSò[YH
+€€\[Yò[YH[ùûJH
+ »äHÇàäô]€[ôJHÇàBÇúôXX⁄XõQYö[ö][€ú»éà–€€\[YYóHOà€€\[YYàOà
+–€€\[YYóK‘Sò[YWJBúôXX⁄XõQYö[ö][€ú»Yú»[ùûHBà]
+À‹ô\ôY[úô\€€ôY
+HHö\⁄]Ÿ]ô[\HŸ]ô[\H[ùûBà[à
+‹ô\ôYŸ]ù”\›[úô\€€ôY
+Bà⁄\ôBàYö[ö][€ú–ûSò[YHHX\ôúõ€S\› €€\[Yò[YHYãYäHYàHYú◊BÇàö\⁄]ŸY[à[úô\€€ôYYÇà€€\[Yò[YHYàŸ]õY[Xô\òŸY[àH
+ŸY[ã◊K[úô\€€ôY
+Bà›\ù⁄\ŸHBà]ŸY[ï⁄]›\úô[ùHŸ]ö[úŸ\ù
+€€\[Yò[YHYäHŸY[Çà
+ŸY[êYù\ë\[ô[ò⁄Y\À‹ô\ôY\[ô[ò⁄Y\À[úô\€€ôY\[ô[ò⁄Y\ HBàõ€ö\⁄]\[ô[òﬁBà
+ŸY[ï⁄]›\úô[ù◊K[úô\€€ôY
+Bà
+ôYô\ô[òŸYYö[ö][€ú»
+€€\[Y\õHYäJBà[à
+ŸY[êYù\ë\[ô[ò⁄Y\À‹ô\ôY\[ô[ò⁄Y\»
+ »ŸYóK[úô\€€ôY\[ô[ò⁄Y\ BÇàö\⁄]\[ô[òﬁH
+ŸY[ã‹ô\ôY[úô\€€ôY
+Hò[YBàò[YHŸ]õY[Xô\òŸY[àH
+ŸY[ã‹ô\ôY[úô\€€ôY
+Bà›\ù⁄\ŸHHÿ\ŸHX\õ€⁄›\ò[YHYö[ö][€ú–ûSò[YHŸÇàõ›[ô»Oà
+Ÿ]ö[úŸ\ùò[YHŸY[ã‹ô\ôYŸ]ö[úŸ\ùò[YH[úô\€€ôY
+Bàù\›\[ô[òﬁHOÇà]
+ŸY[êYù\ë\[ô[òﬁK\[ô[òﬁS‹ô\ã[úô\€€ôYYù\ë\[ô[òﬁJHBàö\⁄]ŸY[à[úô\€€ôY\[ô[òﬁBà[à
+ŸY[êYù\ë\[ô[òﬁK‹ô\ôY
+ »\[ô[òﬁS‹ô\ã[úô\€€ôYYù\ë\[ô[òﬁJBÇúôYô\ô[òŸYYö[ö][€ú»éà\õHOà‘Sò[YWBúôYô\ô[òŸYYö[ö][€ú»Hÿ\ŸBàò\à»Oà◊Bàö[H»Oà◊BàYàò[YHOà€ò[YWBà\ù[ò›[€à\ô›[Y[ù»OàôYô\ô[òŸYYö[ö][€ú»ù[ò›[€à
+ »€€òÿ]X\ôYô\ô[òŸYYö[ö][€ú»\ô›[Y[ù¬à[HõŸHOàôYô\ô[òŸYYö[ö][€ú»õŸBà]»Oà◊Bà€€à»Oà◊Bà]ò[YHõŸHOàôYô\ô[òŸYYö[ö][€ú»ò[YH
+ »ôYô\ô[òŸYYö[ö][€ú»õŸBàÿ\ŸH»»ò[òX⁄»[\õò]]ô\»OÇàôYô\ô[òŸYYö[ö][€ú»ò[òX⁄»
+ »€€òÿ]X\ôYô\ô[òŸY[\õò]]ôH[\õò]]ô\¬à[ö]Oà◊Bà€‹ùOà◊Bà\ò\ŸYOà◊Bà€Ÿ\òŸH\õHOàôYô\ô[òŸYYö[ö][€ú»\õBà\úõ‹à»Oà◊Bà⁄\ôBàôYô\ô[òŸY[\õò]]ôHHÿ\ŸBàP€€à»»õŸHOàôYô\ô[òŸYYö[ö][€ú»õŸBàQ›X\ô›X\ôõŸHOàôYô\ô[òŸYYö[ö][€ú»›X\ô
+ »ôYô\ô[òŸYYö[ö][€ú»õŸBàS]»õŸHOàôYô\ô[òŸYYö[ö][€ú»õŸBÇãKHÿ][Ÿ»€⁄›\ô]Z[ôYõ‹àY[ùYûZ[ô»\YZ€Hÿ[ôY]\»Yù\àBãKH[ùûH\»\‹ŸYHŸ[X[ùX»]Y]à]\»õ›HXõXÿ][€à€\‹⁄YöY\ãÇù\Y[ù\õò[õÿ⁄Ÿ\ú»éàò[Y\“[à[ù\õò[Oà[ù\õò[Oà‘Sò[YWBù\Y[ù\õò[õÿ⁄Ÿ\ú»[ù\õò[BàŸ]ù”\›	Ÿ]ôö[\àôYY’\Yù[ù[YH
+ò[Y\“[à[ù\õò[éàŸ]îŸ]Sò[YJBÇãKHô\€€ôHH[ù\õò[ò[Y\»YÿZ[ú›YŸI‹»Ÿ[X[ùX»›XöXÿ[ôY⁄\›ûKàBãKH[õôYSò[YH\»XÿŸ\Y\»Hõÿ⁄Ÿ\à€õH⁄[àH›\úô[ù⁄X⁄ŸYãKH⁄Y€ò]\ôH[€»Y[ùYöY\»]\»H€‹úô\‹€ô[ô»ùZ[[ã‹ö[Z]]ôK‹à\¬ãKHHŸ[ô\ò]Yÿ[à‹\ò][€ãà\»ô]ô[ù»Hÿ[YK\‹[Y‹›[]H‹àBãKH›[Hÿ][Ÿ»[ùûHúõ€HX‹]Z\ö[ô»ù[ù[YH]]‹ö]HûHò[YH[€ôKÇò]Y]\Y[ù\õò[éàò[Y\“[à[ù\õò[Oà[ù\õò[Oà”H[ù\õò[Ÿ[X[ùX–]Y]ò]Y]\Y[ù\õò[[ù\õò[H¬à]ÿÿ›\úô[òŸ\»Hò[Y\“[à[ù\õò[éàŸ]îŸ]Sò[YBàÿ][Ÿ»HŸ]ôö[\àôYY’\Yù[ù[YHÿÿ›\úô[òŸ\¬à⁄\Y[ö€õ›€àHŸ]ôö[\à\’[ö€õ›€ê›XöXÿ[ö[Z]]ôHÿÿ›\úô[òŸ\¬àôY⁄\›ûT€›\òŸ\»Hô\€€ôP›XöXÿ[ôY⁄\›ûT€›\òŸ\¬àÿ[î€›\òŸ\»Hô\€€ôRÿ[ì‹\ò][€î€›\òŸ\»ÿÿ›\úô[òŸ\¬à]]òZ[XõT€›\òŸ\»H\›[ù\õò[Ÿ[X[ùX‘€›\òŸ\»	àôY⁄\›ûT€›\òŸ\»
+ »ÿ[î€›\òŸ\¬à€›\òŸSX\HX\ôúõ€S\›⁄]Y\ôŸT€›\òŸSXô[»]òZ[XõT€›\òŸ\¬àŸ[X[ùX»HŸ]ö[ù\úŸX›[€àÿÿ›\úô[òŸ\»
+X\öŸ^\‘Ÿ]€›\òŸSX\
+Bà\ÿY‹ôY[Y[ù»HŸ]ù[ö[€Çà
+Ÿ]ôYôô\ô[òŸHŸ[X[ùX»ÿ][Ÿ Bà
+Ÿ]ôYôô\ô[òŸHÿ][Ÿ»Ÿ[X[ùX BàŸ[X[ùX’[ö€õ›€àHŸ]ôö[\à
+õ›àôYY’\Yù[ù[YJHŸ[X[ùX¬à]öY[òŸHBà»
+ò[YK€›\òŸJBàò[YHHŸ]ù”\›Ÿ[X[ùX¬àù\›€›\òŸHH”X\õ€⁄›\ò[YH€›\òŸSX\BàBà\ôH[ù\õò[Ÿ[X[ùX–]Y]à»[ù\õò[Ÿ[X[ùX–õÿ⁄Ÿ\ú»HŸ]ù”\›Ÿ[X[ùX¬à[ù\õò[ÿ][Ÿ–õÿ⁄Ÿ\ú»HŸ]ù”\›ÿ][Ÿ¬à[ù\õò[Ÿ[X[ùX‘€›\òŸ\»H]öY[òŸBà[ù\õò[Ÿ[X[ùX–ÿ][Ÿ—\ÿY‹ôY[Y[ù»HŸ]ù”\›\ÿY‹ôY[Y[ù¬à[ù\õò[[ö€õ›€ê›XöXÿ[ö[Z]]ô\»BàŸ]ù”\›
+Ÿ]ù[ö[€à⁄\Y[ö€õ›€àŸ[X[ùX’[ö€õ›€äBàBÇõY\ôŸT€›\òŸSXô[»éà›ö[ô»Oà›ö[ô»Oà›ö[ô¬õY\ôŸT€›\òŸSXô[»YùöY⁄àYùOHöY⁄HYùà›\ù⁄\ŸHHYù
+ »ä»à
+ »öY⁄Çúô\€€ôP›XöXÿ[ôY⁄\›ûT€›\òŸ\»éà”H Sò[YK›ö[ô WBúô\€€ôP›XöXÿ[ôY⁄\›ûT€›\òŸ\»H¬àùZ[[î€›\òŸ\»HõX\ÿ]X^Xô\»	õ‹ìH›XöXÿ[ùZ[[êö[ô[ô‹»	à
+Xô[ùZ[[íY
+HOà¬àX^XôSò[YHHùZ[[ãôŸ]ùZ[[ìò[YI»ùZ[[íYà\ôH	õX\
+ò[YHOà
+ò[YKòùZ[[éàà
+ »Xô[
+JHX^XôSò[YBàö[Z]]ôT€›\òŸ\»HõX\ÿ]X^Xô\»	õ‹ìH›XöXÿ[ö[Z]]ôPö[ô[ô‹»	à
+Xô[ö[Z]]ôRY
+HOà¬àX^XôSò[YHHùZ[[ãôŸ]ö[Z]]ôSò[YI»ö[Z]]ôRYà\ôH	õX\
+ò[YHOà
+ò[YKúö[Z]]ôNàà
+ »Xô[
+JHX^XôSò[YBà\ôH	ùZ[[î€›\òŸ\»
+ »ö[Z]]ôT€›\òŸ\¬Çúô\€€ôRÿ[ì‹\ò][€î€›\òŸ\»éàŸ]îŸ]Sò[YHOà”H Sò[YK›ö[ô WBúô\€€ôRÿ[ì‹\ò][€î€›\òŸ\»ÿÿ›\úô[òŸ\»HõX\ÿ]X^Xô\»	àõ‹ìH
+Ÿ]ù”\›ÿÿ›\úô[òŸ\ H	ò[YHOà¬àYö[ö][€îô\›[HŸ]€€ú›[ôõ…»ò[YBà\ôH	ÿ\ŸHYö[ö][€îô\›[ŸÇàöY⁄Yö[ö][€àOàÿ\ŸHQYàYö[ö][€àŸÇàù[ò›[€àŸù[í\“ÿ[ì‹Hù\›ﬂHOàù\›
+ò[YKôYö[ö][€éöÿ[ã[‹\ò][€àäBà»Oàõ›[ô¬àYù»Oàõ›[ô¬ÇãKH›XõHŸ[X[ùX»Y[ù]Y\»^‹ùYûHYŸK[Xô\ò][HŸ\\ò]Húõ€BãKHHô[ô\ôYTSò[YH€€\]Xö[]Hÿ][Ÿ»ô[›ÀÇò›XöXÿ[ùZ[[êö[ô[ô‹»éà ›ö[ôÀùZ[[ãêùZ[[íY
+WBò›XöXÿ[ùZ[[êö[ô[ô‹»Bà»
+ö[ù\ùò[][ö]ô\úŸHãùZ[[ãòùZ[[í[ù\ùò[[ö]äBà
+ö[ù\ùò[ãùZ[[ãòùZ[[í[ù\ùò[
+Bà
+ö[ù\ùò[^ô\õ»ãùZ[[ãòùZ[[íVô\õ Bà
+ö[ù\ùò[[€ôHãùZ[[ãòùZ[[íS€ôJBà
+ú]ãùZ[[ãòùZ[[î]
+Bà
+ú]Y\[ô[ùãùZ[[ãòùZ[[î]
+Bà
+ú\ùX[ãùZ[[ãòùZ[[î\ùX[
+Bà
+ú\ùX[Y\[ô[ùãùZ[[ãòùZ[[î\ùX[
+Bà
+ö\À[€ôHãùZ[[ãòùZ[[í\”€ôJBà
+ö]Z\À[€ôHãùZ[[ãòùZ[[í]\”€ôJBà
+ö\À[€ôK[YùãùZ[[ãòùZ[[í\”€ôLJBà
+ö\À[€ôK\öY⁄ãùZ[[ãòùZ[[í\”€ôLäBà
+ö\À[€ôKY[\HãùZ[[ãòùZ[[í\”€ôQ[\JBà
+ùò[ú‹\õ€ŸàãùZ[[ãòùZ[[ïò[ú‹õ€ŸäBà
+ú›XàãùZ[[ãòùZ[[î›XäBà
+ú›XãZ[àãùZ[[ãòùZ[[î›Xí[äBàBÇò›XöXÿ[ö[Z]]ôPö[ô[ô‹»éà ›ö[ôÀùZ[[ãîö[Z]]ôRY
+WBò›XöXÿ[ö[Z]]ôPö[ô[ô‹»Bà»
+ö[ù\ùò[[Z[àãùZ[[ãòùZ[[íSZ[äBà
+ö[ù\ùò[[X^ãùZ[[ãòùZ[[íSX^
+Bà
+ö[ù\ùò[[ôY»ãùZ[[ãòùZ[[íSôY Bà
+ú\ùX[ãùZ[[ãîö[T\ùX[
+Bà
+ú\ùX[Y\[ô[ùãùZ[[ãîö[T\ùX[
+Bà
+ú›Xã[›]ãùZ[[ãòùZ[[î›Xì›]
+Bà
+ô€YHãùZ[[ãòùZ[[ë€YJBà
+ô€YKZ[ùõ»ãùZ[[ãòùZ[[óŸ€YJBà
+ô€YKY[[HãùZ[[ãòùZ[[ó›[ô€YJBà
+ô€YK][ö]ô\úŸKZ[ùõ»ãùZ[[ãòùZ[[óŸ€YUJBà
+ô€YK][ö]ô\úŸKY[[HãùZ[[ãòùZ[[ó›[ô€YUJBà
+ôòXŸKYõ‹ò[ãùZ[[ãòùZ[[ëòXŸQõ‹ò[
+Bà
+ò€€\‹⁄][€àãùZ[[ãòùZ[[ê€€\
+Bà
+ú\ùX[[‹àãùZ[[ãòùZ[[î‹äBà
+ùò[ú‹‹ùãùZ[[ãòùZ[[ïò[ú Bà
+ö€[ŸŸ[ô[›\ÀX€€\‹⁄][€àãùZ[[ãòùZ[[í€€\
+BàBÇãKH€€\[K][YK[€õHŸ[X[ùXÀ\ôY⁄\›ûHò][àHô\öYöY\à\Ÿ\»]»õ›ôBãKH]H€‹úôX›‹[[ô»[àH[õôYÿ][Ÿ»ÿ[õõ›û\\‹»Ÿ[X[ùX¬ãKHY[ù]Hò[Y][€ãÇù\›[ù\õò[Ÿ[X[ùX‘€›\òŸ\»éà Sò[YK›ö[ô WHOà Sò[YK›ö[ô WBà⁄YàYö[ôY
+’PíP–S–“Vó’T’“SïTìêS‘—SPSïP◊––US—◊—T–Q‘ëQSQSï
+Bù\›[ù\õò[Ÿ[X[ùX‘€›\òŸ\»»H◊BàŸ[ŸBù\›[ù\õò[Ÿ[X[ùX‘€›\òŸ\»HYàŸ[ôYÇÇãKHYô[úŸKZ[ãY\]Y]ŸàHÿ[ôY]H\ò\ŸY\õKà]ÿ[àÿ]⁄BãKHõÿ⁄Ÿ\à[ùõŸXŸY‹à^‹ŸYûHôY[\‹»€€ùô\ú⁄[€ãÇù\YôY[\‹–õÿ⁄Ÿ\ú»éà\õHOà‘Sò[YWBù\YôY[\‹–õÿ⁄Ÿ\ú»BàŸ]ù”\›àŸ]ôúõ€S\›àö[\àôYY’\Yù[ù[YHàôYô\ô[òŸYYö[ö][€ú¬ÇãKHò[Y\»⁄X⁄€⁄»ZŸH›XöXÿ[ö[Z]]ô\»ù]\ôHõ›[àH[õôYYŸBãKHãéÃãéHÿ][Ÿ»\ôHŸ\Ÿ\\ò]Húõ€H›\‹ùYù[ù[YHõÿ⁄Ÿ\úÀà[ÇãKH^X›]XõHÿÿ›\úô[òŸH\»òZ[X€‹ŸY€»[àYŸH\‹òYHÿ[õõ›⁄[[ùBãKHõ›]HHô]€H[ùõŸXŸYö[Z]]ôHõ›Y⁄\ò\ŸY⁄^à€ŸKÇù\YôY[\‹’[ö€õ›€ê›XöXÿ[éà\õHOà‘Sò[YWBù\YôY[\‹’[ö€õ›€ê›XöXÿ[BàŸ]ù”\›ààŸ]ôúõ€S\›ààö[\à\’[ö€õ›€ê›XöXÿ[ö[Z]]ôBààôYô\ô[òŸYYö[ö][€ú¬ÇãKHH€»ﬁ[ù^^Y\ú»]\›]X\›Y‹ôYH€à⁄]\à^X›]XõH\YãKHŸ[X[ùX‹»›\ùö]ôKà^X›Sò[YHŸ]»ôYYõ›X]⁄ôXÿ]\ŸHôY[\‹»\ò\Ÿ\¬ãKH[\àò[Y\»›X⁄\»[ù\ùò[[ô⁄[ùÀàHù[ù[YKZXYYô\⁄YX[\¬ãKH[ò[ZXŒ»Hõÿ⁄Ÿ\àô[›»H›]X»€€ú›ùX›‹ãÿ€€ùõ€õŸH\»Z^YàZ^YãKHÿ[àXõ\⁄H›]X»⁄[\»\YZ€H\ùYòX›»[ôH⁄X⁄ŸYY‹õ›[ô‹ÇãKH^X⁄]Y[ùö\õ€õY[ùúöYŸK⁄[HH⁄€KY[ùûHX⁄Ÿ]ô[XZ[ú»H\]Z]ò[[òŸBãKHôYô\ô[òŸKÇò€\‹⁄YûPö[ô[ô’[YBàéà‘Sò[YWBàOà‘Sò[YWBàOà‘Sò[YWBàOà‘Sò[YWBàOà‘Sò[YWBàOà\õBàOà
+ö[ô[ô’[YP€\‹Àö[ô[ô’[YTôX\€€äBò€\‹⁄YûPö[ô[ô’[YBà[ù\õò[õÿ⁄Ÿ\ú¬àôY[\‹–õÿ⁄Ÿ\ú¬à[ù\õò[[ö€õ›€ê›XöXÿ[àôY[\‹’[ö€õ›€ê›XöXÿ[àŸ[X[ùX–ÿ][Ÿ—\ÿY‹ôY[Y[ù¬à\õBàõ›
+ù[[ù\õò[[ö€õ›€ê›XöXÿ[	âàù[ôY[\‹’[ö€õ›€ê›XöXÿ[
+HBà
+ö[ô[ô’[ú›\‹ùY[ö€õ›€ê›XöXÿ[ö[Z]]ôJBàõ›
+ù[Ÿ[X[ùX–ÿ][Ÿ—\ÿY‹ôY[Y[ù HBà
+ö[ô[ô’[ú›\‹ùY[ù\õò[Ÿ[X[ùX–ÿ][Ÿ—\ÿY‹ôY[Y[ù
+Bàù[[ù\õò[õÿ⁄Ÿ\ú»	âàù[ôY[\‹–õÿ⁄Ÿ\ú»Bà
+ö[ô[ô‘›]XÀõ‘ù[ù[YPõÿ⁄Ÿ\ú Bàù[[ù\õò[õÿ⁄Ÿ\ú»ù[ôY[\‹–õÿ⁄Ÿ\ú»Bà
+ö[ô[ô’[ú›\‹ùY[ù\õò[ôY[\‹–]Y]\ÿY‹ôY[Y[ù
+Bàù[ù[YPõÿ⁄Ÿ\ê]XY\õHBà
+ö[ô[ô—[ò[ZXÀ⁄€Q[ùûTù[ù[YRXY
+Bà›\ù⁄\ŸHBà
+ö[ô[ô”Z^Y›]X–€€ù^\õ›[ôù[ù[YPõÿ⁄Ÿ\äBÇúù[ù[YPõÿ⁄Ÿ\ê]XYéà\õHOàõ€€úù[ù[YPõÿ⁄Ÿ\ê]XYHÿ\ŸBàYàò[YHOàôYY’\Yù[ù[YHò[YBà\ù[ò›[€à»Oàù[ù[YPõÿ⁄Ÿ\ê]XYù[ò›[€Çà[HõŸHOàù[ù[YPõÿ⁄Ÿ\ê]XYõŸBà]»õŸHOàù[ù[YPõÿ⁄Ÿ\ê]XYõŸBà€Ÿ\òŸH\õHOàù[ù[YPõÿ⁄Ÿ\ê]XY\õBà»Oàò[ŸBÇãKH€€\[K][YK[€õH]Y]ò][õ‹àH[ú›\‹ùYX€\‹»ô\öYöY\ãÇù\›ôY[\‹–õÿ⁄Ÿ\ú»éà‘Sò[YWHOà‘Sò[YWBà⁄YàYö[ôY
+’PíP–S–“Vó’T’–íSëSë◊–UQU—T–Q‘ëQSQSï
+Bù\›ôY[\‹–õÿ⁄Ÿ\ú»»H◊BàŸ[ŸBù\›ôY[\‹–õÿ⁄Ÿ\ú»HYàŸ[ôYÇÇúô[ô\êö[ô[ô’[YHéàö[ô[ô’[YP€\‹»Oà›ö[ô¬úô[ô\êö[ô[ô’[YHHÿ\ŸBàö[ô[ô‘›]X»Oàú›]X»Çàö[ô[ô—[ò[ZX»Oàô[ò[ZX»Çàö[ô[ô”Z^YOàõZ^YÇàö[ô[ô’[ú›\‹ùYOàù[ú›\‹ùYÇÇòö[ô[ô’[YTôX\€€àéàö[ô[ô’[YTôX\€€àOà›ö[ô¬òö[ô[ô’[YTôX\€€àHÿ\ŸBàõ‘ù[ù[YPõÿ⁄Ÿ\ú»OàõõÀ\ù[ù[YKXõÿ⁄Ÿ\ú»Çà⁄€Q[ùûTù[ù[YRXYOàù⁄€KY[ùûK\ù[ù[YKZXYÇà›]X–€€ù^\õ›[ôù[ù[YPõÿ⁄Ÿ\àOàú›]XÀX€€ù^X\õ›[ô\ù[ù[YKXõÿ⁄Ÿ\àÇà[ù\õò[Ÿ[X[ùX–ÿ][Ÿ—\ÿY‹ôY[Y[ùOÇàö[ù\õò[\Ÿ[X[ùXÀXÿ][ŸÀY\ÿY‹ôY[Y[ùÇà[ù\õò[ôY[\‹–]Y]\ÿY‹ôY[Y[ùOàö[ù\õò[]ôY[\‹ÀX]Y]Y\ÿY‹ôY[Y[ùÇà[ö€õ›€ê›XöXÿ[ö[Z]]ôHOàù[ö€õ›€ãX›XöXÿ[\ö[Z]]ôHÇÇòö[ô[ô’[YPX›[€àéàö[ô[ô’[YP€\‹»Oà›ö[ô¬òö[ô[ô’[YPX›[€àHÿ\ŸBàö[ô[ô‘›]X»Oàô\ò\ŸK]\\ÀX[ôY[Z]Çàö[ô[ô—[ò[ZX»Oàù\Y\ô\⁄YX[]⁄€KY[ùûHÇàö[ô[ô”Z^YOÇàù\Y\ô\⁄YX[\‹]\⁄[Y‹õ›[ô[ÿúŸ\ùò][€ãXûKZY]⁄€KY[ùûK\ôYô\ô[òŸHÇàö[ô[ô’[ú›\‹ùYOàúôZôX›ÇÇòö[ô[ô’[YQX⁄\⁄[€àéàö[ô[ô’[YP€\‹»Oà›ö[ô¬òö[ô[ô’[YQX⁄\⁄[€àHÿ\ŸBàö[ô[ô‘›]X»Oàú›]XÀX€‹ŸYÇàö[ô[ô—[ò[ZX»Oàù\Y\ô\⁄YX[Çàö[ô[ô”Z^YOàù\Y\ô\⁄YX[Çàö[ô[ô’[ú›\‹ùYOàù[ú›\‹ùYÇÇò€€\[Yù[ù[YPõÿ⁄Ÿ\ú»éà€€\[YYàOà‘Sò[YWBò€€\[Yù[ù[YPõÿ⁄Ÿ\ú»[ùûHHY\ôŸPõÿ⁄Ÿ\ú¬à
+€€\[Y[ù\õò[\õPõÿ⁄Ÿ\ú»[ùûJBà
+€€\[YôY[\‹–õÿ⁄Ÿ\ú»[ùûJBÇò€€\[Y[ö€õ›€ê›XöXÿ[ö[Z]]ô\»éà€€\[YYàOà‘Sò[YWBò€€\[Y[ö€õ›€ê›XöXÿ[ö[Z]]ô\»[ùûHHY\ôŸPõÿ⁄Ÿ\ú¬à
+€€\[Y[ù\õò[\õU[ö€õ›€ê›XöXÿ[[ùûJBà
+€€\[YôY[\‹’[ö€õ›€ê›XöXÿ[[ùûJBÇõY\ôŸPõÿ⁄Ÿ\ú»éà‘Sò[YWHOà‘Sò[YWHOà‘Sò[YWBõY\ôŸPõÿ⁄Ÿ\ú»YùöY⁄HŸ]ù”\›	Ÿ]ôúõ€S\›
+Yù
+ »öY⁄
+BÇúô[ô\êõÿ⁄Ÿ\ú»éà‘Sò[YWHOà›ö[ô¬úô[ô\êõÿ⁄Ÿ\ú»Hÿ\ŸBà◊HOàõõ€ôHÇàõÿ⁄Ÿ\ú»Oà€€[XTŸ\\ò]Y
+X\ô]T⁄›»õÿ⁄Ÿ\ú BÇúô[ô\îŸ[X[ùX‘€›\òŸ\»éà Sò[YK›ö[ô WHOà›ö[ô¬úô[ô\îŸ[X[ùX‘€›\òŸ\»Hÿ\ŸBà◊HOàõõ€ôHÇà€›\òŸ\»Oà€€[XTŸ\\ò]Yà»ô]T⁄›»ò[YH
+ »èHà
+ »€›\òŸBà
+ò[YK€›\òŸJHH€›\òŸ\¬àBÇúŸ[X[ùX–ÿ][Ÿ‘›]\»éà‘Sò[YWHOà›ö[ô¬úŸ[X[ùX–ÿ][Ÿ‘›]\»◊HHòY‹ôYHÇúŸ[X[ùX–ÿ][Ÿ‘›]\»»Hô\ÿY‹ôYHÇÇõôYY’\Yù[ù[YHéàSò[YHOàõ€€õôYY’\Yù[ù[YHò[YHBàô]T⁄›»ò[YH[[X€õ›€ê›XöXÿ[ù[ù[YTSò[Y\¬àùò[ú‹Hà\“[ôö^Ÿòô]T⁄›»ò[YBÇö\’[ö€õ›€ê›XöXÿ[ö[Z]]ôHéàSò[YHOàõ€€ö\’[ö€õ›€ê›XöXÿ[ö[Z]]ôHò[YHBà\–›XöXÿ[ö[Z]]ôPÿ[ôY]Hô[ô\ôYà	âàõ›
+ôYY’\Yù[ù[YHò[YJBà⁄\ôBàô[ô\ôYHô]T⁄›»ò[YBÇö\–›XöXÿ[ö[Z]]ôPÿ[ôY]Héà›ö[ô»Oàõ€€ö\–›XöXÿ[ö[Z]]ôPÿ[ôY]Hô[ô\ôYBàêYŸKîö[Z]]ôKê›XöXÿ[àà\‘ôYö^Ÿòô[ô\ôYà
+\‘ö[Z]]ôSò[Y\‹XŸHô[ô\ôY	âàúö[Hà\‘ôYö^Ÿòÿÿ[ò[YHô[ô\ôY
+Bà⁄\ôBà\‘ö[Z]]ôSò[Y\‹XŸHò[YHH[ûH
+\‘ôYö^Ÿòò[YJBà»êYŸKêùZ[[ãê›XöXÿ[àÇàê›XöXÿ[îö[Z]]ôKàÇàê›XöXÿ[îö[Z]]ô\ÀàÇàBÇõÿÿ[ò[YHéà›ö[ô»Oà›ö[ô¬õÿÿ[ò[YHHô]ô\úŸHàZŸU⁄[H
+œH	Àâ Hàô]ô\úŸBÇãKH[õôY[ö[€àŸàHù[ù[YK\Ÿ[ú⁄]]ôHò[Y\»X€\ôYûHHYŸHãé[ôãKHYŸHãéHö[Z]]ôHXúò\öY\ÀàŸY\\»^X⁄]àHô]»Sò[YH]\›ö\ú›ãKHôHô]öY]ŸY[ôYY\ôK›\ù⁄\ŸHH[ö€õ›€ã\ö[Z]]ôHÿ]HôZôX›»]Çö€õ›€ê›XöXÿ[ù[ù[YTSò[Y\»éà‘›ö[ô◊Bö€õ›€ê›XöXÿ[ù[ù[YTSò[Y\»Bà»êYŸKîö[Z]]ôKê›XöXÿ[íU[ö]àÇàêYŸKîö[Z]]ôKê›XöXÿ[íHÇàêYŸKîö[Z]]ôKê›XöXÿ[öLÇàêYŸKîö[Z]]ôKê›XöXÿ[öLHÇàêYŸKîö[Z]]ôKê›XöXÿ[úö[RSZ[àÇàêYŸKîö[Z]]ôKê›XöXÿ[úö[RSX^ÇàêYŸKîö[Z]]ôKê›XöXÿ[úö[RSôY»ÇàêYŸKîö[Z]]ôKê›XöXÿ[í\”€ôHÇàêYŸKîö[Z]]ôKê›XöXÿ[ö]\”€ôHÇàêYŸKîö[Z]]ôKê›XöXÿ[í\”€ôLHÇàêYŸKîö[Z]]ôKê›XöXÿ[í\”€ôLàÇàêYŸKîö[Z]]ôKê›XöXÿ[î\ùX[ÇàêYŸKîö[Z]]ôKê›XöXÿ[î\ùX[ÇàêYŸKîö[Z]]ôKê›XöXÿ[ö\”€ôQ[\HÇàêYŸKîö[Z]]ôKê›XöXÿ[úö[T‹àÇàêYŸKîö[Z]]ôKê›XöXÿ[úö[P€€\ÇàêYŸKîö[Z]]ôKê›XöXÿ[úö[Uò[ú‹ÇàêYŸKîö[Z]]ôKê›XöXÿ[úö[R€€\ÇàêYŸKîö[Z]]ôKê›XöXÿ[î]ÇàêYŸKêùZ[[ãê›XöXÿ[ë€YKúö[Q€YHÇàêYŸKêùZ[[ãê›XöXÿ[ë€YKúö[Wô€YHÇàêYŸKêùZ[[ãê›XöXÿ[ë€YKúö[Wù[ô€YHÇàêYŸKêùZ[[ãê›XöXÿ[í€€\Kúö[Wô€YUHÇàêYŸKêùZ[[ãê›XöXÿ[í€€\Kúö[Wù[ô€YUHÇàêYŸKêùZ[[ãê›XöXÿ[í€€\Kúö[QòXŸQõ‹ò[ÇàêYŸKêùZ[[ãê›XöXÿ[î›Xãúö[T›Xì›]ÇàBÇôö[ô[ùûHéà⁄^ì‹[€ú»Oà–€€\[YYóHOàZ]\à›ö[ô»€€\[YYÇôö[ô[ùûH‹»Yú»Hÿ\ŸHö[\à\—[ùûHYú»ŸÇàŸ[ùûWHOàöY⁄[ùûBà◊HOàYù	õõ»€‹ŸY\ô›[Y[ùYúôYH[ùûHX]⁄YÇà
+ »⁄›»
+⁄^ë[ùûH‹ Bà[ùöY\»OàYù	ò[XöY›[›\»[ùûHÇà
+ »⁄›»
+⁄^ë[ùûH‹ Bà
+ »éàÇà
+ »⁄›»
+X\
+ô]T⁄›»à€€\[Yò[YJH[ùöY\ Bà⁄\ôBà\—[ùûHYàBà€€\[Yúõ€SXZ[ì[Ÿ[HYÇà	âà€€\[Y\—[ùûHYÇÇö\‘ô\]Y\›Y[ùûSò[YHéà›ö[ô»OàSò[YHOàõ€€ö\‘ô\]Y\›Y[ùûSò[YHô\]Y\›Yò[YHBàô[ô\ôYOHô\]Y\›Yà
+	Àâ»õ›[[Xô\]Y\›Y	âà
+	Àâ»àô\]Y\›Y
+H\‘›Yôö^Ÿòô[ô\ôY
+Bà⁄\ôBàô[ô\ôYHô]T⁄›»ò[YBÇúô[ô\ëYö[ö][€àéà€€\[YYàOàZ]\à›ö[ô»›ö[ô¬úô[ô\ëYö[ö][€à€€\[YH¬àõŸHH€€\[U\õH◊H
+€€\[Y\õH€€\[Y
+Bà\ôH	äYö[ôHà
+ »X[ô€TSò[YH
+€€\[Yò[YH€€\[Y
+H
+ »àà
+ »õŸH
+ »äHÇÇúô[ô\ê⁄^ê€€ú›ùX›‹àéàSò[YHOà‘›ö[ô◊HOà›ö[ô¬úô[ô\ê⁄^ê€€ú›ùX›‹àò[YHHô[ô\ê⁄^ê€€ú›ùX›‹îﬁ[Xõ€
+X[ô€TSò[YHò[YJBÇúô[ô\ê⁄^ê€€ú›ùX›‹îﬁ[Xõ€éà›ö[ô»Oà‘›ö[ô◊HOà›ö[ô¬úô[ô\ê⁄^ê€€ú›ùX›‹îﬁ[Xõ€ﬁ[Xõ€öY[»BàäôX›‹à	»à
+ »ﬁ[Xõ€
+ »€€òÿ]X\
+àà
+  HöY[»
+ »äHÇÇúô[ô\ê⁄^ê€€ú›ùX›‹ïY»éà›ö[ô»Oà›ö[ô¬úô[ô\ê⁄^ê€€ú›ùX›‹ïY»ò[YHBàô[ô\ê⁄^ïôX›‹îôYàò[YH	à⁄^ê€‹ôPXöP€€ú›ùX›‹ïY“[ô^[\[Y[ùY⁄^ê€‹ôPXöBÇúô[ô\ê⁄^ê€€ú›ùX›‹ëöY[éà›ö[ô»Oà[ùOà›ö[ô¬úô[ô\ê⁄^ê€€ú›ùX›‹ëöY[ò[YHŸôúŸ]Bàô[ô\ê⁄^ïôX›‹îôYàò[YH	à⁄^ê€‹ôPXöP€€ú›ùX›‹ëöY[ò\ŸR[ô^[\[Y[ùY⁄^ê€‹ôPXöH
+»ŸôúŸ]Çúô[ô\ê⁄^ïôX›‹îôYàéà›ö[ô»Oà[ùOà›ö[ô¬úô[ô\ê⁄^ïôX›‹îôYàò[YH[ô^BàäôX›‹ã\ôYàà
+ »ò[YH
+ »àà
+ »⁄›»[ô^
+ »äHÇÇúô[ô\ê⁄^ê\Xÿ][€àéà›ö[ô»Oà‘›ö[ô◊HOà›ö[ô¬úô[ô\ê⁄^ê\Xÿ][€àHõ€\S€ôBÇúô[ô\ê⁄^ì[XôHéà›ö[ô»Oà›ö[ô»Oà›ö[ô¬úô[ô\ê⁄^ì[XôHò\öXXõHõŸHBàä[XôH
+à
+ »ò\öXXõH
+ »äHà
+ »õŸH
+ »äHÇÇò€€\[U\õHéà‘›ö[ô◊HOà[ùOà\õHOàZ]\à›ö[ô»›ö[ô¬ò€€\[U\õH[ùà\Hÿ\ŸBàò\à[ô^Oà€⁄›\ò\öXXõH[ùà[ô^àYàò[YHOà\ôH
+X[ô€TSò[YHò[YJBà\
+€€àò[YJH\ô‹»Oà¬àô[ô\ôYHò]ô\úŸH
+€€\[U\õH[ùà\
+H\ô‹¬à\ôH	ô[ô\ê⁄^ê€€ú›ùX›‹àò[YHô[ô\ôYà\
+ö[Hö[Z]]ôJH\ô‹»Oà€€\[Tö[Z]]ôP\Xÿ][€à[ùà\ö[Z]]ôH\ô‹¬à\ù[ò›[€à\ô‹»Oà¬àô[ô\ôYù[ò›[€àH€€\[U\õH[ùà\ù[ò›[€Çàô[ô\ôY\ô‹»Hò]ô\úŸH
+€€\[U\õH[ùà\
+H\ô‹¬à\ôH
+ô[ô\ê⁄^ê\Xÿ][€àô[ô\ôYù[ò›[€àô[ô\ôY\ô‹ Bà[HõŸHOà¬à]ò\öXXõHHùàà
+ »⁄›»\àô[ô\ôYõŸHH€€\[U\õH
+ò\öXXõHà[ùäH
+\
+»JHõŸBà\ôH	ô[ô\ê⁄^ì[XôHò\öXXõHô[ô\ôYõŸBà]]\ò[Oà€€\[S]\ò[]\ò[à€€àò[YHOà\ôH	ô[ô\ê⁄^ê€€ú›ùX›‹àò[YH◊Bà]ò[YHõŸHOà¬àô[ô\ôYò[YHH€€\[U\õH[ùà\ò[YBà]ò\öXXõHHùàà
+ »⁄›»\àô[ô\ôYõŸHH€€\[U\õH
+ò\öXXõHà[ùäH
+\
+»JHõŸBà\ôH	ä]
+
+à
+ »ò\öXXõH
+ »àà
+ »ô[ô\ôYò[YH
+ »äJHà
+ »ô[ô\ôYõŸH
+ »äHÇàÿ\ŸHÿ‹ù][ôYHÿ\ŸR[ôõ»ò[òX⁄»[\õò]]ô\»OÇà€€\[Pÿ\ŸH[ùà\ÿ‹ù][ôYHÿ\ŸR[ôõ»ò[òX⁄»[\õò]]ô\¬àö[Hö[Z]]ôHOà€€\[Tö[Z]]ôUò[YHö[Z]]ôBà[ö]Oà\ôHàŸàÇà€‹ùOà\ôHàŸàÇà\ò\ŸYOà\ôHàŸàÇà€Ÿ\òŸH\õHOà€€\[U\õH[ùà\\õBà\úõ‹à[úôXX⁄XõHOà\ôHä\úõ‹à	ÿYŸKX⁄^àù[úôXX⁄XõH€ŸHôXX⁄YäHÇà\úõ‹à
+Y]HY\‹ÿYŸJHOà\ôH	ä\úõ‹à	ÿYŸKX⁄^àà
+ »ÿ⁄[YT›ö[ô»Y\‹ÿYŸH
+ »äHÇÇãKH›Ÿ\àHZ^Y›]X»⁄[⁄[Hô\X⁄[ô»]ô\ûH[õôYõÿ⁄Ÿ\ãZXYYãKH›XùôYH⁄][à‹\]YH[\‹ù[ôKàH[ôH\»]Kô]ô\àHòZŸBãKH[\[Y[ù][€àŸàH\Y\õKà[ûHù[ù[YKZXYY›XùôYHõ›€›ô\ôYûBãKHH^X›][ùô[ù‹ûHôZôX›»›Ÿ\ö[ôÀÇò€€\[U\õU⁄]€R[\‹ù¬àéàX\ìX\›ö[ô»
+[ùô\⁄YX[€T[äBàOà‘›ö[ô◊BàOà‘›ö[ô◊BàOà[ùàOà\õBàOàZ]\à›ö[ô»›ö[ô¬ò€€\[U\õU⁄]€R[\‹ù»[\‹ù»][ùà\\õHBàÿ\ŸHX\õ€⁄›\
+ô[ô\îô\⁄YX[€T]]
+H[\‹ù»ŸÇàù\›
+À€JBàô\⁄YX[€T›\‹ù–]]€X]X—\[ô[ù‹õ›[ô[ùö\õ€õY[ù€HOÇà]\ö]HHô\⁄YX[€Q[ùö\õ€õY[ù\ö]H€Bà]òZ[XõHHZŸH\ö]H[ùÇà‹ô\ôYò\öXXõ\»Hô]ô\úŸH]òZ[XõBà[àYà[ô›]òZ[XõHOH\ö]Bà[à\ôH	àä›XöXÿ[X⁄^ãXö[ôY\[ô[ùY‹õ›[ôY[ùö\õ€õY[ùÇà
+ »ä›XöXÿ[X⁄^ã]\YZ€K\ôYô\ô[òŸHÇà
+ »ÿ⁄[YT›ö[ô»
+ô\⁄YX[€RY€JBà
+ »äHÇà
+ »⁄›»\ö]Bà
+ »àÇà
+ »äôX›‹àÇà
+ »[ù€‹ô»‹ô\ôYò\öXXõ\¬à
+ »äJHÇà[ŸHYù	àô\[ô[ù‹õ›[ô^Xÿ[[ùö\õ€õY[ù\»[ò]òZ[XõH]Çà
+ »ô[ô\îô\⁄YX[€T]]àô\⁄YX[€T›\‹ù–]]€X]X”‹ô\ôY‹õ›[ô[ùö\õ€õY[ù€HOÇà]\ö]HHô\⁄YX[€Q[ùö\õ€õY[ù\ö]H€Bà]òZ[XõHHZŸH\ö]H[ùÇà‹ô\ôYò\öXXõ\»Hô]ô\úŸH]òZ[XõBà€ŸX‹»Hô\⁄YX[€S‹ô\ôY‹õ›[ô[ùö\õ€õY[ù€ŸX‹»€Bà[àYà[ô›]òZ[XõHOH\ö]H	âà[ô›€ŸX‹»OH\ö]Bà[à\ôH	àä›XöXÿ[X⁄^ãXö[ôY‹õ›[ôY[ùö\õ€õY[ùÇà
+ »ä›XöXÿ[X⁄^ã]\YZ€K\ôYô\ô[òŸHÇà
+ »ÿ⁄[YT›ö[ô»
+ô\⁄YX[€RY€JBà
+ »äHÇà
+ »äôX›‹àÇà
+ »[ù€‹ô»
+X\
+ÿ⁄[YT›ö[ô»àô[ô\îô\⁄YX[‹õ›[ô€ŸX H€ŸX‹ Bà
+ »äHÇà
+ »äôX›‹àÇà
+ »[ù€‹ô»‹ô\ôYò\öXXõ\¬à
+ »äJHÇà[ŸHYù	àõ‹ô\ôY‹õ›[ô^Xÿ[[ùö\õ€õY[ù\»[ò]òZ[XõH]Çà
+ »ô[ô\îô\⁄YX[€T]]àù\›€ŸX»Hô\⁄YX[€P]]€X]X‘⁄[ô€Q‹õ›[ô€ŸX»€HOÇàÿ\ŸH[ùàŸÇàò\öXXõHà»Oà\ôH	àä›XöXÿ[X⁄^ãXö[ôHÇà
+ »ô[ô\îô\⁄YX[‹õ›[ô€ŸX»€ŸX¬à
+ »ãY[ùö\õ€õY[ùÇà
+ »ä›XöXÿ[X⁄^ã]\YZ€K\ôYô\ô[òŸHÇà
+ »ÿ⁄[YT›ö[ô»
+ô\⁄YX[€RY€JBà
+ »äHÇà
+ »ò\öXXõBà
+ »äHÇà◊HOàYù	àú⁄[ô€KHÇà
+ »ô[ô\îô\⁄YX[‹õ›[ô€ŸX»€ŸX¬à
+ »à^Xÿ[[ùö\õ€õY[ù\»[ò]òZ[XõH]Çà
+ »ô[ô\îô\⁄YX[€T]]à›\ù⁄\ŸHOà\ôH	àä›XöXÿ[X⁄^ã]\YZ€K\ôYô\ô[òŸHÇà
+ »ÿ⁄[YT›ö[ô»
+ô\⁄YX[€RY€JBà
+ »äHÇàõ›[ô¬àù[ù[YPõÿ⁄Ÿ\ê]XY\õHOàYù	àõZ^Yô\⁄YX[›]X»⁄[\»[à[ò€›ô\ôYù[ù[YH›XùôYH]Çà
+ »ô[ô\îô\⁄YX[€T]]à›\ù⁄\ŸHOà›Ÿ\à\õBà⁄\ôBà\ÿŸ[ôŸY€Y[ùH€€\[U\õU⁄]€R[\‹ù»[\‹ù»
+]
+ »‹ŸY€Y[ùJBà›Ÿ\àHÿ\ŸBàò\à[ô^Oà€⁄›\ò\öXXõH[ùà[ô^àö[Hö[Z]]ôHOà€€\[Tö[Z]]ôUò[YHö[Z]]ôBàYàò[YHOà\ôH
+X[ô€TSò[YHò[YJBà\
+€€àò[YJH\ô‹»Oà¬àô[ô\ôYHò]ô\úŸR[ô^Yò\X\ô›[Y[ùHà\ô‹¬à\ôH	ô[ô\ê⁄^ê€€ú›ùX›‹àò[YHô[ô\ôYà\
+ö[Hö[Z]]ôJH\ô‹»Oà¬àô[ô\ôYHò]ô\úŸR[ô^Yò\X\ô›[Y[ùHà\ô‹¬à€€\[Tö[Z]]ôP\Xÿ][€îô[ô\ôYö[Z]]ôHô[ô\ôYà\ù[ò›[€à\ô‹»Oà¬àô[ô\ôYù[ò›[€àH\ÿŸ[ôò\Yù[ò›[€àà[ùà\ù[ò›[€Çàô[ô\ôY\ô‹»Hò]ô\úŸR[ô^Yò\X\ô›[Y[ùHà\ô‹¬à\ôH
+ô[ô\ê⁄^ê\Xÿ][€àô[ô\ôYù[ò›[€àô[ô\ôY\ô‹ Bà[HõŸHOà¬à]ò\öXXõHHùàà
+ »⁄›»\àô[ô\ôYõŸHH\ÿŸ[ôõ[XôKXõŸHà
+ò\öXXõHà[ùäH
+\
+»JHõŸBà\ôH	ô[ô\ê⁄^ì[XôHò\öXXõHô[ô\ôYõŸBà]]\ò[Oà€€\[S]\ò[]\ò[à€€àò[YHOà\ôH	ô[ô\ê⁄^ê€€ú›ùX›‹àò[YH◊Bà]ò[YHõŸHOà¬àô[ô\ôYò[YHH\ÿŸ[ôõ]]ò[YHà[ùà\ò[YBà]ò\öXXõHHùàà
+ »⁄›»\àô[ô\ôYõŸHH\ÿŸ[ôõ]XõŸHà
+ò\öXXõHà[ùäH
+\
+»JHõŸBà\ôH	ä]
+
+à
+ »ò\öXXõH
+ »àà
+ »ô[ô\ôYò[YBà
+ »äJHà
+ »ô[ô\ôYõŸH
+ »äHÇàÿ\ŸHÿ‹ù][ôYHÿ\ŸR[ôõ»ò[òX⁄»[\õò]]ô\»OÇà€€\[Pÿ\ŸU⁄]€R[\‹ù¬à[\‹ù»][ùà\ÿ‹ù][ôYHÿ\ŸR[ôõ»ò[òX⁄»[\õò]]ô\¬à[ö]Oà\ôHàŸàÇà€‹ùOà\ôHàŸàÇà\ò\ŸYOà\ôHàŸàÇà€Ÿ\òŸH€Ÿ\òŸYOà\ÿŸ[ôò€Ÿ\òŸKXõŸHà[ùà\€Ÿ\òŸYà\úõ‹à[úôXX⁄XõHOÇà\ôHä\úõ‹à	ÿYŸKX⁄^àù[úôXX⁄XõH€ŸHôXX⁄YäHÇà\úõ‹à
+Y]HY\‹ÿYŸJHOÇà\ôH	ä\úõ‹à	ÿYŸKX⁄^àà
+ »ÿ⁄[YT›ö[ô»Y\‹ÿYŸH
+ »äHÇÇàò]ô\úŸR[ô^YôYö^\õ\»HŸ\]Y[òŸBà»\ÿŸ[ô
+ôYö^
+ »⁄›»[ô^
+H[ùà\⁄[à
+[ô^⁄[
+HHö\ éà[ù
+HãóH\õ\¬àBÇò€€\[Pÿ\ŸU⁄]€R[\‹ù¬àéàX\ìX\›ö[ô»
+[ùô\⁄YX[€T[äBàOà‘›ö[ô◊BàOà‘›ö[ô◊BàOà[ùàOà[ùàOàÿ\ŸR[ôõ¬àOà\õBàOà’[BàOàZ]\à›ö[ô»›ö[ô¬ò€€\[Pÿ\ŸU⁄]€R[\‹ù¬à[\‹ù»][ùà\ÿ‹ù][ôYHÿ\ŸR[ôõ»ò[òX⁄»[\õò]]ô\»H¬àò[YHH€⁄›\ò\öXXõH[ùàÿ‹ù][ôYBàô[ô\ôYò[òX⁄»H€€\[U\õU⁄]€R[\‹ù¬à[\‹ù»
+]
+ »»òÿ\ŸKYò[òX⁄»óJH[ùà\ò[òX⁄¬àÿ\ŸHÿ\ŸU\Hÿ\ŸR[ôõ»ŸÇà’]H»Oà¬à€]\Ÿ\»HŸ\]Y[òŸBà»€€\[Q]P[\õò]]ôU⁄]€R[\‹ù¬à[\‹ù¬à
+]
+ »»òÿ\ŸKX[\õò]]ôKHà
+ »⁄›»[ô^JBà[ùà\ò[YH[\õò]]ôBà
+[ô^[\õò]]ôJHHö\ éà[ù
+HãóH[\õò]]ô\¬àBà\ôH	äÿ\ŸHà
+ »ô[ô\ê⁄^ê€€ú›ùX›‹ïY»ò[YH
+ »àà
+ »[ù€‹ô»€]\Ÿ\¬à
+ »à
+[ŸHà
+ »ô[ô\ôYò[òX⁄»
+ »äJHÇà’ò]Oà¬à€]\Ÿ\»HŸ\]Y[òŸBà»€€\[S]\ò[[\õò]]ôU⁄]€R[\‹ù¬à[\‹ù¬à
+]
+ »»òÿ\ŸKX[\õò]]ôKHà
+ »⁄›»[ô^JBà[ùà\ò[YH[\õò]]ôBà
+[ô^[\õò]]ôJHHö\ éà[ù
+HãóH[\õò]]ô\¬àBà\ôH	ä€€ôà
+ »[ù€‹ô»€]\Ÿ\¬à
+ »à
+[ŸHà
+ »ô[ô\ôYò[òX⁄»
+ »äJHÇà›\àOàYù	àê›XöXÿ[⁄^àòX⁄Ÿ[ôà[ú›\‹ùYZ^Y\⁄[ÿ\ŸH\Hà
+ »⁄›»›\ÇÇò€€\[Q]P[\õò]]ôU⁄]€R[\‹ù¬àéàX\ìX\›ö[ô»
+[ùô\⁄YX[€T[äBàOà‘›ö[ô◊BàOà‘›ö[ô◊BàOà[ùàOà›ö[ô¬àOà[àOàZ]\à›ö[ô»›ö[ô¬ò€€\[Q]P[\õò]]ôU⁄]€R[\‹ù»[\‹ù»][ùà\ò[YHHÿ\ŸBàP€€à€€ú›ùX›‹à\ö]HõŸHOà¬à]öY[»Bà»ôöY[à
+ »⁄›»\
+ »ó»à
+ »⁄›»[ô^à[ô^HÃãà\ö]HHWBàBàö[ô[ô‹»Hö\⁄]à
+öY[[ô^OÇàäà
+ »öY[
+ »àÇà
+ »ô[ô\ê⁄^ê€€ú›ùX›‹ëöY[ò[YH[ô^
+ »äHäBàöY[¬àÃéà[ùãóBàõŸQ[ùàHô]ô\úŸHöY[»
+ »[ùÇàô[ô\ôYõŸHH€€\[U\õU⁄]€R[\‹ù¬à[\‹ù»
+]
+ »»ò€€ú›ùX›‹ãXõŸHóJHõŸQ[ùà
+\
+»\ö]JHõŸBà\ôH	ä
+à
+ »X[ô€TSò[YH€€ú›ùX›‹à
+ »äH
+]
+Çà
+ »[ù€‹ô»ö[ô[ô‹»
+ »äHà
+ »ô[ô\ôYõŸH
+ »äJHÇà[\õò]]ôHOàYù	àê›XöXÿ[⁄^àòX⁄Ÿ[ôà[ú›\‹ùYZ^Y\⁄[]H[\õò]]ôHÇà
+ »⁄›»[\õò]]ôBÇò€€\[S]\ò[[\õò]]ôU⁄]€R[\‹ù¬àéàX\ìX\›ö[ô»
+[ùô\⁄YX[€T[äBàOà‘›ö[ô◊BàOà‘›ö[ô◊BàOà[ùàOà›ö[ô¬àOà[àOàZ]\à›ö[ô»›ö[ô¬ò€€\[S]\ò[[\õò]]ôU⁄]€R[\‹ù»[\‹ù»][ùà\ò[YHHÿ\ŸBàS]]\ò[õŸHOà¬àô[ô\ôY]\ò[H€€\[S]\ò[]\ò[àô[ô\ôYõŸHH€€\[U\õU⁄]€R[\‹ù¬à[\‹ù»
+]
+ »»õ]\ò[XõŸHóJH[ùà\õŸBà\ôH	ä
+\]X[»à
+ »ò[YH
+ »àà
+ »ô[ô\ôY]\ò[à
+ »äHà
+ »ô[ô\ôYõŸH
+ »äHÇàQ›X\ô›X\ôõŸHOà¬àô[ô\ôY›X\ôH€€\[U\õU⁄]€R[\‹ù¬à[\‹ù»
+]
+ »»ô›X\ô]\›óJH[ùà\›X\ôàô[ô\ôYõŸHH€€\[U\õU⁄]€R[\‹ù¬à[\‹ù»
+]
+ »»ô›X\ôXõŸHóJH[ùà\õŸBà\ôH	äà
+ »ô[ô\ôY›X\ô
+ »àà
+ »ô[ô\ôYõŸH
+ »äHÇà[\õò]]ôHOàYù	àê›XöXÿ[⁄^àòX⁄Ÿ[ôà[ú›\‹ùYZ^Y\⁄[]\ò[[\õò]]ôHÇà
+ »⁄›»[\õò]]ôBÇò€€\[Pÿ\ŸHéà‘›ö[ô◊HOà[ùOà[ùOàÿ\ŸR[ôõ»Oà\õHOà’[HOàZ]\à›ö[ô»›ö[ô¬ò€€\[Pÿ\ŸH[ùà\ÿ‹ù][ôYHÿ\ŸR[ôõ»ò[òX⁄»[\õò]]ô\»H¬àò[YHH€⁄›\ò\öXXõH[ùàÿ‹ù][ôYBàô[ô\ôYò[òX⁄»H€€\[U\õH[ùà\ò[òX⁄¬àÿ\ŸHÿ\ŸU\Hÿ\ŸR[ôõ»ŸÇà’]H»Oà¬à€]\Ÿ\»Hò]ô\úŸH
+€€\[Q]P[\õò]]ôH[ùà\ò[YJH[\õò]]ô\¬à\ôH	äÿ\ŸHà
+ »ô[ô\ê⁄^ê€€ú›ùX›‹ïY»ò[YH
+ »àà
+ »[ù€‹ô»€]\Ÿ\¬à
+ »à
+[ŸHà
+ »ô[ô\ôYò[òX⁄»
+ »äJHÇà’ò]Oà¬à€]\Ÿ\»Hò]ô\úŸH
+€€\[S]\ò[[\õò]]ôH[ùà\ò[YJH[\õò]]ô\¬à\ôH	ä€€ôà
+ »[ù€‹ô»€]\Ÿ\»
+ »à
+[ŸHà
+ »ô[ô\ôYò[òX⁄»
+ »äJHÇà›\àOàYù	ê›XöXÿ[⁄^àòX⁄Ÿ[ôà[ú›\‹ùYÿ\ŸH\Hà
+ »⁄›»›\ÇÇò€€\[Q]P[\õò]]ôHéà‘›ö[ô◊HOà[ùOà›ö[ô»Oà[OàZ]\à›ö[ô»›ö[ô¬ò€€\[Q]P[\õò]]ôH[ùà\ò[YHHÿ\ŸBàP€€à€€ú›ùX›‹à\ö]HõŸHOà¬à]öY[»H»ôöY[à
+ »⁄›»\
+ »ó»à
+ »⁄›»[ô^[ô^HÃãà\ö]HHWWBàö[ô[ô‹»Hö\⁄]à
+öY[[ô^OÇàäà
+ »öY[
+ »àÇà
+ »ô[ô\ê⁄^ê€€ú›ùX›‹ëöY[ò[YH[ô^
+ »äHäBàöY[¬àÃéà[ùãóBàõŸQ[ùàHô]ô\úŸHöY[»
+ »[ùÇàô[ô\ôYõŸHH€€\[U\õHõŸQ[ùà
+\
+»\ö]JHõŸBà\ôH	ä
+à
+ »X[ô€TSò[YH€€ú›ùX›‹à
+ »äH
+]
+à
+ »[ù€‹ô»ö[ô[ô‹»
+ »äHà
+ »ô[ô\ôYõŸH
+ »äJHÇà[\õò]]ôHOàYù	ê›XöXÿ[⁄^àòX⁄Ÿ[ôà[ú›\‹ùY]H[\õò]]ôHà
+ »⁄›»[\õò]]ôBÇò€€\[S]\ò[[\õò]]ôHéà‘›ö[ô◊HOà[ùOà›ö[ô»Oà[OàZ]\à›ö[ô»›ö[ô¬ò€€\[S]\ò[[\õò]]ôH[ùà\ò[YHHÿ\ŸBàS]]\ò[õŸHOà¬àô[ô\ôY]\ò[H€€\[S]\ò[]\ò[àô[ô\ôYõŸHH€€\[U\õH[ùà\õŸBà\ôH	ä
+\]X[»à
+ »ò[YH
+ »àà
+ »ô[ô\ôY]\ò[
+ »äHà
+ »ô[ô\ôYõŸH
+ »äHÇàQ›X\ô›X\ôõŸHOà¬àô[ô\ôY›X\ôH€€\[U\õH[ùà\›X\ôàô[ô\ôYõŸHH€€\[U\õH[ùà\õŸBà\ôH	äà
+ »ô[ô\ôY›X\ô
+ »àà
+ »ô[ô\ôYõŸH
+ »äHÇà[\õò]]ôHOàYù	ê›XöXÿ[⁄^àòX⁄Ÿ[ôà[ú›\‹ùY]\ò[[\õò]]ôHà
+ »⁄›»[\õò]]ôBÇò€€\[Tö[Z]]ôP\Xÿ][€àéà‘›ö[ô◊HOà[ùOàö[HOà’\õWHOàZ]\à›ö[ô»›ö[ô¬ò€€\[Tö[Z]]ôP\Xÿ][€à[ùà\ö[Z]]ôH\ô‹»H¬àô[ô\ôYHò]ô\úŸH
+€€\[U\õH[ùà\
+H\ô‹¬à€€\[Tö[Z]]ôP\Xÿ][€îô[ô\ôYö[Z]]ôHô[ô\ôYÇò€€\[Tö[Z]]ôP\Xÿ][€îô[ô\ôYàéàö[BàOà‘›ö[ô◊BàOàZ]\à›ö[ô»›ö[ô¬ò€€\[Tö[Z]]ôP\Xÿ][€îô[ô\ôYö[Z]]ôHô[ô\ôYBàÿ\ŸBà»õ‹õBà
+ÿ[ôY]K\ö]Kõ‹õJHH⁄^îö[Z]]ôP\Xÿ][€ïXõBàÿ[ôY]HOHö[Z]]ôBà\ö]HOH[ô›ô[ô\ôYàHŸÇà⁄^îö[Z]]ôPö[ò\ûH‹\ò]‹àà»Oàÿ\ŸHô[ô\ôYŸÇàﬁWHOà\ôH	äà
+ »‹\ò]‹à
+ »àà
+ »
+ »àà
+ »H
+ »äHÇà»Oà[ú›\‹ùYà⁄^îö[Z]]ôRYàà»Oàÿ\ŸHô[ô\ôYŸÇàÿ€€ô][€ãY\Àõ◊HOà\ôH	àäYàà
+ »€€ô][€à
+ »àà
+ »Y\»
+ »àà
+ »õ»
+ »äHÇà»Oà[ú›\‹ùYà⁄^îö[Z]]ôPôY⁄[àà»Oàÿ\ŸHô[ô\ôYŸÇàŸö\ú›ŸX€€ôHOà\ôH	àäôY⁄[àà
+ »ö\ú›
+ »àà
+ »ŸX€€ô
+ »äHÇà»Oà[ú›\‹ùYà⁄^îö[Z]]ôRY[ù]Hà»Oàÿ\ŸHô[ô\ôYŸÇà›ò[YWHOà\ôHò[YBà»Oà[ú›\‹ùYà◊HOà[ú›\‹ùYà⁄\ôBà[ú›\‹ùYHYù	àê›XöXÿ[⁄^àòX⁄Ÿ[ôà[ú›\‹ùYö[Z]]ôH\Xÿ][€àÇà
+ »⁄›»ö[Z]]ôH
+ »ã»à
+ »⁄›»
+[ô›ô[ô\ôY
+BÇò€€\[Tö[Z]]ôUò[YHéàö[HOàZ]\à›ö[ô»›ö[ô¬ò€€\[Tö[Z]]ôUò[YHö[Z]]ôHHÿ\ŸBà»‹\ò]‹Çà
+ÿ[ôY]K‹\ò]‹äHH⁄^îö[Z]]ôQö\ú›€\‹’XõBàÿ[ôY]HOHö[Z]]ôBàHŸÇà‹\ò]‹àà»Oà›\úöYYà‹\ò]‹Çà◊HOàYù	àê›XöXÿ[⁄^àòX⁄Ÿ[ôà[ú›\‹ùYö\ú›X€\‹»ö[Z]]ôHà
+ »⁄›»ö[Z]]ôBà⁄\ôBà›\úöYYà‹\ò]‹àH\ôH	àô[ô\ê⁄^ì[XôHûà	àô[ô\ê⁄^ì[XôHûHà	äà
+ »‹\ò]‹à
+ »àJHÇÇò€€\[S]\ò[éà]\ò[OàZ]\à›ö[ô»›ö[ô¬ò€€\[S]\ò[Hÿ\ŸBà]ò]ù[Xô\àOà\ôH
+⁄›»ù[Xô\äBà]€‹ôçù[Xô\àOà\ôH
+⁄›»ù[Xô\äBà]õÿ]ù[Xô\àOà\ôH
+⁄›»ù[Xô\äBà]›ö[ô»ò[YHOà\ôH
+ÿ⁄[YT›ö[ô»
+^ù[úX⁄»ò[YJJBà]⁄\àò[YHOà\ôH	à◊à
+ »›ò[YWBà]Sò[YHò[YHOà\ôH	â»à
+ »X[ô€TSò[YHò[YBà]\ò[]Y]HﬂHOàYù	ê›XöXÿ[⁄^àòX⁄Ÿ[ôàÿ[õõ›€€\[HY]H]\ò[à
+ »⁄›»]\ò[Çõ€⁄›\ò\öXXõHéà‘›ö[ô◊HOà[ùOàZ]\à›ö[ô»›ö[ô¬õ€⁄›\ò\öXXõH[ùà[ô^Hÿ\ŸHõ‹[ô^[ùàŸÇàò\öXXõHà»OàöY⁄ò\öXXõBà◊HOàYù	ê›XöXÿ[⁄^àòX⁄Ÿ[ôà[ùò[YHúùZZõà[ô^à
+ »⁄›»[ô^Çò\S€ôHéà›ö[ô»Oà›ö[ô»Oà›ö[ô¬ò\S€ôHù[ò›[€à\ô›[Y[ùHäà
+ »ù[ò›[€à
+ »àà
+ »\ô›[Y[ù
+ »äHÇÇõX[ô€TSò[YHéàSò[YHOà›ö[ô¬õX[ô€TSò[YHH
+òYŸW»à
+  Hà€€òÿ]X\[ò€ŸHàô]T⁄›¬à⁄\ôBà[ò€ŸH⁄\òX›\Çà\–[Sù[H⁄\òX›\àHÿ⁄\òX›\óBà›\ù⁄\ŸHHó»à
+ »⁄›“^
+‹ô⁄\òX›\äHó»ÇÇúÿ⁄[YT›ö[ô»éà›ö[ô»Oà›ö[ô¬úÿ⁄[YT›ö[ô»H⁄›¬Çúô[ô\ë[\éà–€€\[YYóHOà‘Sò[YWHOà›ö[ô¬úô[ô\ë[\Yú»[úô\€€ôYH[õ[ô\»	à€€òÿ]X\ô[ô\àYú¬à
+ »ÿ\ŸH[úô\€€ôYŸÇà◊HOà◊Bàò[Y\»Oàï[úô\€€ôYù[ù[YHYö[ö][€úŒàààX\
+
+àà
+  Hàô]T⁄› Hò[Y\¬à⁄\ôBàô[ô\à€€\[YBà»ô]T⁄›»
+€€\[Yò[YH€€\[Y
+Bààà
+ »›[[X\ö^ôU\õH
+€€\[Y\õH€€\[Y
+BàBÇú›[[X\ö^ôU\õHéà\õHOà›ö[ô¬ú›[[X\ö^ôU\õHHÿ\ŸBàò\à[ô^Oàïò\àà
+ »⁄›»[ô^àö[Hö[Z]]ôHOàïö[Hà
+ »⁄›»ö[Z]]ôBàYàò[YHOàïYäà
+ »ô]T⁄›»ò[YH
+ »äHÇà\ù[ò›[€à\ô›[Y[ù»OÇàï\
+à
+ »›[[X\ö^ôU\õHù[ò›[€à
+ »ã»à
+ »€€[XTŸ\\ò]Y
+X\›[[X\ö^ôU\õH\ô›[Y[ù H
+ »óJHÇà[HõŸHOàï[Jà
+ »›[[X\ö^ôU\õHõŸH
+ »äHÇà]]\ò[Oàï]
+à
+ »⁄›»]\ò[
+ »äHÇà€€àò[YHOàï€€äà
+ »ô]T⁄›»ò[YH
+ »äHÇà]ò[YHõŸHOàï]
+à
+ »›[[X\ö^ôU\õHò[YH
+ »ãà
+ »›[[X\ö^ôU\õHõŸH
+ »äHÇàÿ\ŸHÿ‹ù][ôYH[ôõ»ò[òX⁄»[\õò]]ô\»OÇàïÿ\ŸJà
+ »⁄›»ÿ‹ù][ôYH
+ »ãà
+ »›[[X\ö^ôPÿ\ŸU\H
+ÿ\ŸU\H[ôõ H
+ »ãÇà
+ »›[[X\ö^ôU\õHò[òX⁄»
+ »ã»à
+ »€€[XTŸ\\ò]Y
+X\›[[X\ö^ôP[\õò]]ôH[\õò]]ô\ H
+ »óJHÇà[ö]Oàï[ö]Çà€‹ùOàï€‹ùÇà\ò\ŸYOàï\ò\ŸYÇà€Ÿ\òŸH\õHOàï€Ÿ\òŸJà
+ »›[[X\ö^ôU\õH\õH
+ »äHÇà\úõ‹àõÿõ[HOàï\úõ‹äà
+ »⁄›»õÿõ[H
+ »äHÇà⁄\ôBà›[[X\ö^ôP[\õò]]ôHHÿ\ŸBàP€€à€€ú›ùX›‹à\ö]HõŸHOÇàïP€€äà
+ »ô]T⁄›»€€ú›ùX›‹à
+ »ãà
+ »⁄›»\ö]H
+ »ãà
+ »›[[X\ö^ôU\õHõŸH
+ »äHÇàQ›X\ô›X\ôõŸHOÇàïQ›X\ô
+à
+ »›[[X\ö^ôU\õH›X\ô
+ »ãà
+ »›[[X\ö^ôU\õHõŸH
+ »äHÇàS]]\ò[õŸHOÇàïS]
+à
+ »⁄›»]\ò[
+ »ãà
+ »›[[X\ö^ôU\õHõŸH
+ »äHÇÇú›[[X\ö^ôPÿ\ŸU\Héàÿ\ŸU\HOà›ö[ô¬ú›[[X\ö^ôPÿ\ŸU\HHÿ\ŸBà’]Hò[YHOàê’]Jà
+ »ô]T⁄›»ò[YH
+ »äHÇà’ò]Oàê’ò]Çà’[ùOàê’[ùÇà’⁄\àOàê’⁄\àÇà’›ö[ô»Oàê’›ö[ô»Çà’õÿ]Oàê’õÿ]Çà’Sò[YHOàê’Sò[YHÇÇò€€[XTŸ\\ò]Yéà‘›ö[ô◊HOà›ö[ô¬ò€€[XTŸ\\ò]YHõ€àõ⁄[ààÇà⁄\ôBàõ⁄[à][HààH][Bàõ⁄[à][Hô\›H][H
+ »ãà
+ »ô\›

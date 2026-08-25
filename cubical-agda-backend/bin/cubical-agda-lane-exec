@@ -10,6 +10,9 @@ classification=
 expression=
 consumer=
 consumer_source=
+runtime_fuel=
+runtime_allocations=
+runtime_packet_bytes=
 declare -a include_dirs=('')
 declare -a agda_args=('')
 while [[ $# -gt 0 ]]; do
@@ -19,6 +22,9 @@ while [[ $# -gt 0 ]]; do
     --expression) need_value "$@"; expression=$2; shift 2 ;;
     --consumer) need_value "$@"; consumer=$2; shift 2 ;;
     --consumer-source) need_value "$@"; consumer_source=$2; shift 2 ;;
+    --runtime-fuel) need_value "$@"; runtime_fuel=$2; shift 2 ;;
+    --runtime-allocations) need_value "$@"; runtime_allocations=$2; shift 2 ;;
+    --runtime-packet-bytes) need_value "$@"; runtime_packet_bytes=$2; shift 2 ;;
     --include) need_value "$@"; include_dirs+=("$2"); shift 2 ;;
     --agda-arg) need_value "$@"; agda_args+=("$2"); shift 2 ;;
     *) fail "unknown argument: $1" ;;
@@ -28,7 +34,17 @@ done
 lane=${CUBICAL_DISPATCH_LANE:-}
 source_file=${CUBICAL_DISPATCH_SOURCE:-}
 analysis_source_sha256=${CUBICAL_DISPATCH_SOURCE_SHA256:-}
+analysis_input_tree_sha256=${CUBICAL_DISPATCH_INPUT_TREE_SHA256:-}
+analysis_interface_module=${CUBICAL_DISPATCH_INTERFACE_MODULE:-}
+analysis_interface_hash=${CUBICAL_DISPATCH_INTERFACE_HASH:-}
 case $lane in native|packet|runtime-nbe) ;; *) fail "invalid production lane: $lane" ;; esac
+for limit_name in runtime_fuel runtime_allocations runtime_packet_bytes; do
+  limit_value=${!limit_name}
+  [[ -z $limit_value || $limit_value =~ ^[1-9][0-9]*$ ]] ||
+    fail "$limit_name must be a positive decimal integer"
+  [[ -z $limit_value || $lane == runtime-nbe ]] ||
+    fail "$limit_name is valid only for the runtime-nbe lane"
+done
 [[ -f $source_file ]] || fail "checked source is missing: $source_file"
 [[ -d $output_dir ]] || fail "output directory does not exist: $output_dir"
 
@@ -46,10 +62,57 @@ sha256_file() {
   fi
 }
 
+sha256_stream() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{ print $1 }'
+  else
+    shasum -a 256 | awk '{ print $1 }'
+  fi
+}
+
+tree_sha256() {
+  local directory=$1
+  if find "$directory" -type l -print -quit | grep -q .; then
+    fail "immutable input tree contains a symbolic link: $directory"
+  fi
+  (
+    CDPATH= cd -- "$directory"
+    find . -type f -print | LC_ALL=C sort | while IFS= read -r relative; do
+      printf '%s\t%s\n' "$(sha256_file "$relative")" "$relative"
+    done
+  ) | sha256_stream
+}
+
+current_input_identity() {
+  {
+    printf 'source\t%s\n' "$(tree_sha256 "$source_dir")"
+    printf 'consumer\t%s\n' "$(tree_sha256 "$consumer_dir")"
+    local index=0 identity_include
+    for identity_include in "${include_dirs[@]:1}"; do
+      index=$((index + 1))
+      printf 'include-%s\t%s\n' "$index" "$(tree_sha256 "$identity_include")"
+    done
+  } | sha256_stream
+}
+
+verify_input_identity() {
+  [[ $(current_input_identity) == "$analysis_input_tree_sha256" ]] ||
+    fail "immutable source/dependency snapshot no longer matches the checked analysis"
+}
+
 [[ $analysis_source_sha256 =~ ^[0-9a-f]{64}$ ]] ||
   fail "dispatch supplied no valid analysis source SHA-256"
 [[ $(sha256_file "$source_file") == "$analysis_source_sha256" ]] ||
   fail "source changed after analysis and before lane execution"
+[[ $analysis_input_tree_sha256 =~ ^[0-9a-f]{64}$ ]] ||
+  fail "dispatch supplied no valid analysis input-tree SHA-256"
+[[ -n $analysis_interface_module && -n $analysis_interface_hash ]] ||
+  fail "dispatch supplied no checked interface identity"
+for include_dir in "${include_dirs[@]:1}"; do
+  [[ -d $include_dir ]] || fail "include directory does not exist: $include_dir"
+done
+consumer_dir=$(CDPATH= cd -- "$(dirname -- "$consumer_source")" && pwd -P)
+verify_input_identity
 
 stage=$(mktemp -d "$output_dir/.lane-exec.XXXXXX")
 success=no
@@ -80,9 +143,19 @@ interrupt_child() {
   local signal=$1 status=$2
   if [[ -n $child_pid ]]; then
     kill -s "$signal" "$child_pid" 2>/dev/null || true
+    kill -CONT "$child_pid" 2>/dev/null || true
     wait "$child_pid" 2>/dev/null || true
   fi
   exit "$status"
+}
+record_child() {
+  if [[ ${CUBICAL_TEST_CANCEL_STAGE:-} == "$1" ]]; then
+    kill -STOP "$child_pid" 2>/dev/null || return 0
+  fi
+  printf '%s\t%s\n' "$1" "$child_pid" > "$stage/active-stage.tsv"
+}
+clear_child() {
+  rm -f -- "$stage/active-stage.tsv"
 }
 trap cleanup EXIT
 trap 'interrupt_child HUP 129' HUP
@@ -108,20 +181,26 @@ case $lane in
     for include_dir in "${include_dirs[@]:1}"; do
       native_command+=(--include "$include_dir")
     done
+    verify_input_identity
     set +e
     "${native_command[@]}" &
     child_pid=$!
+    record_child native-compile
     wait "$child_pid"
     native_compile_status=$?
     child_pid=
+    clear_child
     set -e
     [[ $native_compile_status -eq 0 ]] || exit "$native_compile_status"
+    verify_input_identity
     set +e
     "$output_dir/native-program" > "$stage/observation" 2> "$stage/native.stderr" &
     child_pid=$!
+    record_child native-program
     wait "$child_pid"
     native_status=$?
     child_pid=
+    clear_child
     set -e
     if [[ $native_status -ne 0 ]]; then
       cat "$stage/observation"; cat "$stage/native.stderr" >&2; exit "$native_status"
@@ -135,6 +214,9 @@ case $lane in
       printf 'term-packet\tnone\n'
       printf 'runtime-nbe\tnone\n'
       printf 'source-sha256\t%s\n' "$(sha256_file "$source_file")"
+      printf 'input-tree-sha256\t%s\n' "$analysis_input_tree_sha256"
+      printf 'interface-top-level-module\t%s\n' "$analysis_interface_module"
+      printf 'interface-full-hash\t%s\n' "$analysis_interface_hash"
       printf 'binary-sha256\t%s\n' "$(sha256_file "$output_dir/native-program")"
       printf 'observation-sha256\t%s\n' "$(sha256_file "$output_dir/native.observation")"
       printf 'result\tPASS\n'
@@ -150,35 +232,48 @@ case $lane in
     [[ -f $consumer_source ]] || fail "packet consumer source is missing: $consumer_source"
     consumer_dir=$(CDPATH= cd -- "$(dirname -- "$consumer_source")" && pwd -P)
     consumer_source=$consumer_dir/$(basename -- "$consumer_source")
+    verify_input_identity
     declare -a producer=(-v0 -i "$source_dir" --no-write-interfaces)
+    for include_dir in "${include_dirs[@]:1}"; do
+      producer+=(-i "$include_dir")
+    done
     producer+=("${agda_args[@]:1}" "--cubical-export=$expression" \
       "--cubical-term-file=$stage/term.packet" "$source_file")
     set +e
     Agda_datadir="$packet_agda_data" "$runner" "${producer[@]}" \
       > "$stage/producer.stdout" 2> "$stage/producer.stderr" &
     child_pid=$!
+    record_child packet-producer
     wait "$child_pid"
     producer_status=$?
     child_pid=
+    clear_child
     set -e
     if [[ $producer_status -ne 0 ]]; then
       cat "$stage/producer.stdout"; cat "$stage/producer.stderr" >&2; exit "$producer_status"
     fi
     [[ -s $stage/term.packet ]] || fail "packet producer emitted no Term packet"
+    verify_input_identity
     declare -a importer=(-v0 -i "$consumer_dir" --no-write-interfaces)
+    for include_dir in "${include_dirs[@]:1}"; do
+      importer+=(-i "$include_dir")
+    done
     importer+=("${agda_args[@]:1}" "--cubical-import=$consumer" \
       "--cubical-term-file=$stage/term.packet" "$consumer_source")
     set +e
     Agda_datadir="$packet_agda_data" "$runner" "${importer[@]}" \
       > "$stage/observation" 2> "$stage/consumer.stderr" &
     child_pid=$!
+    record_child packet-consumer
     wait "$child_pid"
     consumer_status=$?
     child_pid=
+    clear_child
     set -e
     if [[ $consumer_status -ne 0 ]]; then
       cat "$stage/observation"; cat "$stage/consumer.stderr" >&2; exit "$consumer_status"
     fi
+    verify_input_identity
     mv -- "$stage/term.packet" "$output_dir/term.packet"
     mv -- "$stage/observation" "$output_dir/packet.observation"
     {
@@ -189,6 +284,10 @@ case $lane in
       printf 'semantic-closure\tnone\n'
       printf 'tcstate\tnone\n'
       printf 'source-sha256\t%s\n' "$(sha256_file "$source_file")"
+      printf 'input-tree-sha256\t%s\n' "$analysis_input_tree_sha256"
+      printf 'interface-top-level-module\t%s\n' "$analysis_interface_module"
+      printf 'interface-full-hash\t%s\n' "$analysis_interface_hash"
+      printf 'interface-verification\tproducer-envelope+consumer-recheck\n'
       printf 'consumer-source-sha256\t%s\n' "$(sha256_file "$consumer_source")"
       printf 'runner-sha256\t%s\n' "$(sha256_file "$runner")"
       printf 'packet-sha256\t%s\n' "$(sha256_file "$output_dir/term.packet")"
@@ -210,34 +309,53 @@ case $lane in
     sh "$repo_root/test/scripts/check-ghc-symbols.sh" "$final_program" \
       _Core_eval_info _Quotation_quoteUnfold_info || fail "final program lacks cctt symbols"
     declare -a runtime_common=(-v0 -i "$source_dir" --no-write-interfaces)
+    for include_dir in "${include_dirs[@]:1}"; do
+      runtime_common+=(-i "$include_dir")
+    done
     runtime_common+=("${agda_args[@]:1}")
+    verify_input_identity
     set +e
     Agda_datadir="$runtime_agda_data" "$bridge" "${runtime_common[@]}" \
       "--cubical-runtime-nbe-export=$expression" \
       "--cubical-runtime-nbe-file=$stage/runtime.packet" "$source_file" \
       > "$stage/bridge.stdout" 2> "$stage/bridge.stderr" &
     child_pid=$!
+    record_child runtime-bridge
     wait "$child_pid"
     bridge_status=$?
     child_pid=
+    clear_child
     set -e
     if [[ $bridge_status -ne 0 ]]; then
       cat "$stage/bridge.stdout"; cat "$stage/bridge.stderr" >&2; exit "$bridge_status"
     fi
     [[ -s $stage/runtime.packet ]] || fail "runtime bridge emitted no packet"
+    verify_input_identity
     context=$(sed -n '2s/.*packetContext = "\([^"]*\)".*/\1/p' "$stage/runtime.packet")
     [[ -n $context ]] || fail "runtime packet has no compiled-context identity"
+    expected_context="agda-internal-v1:$analysis_interface_hash:$analysis_interface_module"
+    [[ $context == "$expected_context" ]] ||
+      fail "runtime packet interface identity differs from the checked analysis"
+    declare -a runtime_limit_args=('')
+    [[ -z $runtime_fuel ]] || runtime_limit_args+=("--fuel=$runtime_fuel")
+    [[ -z $runtime_allocations ]] ||
+      runtime_limit_args+=("--allocations=$runtime_allocations")
+    [[ -z $runtime_packet_bytes ]] ||
+      runtime_limit_args+=("--packet-bytes=$runtime_packet_bytes")
     set +e
-    "$final_program" "$context" "$stage/runtime.packet" \
+    "$final_program" "${runtime_limit_args[@]:1}" "$context" "$stage/runtime.packet" \
       > "$stage/observation" 2> "$stage/final.stderr" &
     child_pid=$!
+    record_child runtime-final
     wait "$child_pid"
     final_status=$?
     child_pid=
+    clear_child
     set -e
     if [[ $final_status -ne 0 ]]; then
       cat "$stage/observation"; cat "$stage/final.stderr" >&2; exit "$final_status"
     fi
+    verify_input_identity
     grep -q '^OK' "$stage/observation" || fail "linked final program returned no runtime success"
     mv -- "$stage/runtime.packet" "$output_dir/runtime-nbe.packet"
     mv -- "$stage/observation" "$output_dir/runtime-nbe.observation"
@@ -248,11 +366,18 @@ case $lane in
       printf 'execution\tlinked-final-program-process\n'
       printf 'compiler-subprocess\tnone\n'
       printf 'source-sha256\t%s\n' "$(sha256_file "$source_file")"
+      printf 'input-tree-sha256\t%s\n' "$analysis_input_tree_sha256"
+      printf 'interface-top-level-module\t%s\n' "$analysis_interface_module"
+      printf 'interface-full-hash\t%s\n' "$analysis_interface_hash"
+      printf 'interface-verification\tbridge-context+linked-runtime-recheck\n'
       printf 'bridge-sha256\t%s\n' "$(sha256_file "$bridge")"
       printf 'final-program-sha256\t%s\n' "$(sha256_file "$final_program")"
       printf 'packet-sha256\t%s\n' "$(sha256_file "$output_dir/runtime-nbe.packet")"
       printf 'observation-sha256\t%s\n' "$(sha256_file "$output_dir/runtime-nbe.observation")"
       printf 'compiled-context\t%s\n' "$context"
+      printf 'runtime-fuel\t%s\n' "${runtime_fuel:-default}"
+      printf 'runtime-allocations\t%s\n' "${runtime_allocations:-default}"
+      printf 'runtime-packet-bytes\t%s\n' "${runtime_packet_bytes:-default}"
       printf 'provider\tcctt-core-runtime-v1@ba16f3758a322e9be77ada1da2b93f45d500192e\n'
       printf 'result\tPASS\n'
     } > "$stage/provenance"

@@ -259,7 +259,7 @@ verify-runtime-source-audit:
 verify-three-lane-dispatch:
 	sh test/scripts/verify-three-lane-dispatch.sh
 
-verify-three-lane-e2e: build build-three-lane-analyzer build-runtime-nbe build-runtime-nbe-agda-bridge build-runtime-nbe-final-program verify-v2-runtime
+verify-three-lane-e2e: build-three-lane-analyzer build-runtime-nbe build-runtime-nbe-agda-bridge build-runtime-nbe-final-program verify-v2-runtime
 	ANALYZER_AGDA_DATADIR="$(ANALYZER_AGDA_DATADIR)" \
 	AGDA29_SOURCE_DIR="$(AGDA29_SOURCE_DIR)" \
 	CUBICAL29_DIR="$(CUBICAL29_DIR)" \

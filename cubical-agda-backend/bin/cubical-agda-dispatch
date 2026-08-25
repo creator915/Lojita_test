@@ -114,6 +114,18 @@ analysis_source_sha256=$(manifest_value source-sha256) ||
   fail "analysis must contain exactly one non-empty source-sha256"
 [[ $analysis_source_sha256 =~ ^[0-9a-f]{64}$ ]] ||
   fail "analysis source-sha256 must be 64 lowercase hexadecimal characters"
+analysis_input_tree_sha256=$(manifest_value input-tree-sha256) ||
+  fail "analysis must contain exactly one non-empty input-tree-sha256"
+[[ $analysis_input_tree_sha256 =~ ^[0-9a-f]{64}$ ]] ||
+  fail "analysis input-tree-sha256 must be 64 lowercase hexadecimal characters"
+interface_identity=$(manifest_value interface-identity) ||
+  fail "analysis must contain exactly one non-empty interface-identity"
+[[ $interface_identity == top-level-module+full-interface-hash ]] ||
+  fail "analysis has an unsupported interface identity contract: $interface_identity"
+interface_top_level_module=$(manifest_value interface-top-level-module) ||
+  fail "analysis must contain exactly one non-empty interface-top-level-module"
+interface_full_hash=$(manifest_value interface-full-hash) ||
+  fail "analysis must contain exactly one non-empty interface-full-hash"
 
 case $binding_time:$boundary in
   static:none)
@@ -231,6 +243,9 @@ case $lane in
     CUBICAL_DISPATCH_ANALYSIS=$analysis \
     CUBICAL_DISPATCH_SOURCE=$source_file \
     CUBICAL_DISPATCH_SOURCE_SHA256=$analysis_source_sha256 \
+    CUBICAL_DISPATCH_INPUT_TREE_SHA256=$analysis_input_tree_sha256 \
+    CUBICAL_DISPATCH_INTERFACE_MODULE=$interface_top_level_module \
+    CUBICAL_DISPATCH_INTERFACE_HASH=$interface_full_hash \
     CUBICAL_DISPATCH_BOUNDARY=$boundary \
       "$selected_exec" "${native_args[@]:1}" &
     ;;
@@ -239,6 +254,9 @@ case $lane in
     CUBICAL_DISPATCH_ANALYSIS=$analysis \
     CUBICAL_DISPATCH_SOURCE=$source_file \
     CUBICAL_DISPATCH_SOURCE_SHA256=$analysis_source_sha256 \
+    CUBICAL_DISPATCH_INPUT_TREE_SHA256=$analysis_input_tree_sha256 \
+    CUBICAL_DISPATCH_INTERFACE_MODULE=$interface_top_level_module \
+    CUBICAL_DISPATCH_INTERFACE_HASH=$interface_full_hash \
     CUBICAL_DISPATCH_BOUNDARY=$boundary \
       "$selected_exec" "${packet_args[@]:1}" &
     ;;
@@ -247,6 +265,9 @@ case $lane in
     CUBICAL_DISPATCH_ANALYSIS=$analysis \
     CUBICAL_DISPATCH_SOURCE=$source_file \
     CUBICAL_DISPATCH_SOURCE_SHA256=$analysis_source_sha256 \
+    CUBICAL_DISPATCH_INPUT_TREE_SHA256=$analysis_input_tree_sha256 \
+    CUBICAL_DISPATCH_INTERFACE_MODULE=$interface_top_level_module \
+    CUBICAL_DISPATCH_INTERFACE_HASH=$interface_full_hash \
     CUBICAL_DISPATCH_BOUNDARY=$boundary \
       "$selected_exec" "${runtime_nbe_args[@]:1}" &
     ;;
@@ -274,6 +295,10 @@ trap cleanup EXIT HUP INT TERM
   printf 'analysis-decision\t%s\n' "$analysis_decision"
   printf 'type-erasure-authorized\t%s\n' "$type_erasure_authorized"
   printf 'source-sha256\t%s\n' "$source_sha256"
+  printf 'input-tree-sha256\t%s\n' "$analysis_input_tree_sha256"
+  printf 'interface-identity\t%s\n' "$interface_identity"
+  printf 'interface-top-level-module\t%s\n' "$interface_top_level_module"
+  printf 'interface-full-hash\t%s\n' "$interface_full_hash"
   printf 'analysis-sha256\t%s\n' "$analysis_sha256"
   printf 'executor-sha256\t%s\n' "$executor_sha256"
   printf 'arguments-sha256\t%s\n' "$arguments_sha256"

@@ -51,6 +51,10 @@ write_analysis() {
     printf 'decision: %s\n' "$decision"
     printf 'type-erasure-authorized: %s\n' "$erasure"
     printf 'source-sha256: %s\n' "$(sha256_file "$workspace/source.agda")"
+    printf 'input-tree-sha256: %s\n' "$(sha256_file "$workspace/source.agda")"
+    printf 'interface-identity: top-level-module+full-interface-hash\n'
+    printf 'interface-top-level-module: DispatchFixture\n'
+    printf 'interface-full-hash: 123456789\n'
   } > "$file"
 }
 
@@ -189,7 +193,7 @@ for provenance in \
   "$workspace/packet.provenance.tsv" \
   "$workspace/runtime.provenance.tsv"
 do
-  for identity in source-sha256 analysis-sha256 executor-sha256 arguments-sha256
+  for identity in source-sha256 input-tree-sha256 analysis-sha256 executor-sha256 arguments-sha256
   do
     awk -F '\t' -v key="$identity" '
       $1 == key && length($2) == 64 && $2 !~ /[^0-9a-f]/ { found++ }

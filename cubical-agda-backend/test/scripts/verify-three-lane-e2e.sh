@@ -8,9 +8,11 @@ dispatcher=$repo_root/bin/cubical-agda-dispatch
 lane_exec=$repo_root/bin/cubical-agda-lane-exec
 analyzer=$repo_root/build/cubical-chez-agda29
 native_fixture=$repo_root/test/fixtures/three-lane/NativeProgram.agda
+native_no_main=$repo_root/test/fixtures/three-lane/NativeNoMain.agda
 packet_fixture=$repo_root/test/fixtures/agda/PacketResidual.agda
 packet_other_module=$repo_root/test/fixtures/agda/PacketOtherModule.agda
 runtime_fixture=$repo_root/test/fixtures/transport/TransportBoundary.agda
+packet_stage_fixture=$repo_root/test/fixtures/transport/TransportHigher.agda
 native_lock=$repo_root/config/native-toolchain.lock.tsv
 
 : "${ANALYZER_AGDA_DATADIR:?set ANALYZER_AGDA_DATADIR}"
@@ -28,15 +30,19 @@ packet_runner=$(CDPATH= cd -- "$AGDA29_SOURCE_DIR" &&
   "$CABAL29" list-bin -w "$GHC29" exe:agda-cubical-run)
 runtime_bridge=$repo_root/build/runtime-nbe/agda-runtime-nbe-bridge
 runtime_final=$repo_root/build/runtime-nbe/final-program/RuntimeNbeFinal
-runtime_standalone=$repo_root/build/runtime-nbe/cubical-runtime-nbe
 
 evidence_root=$repo_root/build/three-lane-e2e
 mkdir -p "$evidence_root"
 workspace=$(mktemp -d "$evidence_root/run.XXXXXX")
 execution_root=$(mktemp -d "${TMPDIR:-/tmp}/cubical-agda-three-lane-e2e.XXXXXX")
+active_cancel_pid=
 archive_execution() {
   status=$?
   set +e
+  if [[ -n $active_cancel_pid ]] && kill -0 "$active_cancel_pid" 2>/dev/null; then
+    kill -TERM "$active_cancel_pid" 2>/dev/null || true
+    wait "$active_cancel_pid" 2>/dev/null || true
+  fi
   for directory in program-output cancel-output; do
     [[ -d $execution_root/$directory ]] && cp -a -- "$execution_root/$directory" "$workspace/"
   done
@@ -47,13 +53,12 @@ trap archive_execution EXIT
 
 fail() { echo "ThreeLaneE2E FAIL: $*" >&2; exit 1; }
 for executable in "$program" "$dispatcher" "$lane_exec" "$analyzer" "$packet_runner" "$runtime_bridge" \
-  "$runtime_final" "$runtime_standalone" "$NATIVE_AGDA" "$NATIVE_GHC"; do
+  "$runtime_final" "$NATIVE_AGDA" "$NATIVE_GHC"; do
   [[ -x $executable ]] || fail "required executable is missing: $executable"
 done
 [[ -d $NATIVE_AGDA_SOURCE_DIR/.git ]] || fail "locked Agda source is missing"
 [[ -f $CUBICAL29_DIR/cubical.agda-lib ]] || fail "locked Cubical library is missing"
 
-library_file=$workspace/libraries
 shared_output=$execution_root/program-output
 mkdir -p "$shared_output"
 declare -a program_environment=(
@@ -71,6 +76,14 @@ declare -a program_environment=(
   "CUBICAL_RUNTIME_FINAL_PROGRAM=$runtime_final"
 )
 run_program() { env "${program_environment[@]}" "$program" "$@" --agda-arg -v0; }
+cubical_agda_args=(
+  --agda-arg --no-libraries
+  --agda-arg --safe
+  --agda-arg --cubical
+  --agda-arg --no-import-sorts
+  --agda-arg -WnoUnsupportedIndexedMatch
+  --agda-arg --guardedness
+)
 require_field() {
   local file=$1 key=$2 expected=$3
   awk -F '\t' -v key="$key" -v expected="$expected" '
@@ -107,18 +120,94 @@ assert_no_publications() {
   assert_no_staging "$directory"
 }
 
+process_tree() {
+  local pending=$1 all=$1 parent children child
+  while [[ -n $pending ]]; do
+    parent=${pending%% *}
+    if [[ $pending == *' '* ]]; then pending=${pending#* }; else pending=; fi
+    children=$(pgrep -P "$parent" 2>/dev/null || true)
+    for child in $children; do
+      all="$all $child"
+      pending="${pending:+$pending }$child"
+    done
+  done
+  printf '%s\n' "$all"
+}
+
+cancel_at_stage() {
+  local label=$1 expected_stage=$2
+  shift 2
+  local output=$execution_root/cancel-$label attempt=0 run_pid marker stage_record
+  local stage_name stage_pid observed_pids status poll
+  while [[ $attempt -lt 8 ]]; do
+    attempt=$((attempt + 1))
+    rm -rf -- "$output"
+    mkdir -p "$output"
+    env "${program_environment[@]}" CUBICAL_TEST_CANCEL_STAGE="$expected_stage" \
+      "$program" "$@" --output-dir "$output" \
+      --agda-arg -v0 \
+      > "$workspace/cancel-$label-$attempt.stdout" \
+      2> "$workspace/cancel-$label-$attempt.stderr" &
+    run_pid=$!
+    active_cancel_pid=$run_pid
+    marker=
+    poll=0
+    while [[ $poll -lt 12000 ]]; do
+      poll=$((poll + 1))
+      marker=$(find "$output" -mindepth 2 -maxdepth 2 -type f \
+        -path '*/.lane-exec.*/active-stage.tsv' -print -quit 2>/dev/null || true)
+      if [[ -n $marker && -s $marker ]]; then
+        stage_record=$(head -n 1 "$marker" 2>/dev/null || true)
+        stage_name=${stage_record%%$'\t'*}
+        stage_pid=${stage_record#*$'\t'}
+        if [[ $stage_name == "$expected_stage" ]] && kill -0 "$stage_pid" 2>/dev/null; then
+          observed_pids=$(process_tree "$stage_pid")
+          kill -TERM "$run_pid" 2>/dev/null || true
+          set +e
+          wait "$run_pid"
+          status=$?
+          set -e
+          active_cancel_pid=
+          if [[ $status -ne 143 ]]; then
+            continue
+          fi
+          assert_no_publications "$output"
+          for stage_pid in $observed_pids; do
+            kill -0 "$stage_pid" 2>/dev/null &&
+              fail "$label cancellation left child process $stage_pid alive"
+          done
+          return 0
+        fi
+      fi
+      kill -0 "$run_pid" 2>/dev/null || break
+      sleep 0.001
+    done
+    set +e
+    wait "$run_pid"
+    set -e
+    active_cancel_pid=
+  done
+  fail "could not deliver TERM while real stage $expected_stage was active"
+}
+
 cubical_workspace=$workspace/cubical
 runtime_source_dir=$workspace/runtime-source
 mkdir -p "$cubical_workspace" "$runtime_source_dir"
 git -C "$CUBICAL29_DIR" archive HEAD | tar -x -C "$cubical_workspace"
 cp "$runtime_fixture" "$runtime_source_dir/TransportBoundary.agda"
+cp "$packet_stage_fixture" "$runtime_source_dir/TransportHigher.agda"
 runtime_fixture=$runtime_source_dir/TransportBoundary.agda
-printf '%s\n' "$cubical_workspace/cubical.agda-lib" > "$library_file"
-Agda_datadir="$NATIVE_AGDA_DATA_DIR" "$NATIVE_AGDA" -v0 \
-  --library-file="$library_file" -l cubical --guardedness \
-  -i "$runtime_source_dir" "$runtime_fixture" \
-  > "$workspace/runtime-warmup.stdout" 2> "$workspace/runtime-warmup.stderr" ||
-  fail "locked Stock Agda interface warmup failed"
+packet_stage_fixture=$runtime_source_dir/TransportHigher.agda
+: > "$workspace/runtime-warmup.stdout"
+: > "$workspace/runtime-warmup.stderr"
+for warmup_source in "$runtime_fixture" "$packet_stage_fixture"; do
+  Agda_datadir="$NATIVE_AGDA_DATA_DIR" "$NATIVE_AGDA" -v0 \
+    --no-libraries --safe --cubical --no-import-sorts \
+    -WnoUnsupportedIndexedMatch --guardedness -i "$runtime_source_dir" \
+    -i "$cubical_workspace" "$warmup_source" \
+    >> "$workspace/runtime-warmup.stdout" 2>> "$workspace/runtime-warmup.stderr" ||
+    fail "locked Stock Agda interface warmup failed"
+done
 
 # Real v2 producer and independent consumer.
 run_program --source "$packet_fixture" --entry main --boundary cross-process \
@@ -131,6 +220,20 @@ require_field "$shared_output/packet.provenance.tsv" semantic-closure none
 [[ ! -e $shared_output/native-program && ! -e $shared_output/runtime-nbe.packet ]] ||
   fail "packet run retained a different lane"
 assert_no_staging "$shared_output"
+
+# A real producer process must fail closed when its own locked Agda data root
+# is unavailable.  The analyzer still uses its independently configured real
+# toolchain, so this failure is isolated to packet production.
+missing_agda_data=$workspace/missing-agda-data
+mkdir -p "$missing_agda_data"
+if env "${program_environment[@]}" CUBICAL_PACKET_AGDA_DATA="$missing_agda_data" \
+  "$program" --source "$packet_fixture" --entry main --boundary cross-process \
+  --output-dir "$shared_output" --packet-expression main --packet-consumer consume \
+  --agda-arg --no-libraries --agda-arg -v0 \
+  > "$workspace/producer-failure.stdout" 2> "$workspace/producer-failure.stderr"; then
+  fail "packet producer with an invalid real Agda data root unexpectedly succeeded"
+fi
+assert_no_publications "$shared_output"
 
 # Real consumer type mismatch, then real module identity mismatch.
 if run_program --source "$packet_fixture" --entry main --boundary cross-process \
@@ -155,24 +258,51 @@ assert_no_publications "$shared_output"
 # Real Agda Internal export and linked Stock-MAlonzo final program/cctt provider.
 run_program --source "$runtime_fixture" --entry t11 --boundary in-process \
   --output-dir "$shared_output" --runtime-expression t11 \
-  --agda-arg "--library-file=$library_file" --agda-arg -l --agda-arg cubical \
-  --agda-arg --guardedness > "$workspace/runtime.stdout" 2> "$workspace/runtime.stderr"
+  --include "$cubical_workspace" "${cubical_agda_args[@]}" \
+  > "$workspace/runtime.stdout" 2> "$workspace/runtime.stderr"
 require_field "$shared_output/dispatch.provenance.tsv" lane runtime-nbe
 require_field "$shared_output/runtime-nbe.provenance.tsv" execution linked-final-program-process
+require_field "$shared_output/runtime-nbe.provenance.tsv" \
+  interface-verification bridge-context+linked-runtime-recheck
 grep -Eq 'provider-calls=[1-9][0-9]*' "$shared_output/runtime-nbe.observation" ||
   fail "linked runtime did not execute the cctt provider"
 [[ ! -e $shared_output/term.packet && ! -e $shared_output/native-program ]] ||
   fail "runtime run retained a different lane"
+cp -- "$shared_output/analysis.txt" "$workspace/runtime.analysis.txt"
 assert_no_staging "$shared_output"
 
-runtime_context=$(awk -F '\t' '$1 == "compiled-context" { print $2; exit }' \
-  "$shared_output/runtime-nbe.provenance.tsv")
-if "$runtime_standalone" --fuel=1 "$runtime_context" "$shared_output/runtime-nbe.packet" \
-  > "$workspace/resource.stdout" 2> "$workspace/resource.stderr"; then
-  fail "runtime packet unexpectedly fit a one-step fuel budget"
+# The real runtime bridge has its own toolchain boundary.  Break only that
+# boundary after a successful real analysis and require full cleanup.
+if env "${program_environment[@]}" CUBICAL_RUNTIME_AGDA_DATA="$missing_agda_data" \
+  "$program" --source "$runtime_fixture" --entry t11 --boundary in-process \
+  --output-dir "$shared_output" --runtime-expression t11 \
+  --include "$cubical_workspace" "${cubical_agda_args[@]}" --agda-arg -v0 \
+  > "$workspace/bridge-failure.stdout" 2> "$workspace/bridge-failure.stderr"; then
+  fail "runtime bridge with an invalid real Agda data root unexpectedly succeeded"
 fi
-grep -Fq CCZ-RUNTIME-NBE-FUEL "$workspace/resource.stdout" ||
-  fail "resource negative missed the real runtime fuel gate"
+assert_no_publications "$shared_output"
+
+# Static analysis succeeds, but the real MAlonzo compilation cannot publish an
+# executable for a module without main.
+if run_program --source "$native_no_main" --entry analysis --boundary none \
+  --output-dir "$shared_output" --native-classification ordinary \
+  --agda-arg --no-libraries > "$workspace/native-failure.stdout" \
+  2> "$workspace/native-failure.stderr"; then
+  fail "native compilation without main unexpectedly published an executable"
+fi
+assert_no_publications "$shared_output"
+
+# Resource enforcement must be selected by the unified production entry, pass
+# through dispatch and the adapter, and fail inside the linked final program.
+if run_program --source "$runtime_fixture" --entry t11 --boundary in-process \
+  --output-dir "$shared_output" --runtime-expression t11 --runtime-fuel 1 \
+  --include "$cubical_workspace" "${cubical_agda_args[@]}" \
+  > "$workspace/resource.stdout" 2> "$workspace/resource.stderr"; then
+  fail "unified runtime lane unexpectedly fit a one-step fuel budget"
+fi
+grep -Fq CCZ-RUNTIME-NBE-FUEL "$workspace/resource.stdout" "$workspace/resource.stderr" ||
+  fail "unified resource negative missed the linked runtime fuel gate"
+assert_no_publications "$shared_output"
 
 # Real Stock Agda -> MAlonzo -> locked GHC executable, reusing one boundary.
 run_program --source "$native_fixture" --entry analysis --boundary none \
@@ -182,6 +312,11 @@ run_program --source "$native_fixture" --entry analysis --boundary none \
   fail "native binary output mismatch"
 require_field "$shared_output/dispatch.provenance.tsv" lane native
 require_field "$shared_output/native.provenance.tsv" term-packet none
+grep -Eq '^interface-full-hash: .+' "$shared_output/analysis.txt" ||
+  fail "analysis omitted the full interface identity"
+require_field "$shared_output/native.provenance.tsv" input-tree-sha256 \
+  "$(awk -F '\t' '$1 == "input-tree-sha256" { print $2 }' \
+    "$shared_output/dispatch.provenance.tsv")"
 grep -Fqx "source-sha256: $(sha256_file "$native_fixture")" \
   "$shared_output/analysis.txt" || fail "analysis was not bound to the native source bytes"
 [[ -x $shared_output/native-program ]] || fail "native executable was not published"
@@ -216,13 +351,45 @@ grep -Fq 'analysis source SHA-256 does not match the current source' \
   fail "post-analysis source mutation missed the stable hash rejection"
 assert_no_publications "$mutation_output"
 
+# The same real runtime analysis is also bound to every snapshotted dependency.
+# Mutating an actually imported Cubical module must reject inside the real lane
+# adapter before the bridge or final program starts.
+dependency_copy=$execution_root/mutated-dependency
+dependency_output=$execution_root/dependency-output
+mkdir -p "$dependency_copy" "$dependency_output"
+cp -R -- "$cubical_workspace/." "$dependency_copy/"
+printf '\n-- changed after analysis\n' >> "$dependency_copy/Cubical/Data/Bool.agda"
+set +e
+env "${program_environment[@]}" "$dispatcher" \
+  --analysis "$workspace/runtime.analysis.txt" --source "$runtime_fixture" \
+  --boundary in-process --provenance "$dependency_output/dispatch.provenance.tsv" \
+  --runtime-nbe-exec "$lane_exec" --runtime-nbe-arg --output-dir \
+  --runtime-nbe-arg "$dependency_output" --runtime-nbe-arg --expression \
+  --runtime-nbe-arg t11 --runtime-nbe-arg --include \
+  --runtime-nbe-arg "$dependency_copy" --runtime-nbe-arg --agda-arg \
+  --runtime-nbe-arg --no-libraries --runtime-nbe-arg --agda-arg \
+  --runtime-nbe-arg --safe --runtime-nbe-arg --agda-arg \
+  --runtime-nbe-arg --cubical --runtime-nbe-arg --agda-arg \
+  --runtime-nbe-arg --no-import-sorts --runtime-nbe-arg --agda-arg \
+  --runtime-nbe-arg -WnoUnsupportedIndexedMatch --runtime-nbe-arg --agda-arg \
+  --runtime-nbe-arg --guardedness \
+  > "$workspace/dependency-mutation.stdout" 2> "$workspace/dependency-mutation.stderr"
+dependency_status=$?
+set -e
+[[ $dependency_status -eq 65 ]] ||
+  fail "post-analysis dependency mutation returned $dependency_status instead of 65"
+grep -Fq 'immutable source/dependency snapshot no longer matches' \
+  "$workspace/dependency-mutation.stderr" ||
+  fail "post-analysis dependency mutation missed the input identity rejection"
+assert_no_publications "$dependency_output"
+
 # TERM during the real analyzer must remove every private and public artifact.
 cancel_output=$execution_root/cancel-output
 mkdir -p "$cancel_output"
 env "${program_environment[@]}" "$program" --source "$runtime_fixture" --entry t11 \
   --boundary cross-process --output-dir "$cancel_output" --packet-expression t11 \
-  --packet-consumer c16a --agda-arg "--library-file=$library_file" \
-  --agda-arg -l --agda-arg cubical --agda-arg --guardedness --agda-arg -v0 \
+  --packet-consumer c16a --include "$cubical_workspace" \
+  "${cubical_agda_args[@]}" --agda-arg -v0 \
   > "$workspace/cancel.stdout" 2> "$workspace/cancel.stderr" &
 cancel_pid=$!
 analysis_stage_seen=no
@@ -243,6 +410,33 @@ set -e
 [[ $cancel_status -ne 0 ]] || fail "cancelled production run returned success"
 assert_no_publications "$cancel_output"
 
+# Deliver TERM while each real production subprocess is active.  The stage
+# marker is private staging evidence written by the adapter after fork; no
+# executable or semantic result is mocked.
+cancel_at_stage native-compile native-compile \
+  --source "$native_fixture" --entry analysis --boundary none \
+  --native-classification ordinary --agda-arg --no-libraries
+
+cancel_at_stage packet-producer packet-producer \
+  --source "$packet_stage_fixture" --entry p16a --boundary cross-process \
+  --packet-expression p16a --packet-consumer c16a \
+  --include "$cubical_workspace" "${cubical_agda_args[@]}"
+
+cancel_at_stage packet-consumer packet-consumer \
+  --source "$packet_stage_fixture" --entry p16a --boundary cross-process \
+  --packet-expression p16a --packet-consumer c16a \
+  --include "$cubical_workspace" "${cubical_agda_args[@]}"
+
+cancel_at_stage runtime-bridge runtime-bridge \
+  --source "$runtime_fixture" --entry t11 --boundary in-process \
+  --runtime-expression t11 --include "$cubical_workspace" \
+  "${cubical_agda_args[@]}"
+
+cancel_at_stage runtime-final runtime-final \
+  --source "$runtime_fixture" --entry t11 --boundary in-process \
+  --runtime-expression t11 --include "$cubical_workspace" \
+  "${cubical_agda_args[@]}"
+
 printf '%s\n' \
-  'ThreeLaneE2E PASS (real analysis; native/Term-packet/linked-NbE; mismatch/resource/cancel cleanup)' \
+  'ThreeLaneE2E PASS (immutable identity; unified resources; real stage failure/cancel cleanup)' \
   "ThreeLaneE2E evidence: $workspace"
