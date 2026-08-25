@@ -192,7 +192,31 @@ fi
 # probe is intentionally semantics-free: each lane's real implementation is
 # exercised by its own aggregate gate, while this check proves the dispatcher
 # consumes the actual Internal/Treeless analysis format rather than only a
-# synthetic fixture.
+# synthetic fixture. In production cubical-agda-run owns the post-analysis
+# source binding; this direct dispatcher contract must reproduce that boundary
+# without letting the analyzer assert its own source identity.
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{ print $1 }'
+  else
+    shasum -a 256 "$1" | awk '{ print $1 }'
+  fi
+}
+bind_analysis_source() {
+  analysis=$1
+  source=$2
+  if grep -q '^source-sha256: ' "$analysis"; then
+    echo "Binding-time analyzer unexpectedly supplied source-sha256" >&2
+    exit 1
+  fi
+  printf 'source-sha256: %s\n' "$(sha256_file "$source")" >> "$analysis"
+}
+bind_analysis_source "$static_dir/staging.txt" "$static_dir/StaticOrdinary.agda"
+bind_analysis_source "$evidence_dir/dynamic/staging.txt" \
+  "$evidence_dir/dynamic/PacketResidual.agda"
+bind_analysis_source "$evidence_dir/mixed/staging.txt" \
+  "$evidence_dir/mixed/MixedResidual.agda"
+
 dispatch_probe="$evidence_dir/dispatch-probe"
 dispatch_log="$evidence_dir/dispatch.log"
 cat > "$dispatch_probe" <<'EOF'
