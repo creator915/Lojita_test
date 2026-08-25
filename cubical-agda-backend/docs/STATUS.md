@@ -44,8 +44,12 @@ Chez/compiler-process-NbE scope and is retired.
   binary-runtime audits from both the working tree and a clean clone.
 - `bin/cubical-agda-run` performs one real checked-entry analysis and
   `bin/cubical-agda-dispatch` deterministically executes exactly one production
-  native, packet, or runtime-nbe adapter. Each publishes independent provenance;
-  the unified real-program gate covers mismatch, resource, cancellation, and
+  native, packet, or runtime-nbe adapter. The entry runs from a read-only
+  source/consumer/include snapshot, binds the result to an aggregate input-tree
+  hash and the real Agda top-level-module/full-interface identity, and publishes
+  analysis only after lane success. Each lane publishes independent provenance;
+  the unified real-program gate covers source/dependency mutation, mismatch,
+  linked-runtime resource limits, per-stage process cancellation, and
   stale-publication cleanup.
 - `runtime/nbe/` builds a compiler-independent runtime package. A real Agda
   Internal producer emits typed requests and definitions, and Stock
@@ -124,8 +128,11 @@ The current and retained candidate evidence is:
   PASS; Goal 1 run `32829677733`, Goal 3 run `32829677729`, and macOS
   second-clone run `32829677728` all PASS;
 - `make verify-three-lane-e2e`: real native/packet/linked-runtime positives,
-  type and identity mismatch, fuel limit, TERM cancellation, and cross-lane
-  stale-publication cleanup PASS;
+  real native compile, packet producer and runtime bridge failures, type/module
+  mismatch, source/dependency identity mutation, unified-entry fuel limit,
+  analyzer TERM, and native compile/program, packet producer/consumer, runtime
+  bridge/final TERM process-tree cleanup PASS locally at reliability hardening
+  commit `e6d44ca`;
 - prototype `make verify-runtime-nbe-oracle`: 2 Agda modules typecheck and 5
   hand-authored runtime expectations PASS; explicitly not differential evidence;
 - Agda 2.9: 155 positive executions and 146 expected rejections PASS;

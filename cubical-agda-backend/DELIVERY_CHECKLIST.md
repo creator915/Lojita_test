@@ -81,6 +81,9 @@ Internal 桥覆盖验收所需的 `transp`/`hcomp`/Glue/Pi/Sigma(record)/S¹
 `bin/cubical-agda-run` 对一个真实 checked entry 只执行一次 binding-time 分析，
 `bin/cubical-agda-dispatch` 据此只调用一条 production lane。三条 adapter、独立
 provenance、失败/取消清理和统一真实程序端到端已由本地及远端 clean-clone 验收。
+统一入口先构造只读的 source/consumer/include 快照并绑定聚合 tree hash；真实 Agda
+Interface 的 top-level module/full hash 随 manifest、packet/runtime context 和各 lane
+provenance 传递。资源限额只从该入口进入最终已链接 runtime，分析仅在 lane 成功后发布。
 
 - [x] **P0** 一次类型/binding-time 分析产生稳定的 native/packet/runtime-nbe 调度决策。
 - [x] **P0** 目标 1 程序必须绕过 packet 和 runtime NbE。
@@ -124,3 +127,8 @@ producer/consumer packet 和最终程序已链接 runtime NbE。Linux 全新克�
 第二 clean-clone run `32829677728` 全部 PASS；类型/身份/资源负例、TERM 取消与跨 lane
 陈旧发布清理均为自动化真实执行。F 节据此关闭。Goal 3 独立语义验收和 G 节总体发布
 门禁仍保持未勾选，本次技术全绿不替代这些验收。
+
+可靠性加固提交 `e6d44ca` 进一步以锁定真实工具链验证 source/dependency mutation、
+interface identity、统一入口 fuel 限额、真实 native compile/packet producer/runtime bridge
+失败，以及 analyzer、native compile/program、packet producer/consumer、runtime bridge/final
+各阶段的 TERM 进程树清理；全部专项 PASS，未等待或替代 GitHub Actions 与发布批准。

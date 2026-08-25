@@ -146,6 +146,12 @@ make verify-formal-transport-production-candidate
 默认 `nbe` 仍为 `FAIL-CLOSED`：未选定并链接生产 provider 时返回
 `CCZ-NBE-UNAVAILABLE`。候选测试构建的通过不会隐式改变默认二进制。
 
+统一三路 production 入口是 `bin/cubical-agda-run`。它接受
+`--source/--entry/--boundary/--output-dir`，通过重复的 `--include` 声明并快照全部
+源码依赖；不接受未纳入 identity 的 Agda library registry 参数。进程内 runtime-NbE
+限额统一使用 `--runtime-fuel N`、`--runtime-allocations N` 和
+`--runtime-packet-bytes N`，由同一调度链传入最终已链接程序。
+
 ## 主要验收命令
 
 ```sh
