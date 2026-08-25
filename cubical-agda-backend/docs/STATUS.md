@@ -19,15 +19,22 @@ Chez/compiler-process-NbE scope and is retired.
 
 - The CubicalChez compiler backend builds from `src/`.
 - Static Chez publication is guarded by Internal and Treeless audits.
+- The final-process source audit is part of `make verify` and uses portable
+  `grep`, not optional `rg`. Its maintained regression runs in an environment
+  without ripgrep and proves that a `System.Process` import is rejected, so a
+  missing macOS `rg` can no longer turn the security check into a skip.
 - Typed residual and packet production retain checked `Term + Type`.
 - The v2 packet consumer source and tests are maintained under
   `runtime/agda-2.9/`; macOS clean-clone run `32753401570` installs the overlay
   into an independent locked Agda source tree and passes file, pipe and
   negative-consumer tests through the aggregate `make verify`.
 - The macOS second-clone workflow folds native, provider, bridge, final MAlonzo
-  and same-input differential gates into `make verify`. The Goal 2 closing
-  baseline's clean-clone run `32753401570` passed. Goal 3 nevertheless
-  remains pending independent semantic acceptance.
+  and same-input differential gates into `make verify`. Goal 2 was closed by
+  clean-clone run `32753401570`; after adding the thin three-lane dispatcher,
+  PR/push runs `32764645788`/`32764640459` both rebuilt the locked Goal 2
+  overlay and passed the complete aggregate from a second clone at
+  `f392f04`. Goal 3 nevertheless remains pending independent semantic
+  acceptance.
 - The isolated compiler-process NbE candidate passed the recorded 8-group,
   42-row differential matrix and controlled O2 provisional performance gate.
 - Default production `nbe` remains fail closed because the provider lock is
@@ -109,6 +116,11 @@ The current and retained candidate evidence is:
   linked symbols, real `PrimTrans`/`PrimHComp`, oracle and no-exec evidence;
 - `make verify-runtime-nbe-differential`: 6/6 exact observations PASS in PR
   run `32701822346` and push run `32701816817`; t11/t11b are proof-linked;
+- `make verify-runtime-source-audit`: portable-grep clean-source PASS and
+  malicious `System.Process` EXPECTED-REJECT locally; the target is also in
+  both current-head macOS clean-clone aggregates;
+- current thin-dispatch head `f392f04`: macOS second-clone `make verify` PASS
+  in PR run `32764645788` and push run `32764640459`;
 - prototype `make verify-runtime-nbe-oracle`: 2 Agda modules typecheck and 5
   hand-authored runtime expectations PASS; explicitly not differential evidence;
 - Agda 2.9: 155 positive executions and 146 expected rejections PASS;

@@ -117,3 +117,9 @@ checked definition 导出 runtime 输入；Agda 对 t11/t11b 的 indexed transpo
 该基线的 Goal 1 run `32753401534`、Goal 3 run `32753401530` 与 macOS clean-clone
 run `32753401570` 均为 PASS。CI 全绿本身不自动构成独立或
 最终用户验收，相关发布门禁保持未勾选。
+
+最薄三路调度加入后的 `f392f04` 继续由 macOS PR/push clean-clone runs
+`32764645788`/`32764640459` 从锁定源码重建 Goal 2 overlay，并在完整
+`make verify` 中通过 packet runtime、安全源码审计和三路调度门禁。安全审计已改为
+portable `grep`，回归明确证明无 `rg` 时仍执行，并拒绝含 `System.Process` 的恶意样本。
+这组后续证据不改变 F/G 节仍未关闭的 production adapter、统一端到端与独立验收门禁。

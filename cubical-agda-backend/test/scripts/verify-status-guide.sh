@@ -79,6 +79,8 @@ require_text "$test_results" 'Goal 2 is 9/9: macOS clean-clone run `32753401570`
 require_text "$test_results" 'correct `App (Var 1) (Var 0)`'
 require_text "$selection_doc" 'GOAL 3 RUNTIME PROVIDER SELECTED'
 require_text "$status_doc" '`goal3-runtime-nbe` workflow'
+require_text "$status_doc" 'missing macOS `rg` can no longer turn the security check into a skip'
+require_text "$test_results" '| `make verify-runtime-source-audit` |'
 [ -s "$workflow" ] || fail "Goal 1 workflow is missing"
 require_text "$workflow" 'locked-stock-native'
 require_text "$goal3_workflow" 'make verify-runtime-nbe-agda-bridge'
