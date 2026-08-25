@@ -1,10 +1,11 @@
-# Thin three-lane dispatcher
+# Production three-lane dispatch and execution
 
-`bin/cubical-agda-dispatch` is a deliberately small policy and execution
-layer. It does not typecheck Agda, translate Internal terms, decode packets, or
-implement runtime Cubical semantics. Instead, it consumes exactly one
-`staging.txt` emitted by the existing checked Internal/Treeless binding-time
-analysis and one explicit deployment boundary.
+`bin/cubical-agda-run` is the production entry point. It performs one real
+checked-entry binding-time analysis, verifies that the requested expression is
+the checked entry, clears prior publications, and hands exactly one stable
+decision to `bin/cubical-agda-dispatch`. The dispatcher remains a small policy
+layer: it consumes that single `staging.txt` plus an explicit deployment
+boundary and invokes only the selected production adapter.
 
 The deterministic mapping is:
 
@@ -21,15 +22,30 @@ arguments literally, without `eval`. On success it atomically publishes
 executor SHA-256 identities plus a literal argument-vector hash. A rejection
 or lane failure removes prior success provenance.
 
-This layer does not broaden Goal 3. The runtime-nbe lane remains limited to the
-already linked and tested Goal 3 runtime fragment. Supplying and validating a
-production final-program adapter, cleaning every lane-specific artifact after
-cancellation, and unified real-program end-to-end acceptance remain open
-integration work; this dispatcher is not evidence that those checklist items
-are complete.
+The selected adapters are real execution paths:
+
+- `native` invokes locked Stock Agda/MAlonzo and locked GHC, bypassing packet
+  and runtime NbE;
+- `packet` invokes the maintained v2 producer and a separate consumer, carrying
+  checked Internal `Term + Type` and no semantic closure or `TCState`;
+- `runtime-nbe` runs the Stock-MAlonzo final program linked to the pinned cctt
+  provider, never the compiler-process candidate.
+
+Each lane publishes its own auditable provenance. Synchronous failures and
+HUP/INT/TERM forward to the child process and remove partial or prior binary,
+Scheme, packet, result, and provenance publications. This does not broaden
+Goal 3 beyond its linked and tested fragment or replace independent semantic
+acceptance.
 
 Run the portable contract with:
 
 ```sh
 make verify-three-lane-dispatch
+make verify-three-lane-e2e
 ```
+
+The second target uses real locked Agda/GHC/Chez/Cubical toolchains. It covers
+all three positives, type mismatch, top-level module identity mismatch, NbE
+fuel exhaustion, TERM cancellation, and cross-lane stale-publication cleanup.
+Commit `6ddd859` passed Linux and macOS clean-clone aggregates; remote runs
+`32829677733`, `32829677729`, and `32829677728` are the retained CI evidence.

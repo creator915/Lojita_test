@@ -58,8 +58,8 @@ open_count=$(awk '/^- \[ \] / { count++ } END { print count + 0 }' "$checklist")
 total_count=$((done_count + open_count))
 completion_pct=$(awk -v done="$done_count" -v total="$total_count" \
   'BEGIN { printf "%.1f", 100 * done / total }')
-[ "$done_count" -eq 42 ] || fail "completed checklist count is $done_count, expected 42"
-[ "$open_count" -eq 14 ] || fail "open checklist count is $open_count, expected 14"
+[ "$done_count" -eq 50 ] || fail "completed checklist count is $done_count, expected 50"
+[ "$open_count" -eq 6 ] || fail "open checklist count is $open_count, expected 6"
 require_text "$checklist" \
   "新范围统计：$done_count/$total_count 项已有实现证据（$completion_pct%）"
 require_text "$checklist" '目标 1 为 9/9'
@@ -72,7 +72,7 @@ require_text "$checklist" '要求与 runtime observation 逐字相等'
 require_text "$readme" '| 1. stock Agda -> MAlonzo -> Haskell -> GHC 二进制 | **已实现并验收** |'
 require_text "$readme" '| 2. 跨进程 `Term + Type` packet | **已实现并验收** |'
 require_text "$readme" '| 3. 最终程序进程内 runtime NbE | **实现项 11/11；clean-clone 全量验证通过，独立验收待定** |'
-require_text "$status_doc" '| Complete revised checklist | 42/56 implementation items | 75.0% by item count; release gates still open |'
+require_text "$status_doc" '| Complete revised checklist | 50/56 implementation items | 89.3% by item count; release gates still open |'
 require_text "$status_doc" '| 3. linked NbE inside the final program process | 11/11 implementation items | CLEAN-CLONE FULL VERIFICATION PASS; independent acceptance pending |'
 require_text "$support_matrix" '| Goal 3 NbE linked into the final program process | `OWNER-BLOCKED` |'
 require_text "$test_results" 'Goal 2 is 9/9: macOS clean-clone run `32753401570`'
@@ -81,6 +81,8 @@ require_text "$selection_doc" 'GOAL 3 RUNTIME PROVIDER SELECTED'
 require_text "$status_doc" '`goal3-runtime-nbe` workflow'
 require_text "$status_doc" 'missing macOS `rg` can no longer turn the security check into a skip'
 require_text "$test_results" '| `make verify-runtime-source-audit` |'
+require_text "$test_results" '| `make verify-three-lane-e2e` |'
+require_text "$checklist" 'F 节据此关闭'
 [ -s "$workflow" ] || fail "Goal 1 workflow is missing"
 require_text "$workflow" 'locked-stock-native'
 require_text "$goal3_workflow" 'make verify-runtime-nbe-agda-bridge'
@@ -125,4 +127,4 @@ if grep -Fq 'make -C backend' \
   fail "pre-flattening make command remains"
 fi
 
-echo "Project status contract PASS ($done_count/$total_count implementation items; Goals 1 and 2 closed, Goal 3 clean verification passed and independent review pending)"
+echo "Project status contract PASS ($done_count/$total_count implementation items; three-lane integration closed, Goal 3 independent review and release gates pending)"

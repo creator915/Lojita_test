@@ -2,7 +2,7 @@
 
 > 范围基准：[`GOALS.md`](GOALS.md) 定义的三路架构。
 > 当前结论：目标 1、目标 2 **已实现并通过 clean-clone 验收**；目标 3 **11/11 实现项和 clean-clone 全量验证已通过，但独立语义验收尚未完成**。
-> 新范围统计：42/56 项已有实现证据（75.0%）；目标 1 为 9/9，目标 2 为 9/9，目标 3 实现项为 11/11；总体交付仍受未勾选门禁阻塞。
+> 新范围统计：50/56 项已有实现证据（89.3%）；目标 1 为 9/9，目标 2 为 9/9，目标 3 实现项为 11/11；总体交付仍受未勾选门禁阻塞。
 > 旧的 `224/321` 统计针对 Chez/编译期 NbE 旧范围，不再代表当前三路目标的完成度。
 
 ## 勾选规则
@@ -10,7 +10,7 @@
 - `[x]`：实现完成且可由仓库内源码、测试或记录定位。
 - `[ ]`：未实现、待决策或待独立验证。
 - P0 为整体交付阻塞；P1 为正式交付必需。
-- 清单项数不按工作量加权；不得用勾选比例掩盖目标 1/3 未完成。
+- 清单项数不按工作量加权；不得用勾选比例掩盖目标 3 独立验收和总体发布门禁未完成。
 
 ## A. 仓库与交付边界
 
@@ -78,18 +78,18 @@ Internal 桥覆盖验收所需的 `transp`/`hcomp`/Glue/Pi/Sigma(record)/S¹
 
 ## F. 三路调度与端到端集成
 
-`bin/cubical-agda-dispatch` 已提供最薄的单次分析决策/执行层，并有真实
-`staging.txt` 格式兼容测试；但 production final-program adapter、统一真实程序端到端和
-跨 lane 取消清理尚未全部验收，因此本节暂不提前勾选。
+`bin/cubical-agda-run` 对一个真实 checked entry 只执行一次 binding-time 分析，
+`bin/cubical-agda-dispatch` 据此只调用一条 production lane。三条 adapter、独立
+provenance、失败/取消清理和统一真实程序端到端已由本地及远端 clean-clone 验收。
 
-- [ ] **P0** 一次类型/binding-time 分析产生稳定的 native/packet/runtime-nbe 调度决策。
-- [ ] **P0** 目标 1 程序必须绕过 packet 和 runtime NbE。
-- [ ] **P0** 跨进程边界必须只发布 Term packet，禁止序列化 semantic closure/TCState。
-- [ ] **P0** 目标 3 调度必须进入已链接 runtime NbE，不得假冒 compiler candidate。
-- [ ] **P1** 每条路径发布独立 provenance，能从产物判定实际路径。
-- [ ] **P1** 失败或取消后不留下过期二进制、Scheme 或 packet。
-- [ ] **P1** 三路正例、类型错配、身份错配和资源超限负例全部自动化。
-- [ ] **P1** 完整验收在 clean clone 和 CI 上可重现。
+- [x] **P0** 一次类型/binding-time 分析产生稳定的 native/packet/runtime-nbe 调度决策。
+- [x] **P0** 目标 1 程序必须绕过 packet 和 runtime NbE。
+- [x] **P0** 跨进程边界必须只发布 Term packet，禁止序列化 semantic closure/TCState。
+- [x] **P0** 目标 3 调度必须进入已链接 runtime NbE，不得假冒 compiler candidate。
+- [x] **P1** 每条路径发布独立 provenance，能从产物判定实际路径。
+- [x] **P1** 失败或取消后不留下过期二进制、Scheme 或 packet。
+- [x] **P1** 三路正例、类型错配、身份错配和资源超限负例全部自动化。
+- [x] **P1** 完整验收在 clean clone 和 CI 上可重现。
 
 ## G. 发布门禁
 
@@ -118,8 +118,9 @@ checked definition 导出 runtime 输入；Agda 对 t11/t11b 的 indexed transpo
 run `32753401570` 均为 PASS。CI 全绿本身不自动构成独立或
 最终用户验收，相关发布门禁保持未勾选。
 
-最薄三路调度加入后的 `f392f04` 继续由 macOS PR/push clean-clone runs
-`32764645788`/`32764640459` 从锁定源码重建 Goal 2 overlay，并在完整
-`make verify` 中通过 packet runtime、安全源码审计和三路调度门禁。安全审计已改为
-portable `grep`，回归明确证明无 `rg` 时仍执行，并拒绝含 `System.Process` 的恶意样本。
-这组后续证据不改变 F/G 节仍未关闭的 production adapter、统一端到端与独立验收门禁。
+三路 production 集成提交 `6ddd859` 从同一个真实分析入口连接 native、独立 v2
+producer/consumer packet 和最终程序已链接 runtime NbE。Linux 全新克隆的完整
+`make verify` 以及远端 Goal 1 run `32829677733`、Goal 3 run `32829677729`、macOS
+第二 clean-clone run `32829677728` 全部 PASS；类型/身份/资源负例、TERM 取消与跨 lane
+陈旧发布清理均为自动化真实执行。F 节据此关闭。Goal 3 独立语义验收和 G 节总体发布
+门禁仍保持未勾选，本次技术全绿不替代这些验收。

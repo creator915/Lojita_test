@@ -54,7 +54,7 @@ do
   require_text "$readme" "$fact"
 done
 
-for command in 'make build' 'make verify-readme-quickstart' 'make verify'
+for command in 'make build' 'make verify-readme-quickstart' 'make verify-three-lane-e2e' 'make verify'
 do
   require_text "$readme" "$command"
 done

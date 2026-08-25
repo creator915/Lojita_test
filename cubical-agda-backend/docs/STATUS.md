@@ -1,6 +1,6 @@
 # Project status
 
-Last updated: 2026-08-24 (Asia/Shanghai)
+Last updated: 2026-08-25 (Asia/Shanghai)
 
 ## Executive status
 
@@ -13,7 +13,7 @@ Chez/compiler-process-NbE scope and is retired.
 | 1. stock Agda -> MAlonzo -> erased Haskell -> native binary | 9/9 | IMPLEMENTED; VERIFIED |
 | 2. cross-process checked `Term + Type` | 9/9 | IMPLEMENTED; VERIFIED |
 | 3. linked NbE inside the final program process | 11/11 implementation items | CLEAN-CLONE FULL VERIFICATION PASS; independent acceptance pending |
-| Complete revised checklist | 42/56 implementation items | 75.0% by item count; release gates still open |
+| Complete revised checklist | 50/56 implementation items | 89.3% by item count; release gates still open |
 
 ## What is usable now
 
@@ -42,10 +42,11 @@ Chez/compiler-process-NbE scope and is retired.
 - The locked stock Agda/MAlonzo/GHC lane passes ordinary and erased-Cubical
   compile/run, stock differential, misclassification, stale-artifact, and
   binary-runtime audits from both the working tree and a clean clone.
-- `bin/cubical-agda-dispatch` deterministically maps one checked staging
-  analysis plus a process boundary to native, packet, or runtime-nbe, executes
-  only that lane, and publishes source/analysis/executor/argument-bound provenance. Production adapters and
-  unified real-program end-to-end acceptance remain open.
+- `bin/cubical-agda-run` performs one real checked-entry analysis and
+  `bin/cubical-agda-dispatch` deterministically executes exactly one production
+  native, packet, or runtime-nbe adapter. Each publishes independent provenance;
+  the unified real-program gate covers mismatch, resource, cancellation, and
+  stale-publication cleanup.
 - `runtime/nbe/` builds a compiler-independent runtime package. A real Agda
   Internal producer emits typed requests and definitions, and Stock
   Agda/MAlonzo/GHC links the evaluator plus pinned cctt Core into the final
@@ -119,16 +120,20 @@ The current and retained candidate evidence is:
 - `make verify-runtime-source-audit`: portable-grep clean-source PASS and
   malicious `System.Process` EXPECTED-REJECT locally; the target is also in
   both current-head macOS clean-clone aggregates;
-- current thin-dispatch head `f392f04`: macOS second-clone `make verify` PASS
-  in PR run `32764645788` and push run `32764640459`;
+- production three-lane head `6ddd859`: local Linux clean-clone `make verify`
+  PASS; Goal 1 run `32829677733`, Goal 3 run `32829677729`, and macOS
+  second-clone run `32829677728` all PASS;
+- `make verify-three-lane-e2e`: real native/packet/linked-runtime positives,
+  type and identity mismatch, fuel limit, TERM cancellation, and cross-lane
+  stale-publication cleanup PASS;
 - prototype `make verify-runtime-nbe-oracle`: 2 Agda modules typecheck and 5
   hand-authored runtime expectations PASS; explicitly not differential evidence;
 - Agda 2.9: 155 positive executions and 146 expected rejections PASS;
 - formal candidate differential: 8/8 groups and 42/42 rows PASS;
 - controlled O2 provisional performance: `ENGINEERING-PERFORMANCE-PASS`.
 
-Goals 1 and 2 are closed. Goal 3 independent acceptance, production
-three-lane integration and overall release validation remain open.
+Goals 1 and 2 and production three-lane integration are closed. Goal 3
+independent acceptance and overall release validation remain open.
 
 ## Reproduce the current root contract
 

@@ -13,7 +13,7 @@
 
 当前可用的是候选 CubicalChez 后端、checked typed residual/packet、编译期
 NbE adapter 候选与完整的安全拒绝门禁。当前目标 1、目标 2 已关闭，目标 3 的实现项与 clean-clone 全量验证已通过，但独立语义验收仍待完成；
-仓库已有最薄的三路决策/执行层，但真实生产 adapter、统一端到端和总体发布门禁未关闭前，不得将仓库标记为完整交付。
+真实三路 production adapter 与统一端到端已通过本地及远端 clean-clone；但目标 3 独立语义验收和总体发布门禁未关闭前，不得将仓库标记为完整交付。
 
 ## 目标数据流
 
@@ -159,6 +159,7 @@ make verify-runtime-nbe-agda-bridge
 make verify-runtime-nbe-differential
 make verify-runtime-nbe-final-malonzo
 make verify-three-lane-dispatch
+make verify-three-lane-e2e
 make verify-support-matrix
 make verify-nbe-adapter-spike
 make verify-nbe-production-candidate
@@ -179,7 +180,7 @@ make verify-v2-runtime
 - [`NATIVE_LANE.md`](docs/NATIVE_LANE.md)：目标 1 分类、工具链锁与产物审计。
 - [`RUNTIME_NBE_BOUNDARY.md`](docs/RUNTIME_NBE_BOUNDARY.md)：目标 3 最终进程与数据边界。
 - [`RUNTIME_NBE_ABI.md`](docs/RUNTIME_NBE_ABI.md)：目标 3 ABI、provider 和资源边界。
-- [`THREE_LANE_DISPATCH.md`](docs/THREE_LANE_DISPATCH.md)：最薄三路决策/执行层及其未关闭边界。
+- [`THREE_LANE_DISPATCH.md`](docs/THREE_LANE_DISPATCH.md)：真实三路 production 决策、adapter、产物与清理边界。
 - [`ENGINE_CONTRACT.md`](docs/ENGINE_CONTRACT.md)：引擎请求/结果与 typed residual 契约。
 - [`SUPPORT-MATRIX.md`](docs/SUPPORT-MATRIX.md)：支持、候选、残余与拒绝状态。
 - [`STATUS.md`](docs/STATUS.md)：当前实现与未交付项。
@@ -201,5 +202,5 @@ make verify-v2-runtime
 - `t11/t11b` 等已知残余不得进入无类型执行路径。
 - 编译器进程的默认 `nbe` provider lock 仍保持未选择和安全拒绝；它与目标 3
   最终进程 runtime 的独立 cctt lock 不同。后者已链接 vendored Core 的
-  `eval`/`quoteUnfold`。provider 与 ELF 门禁已通过；新的 t11/t11b 精确同输入
-  差分必须在锁定 CI 通过后再记为验收证据。
+  `eval`/`quoteUnfold`。provider、ELF 与 t11/t11b 精确同输入差分已在锁定 CI
+  通过；Goal 3 独立语义验收仍须单独完成。
