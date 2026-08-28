@@ -1,0 +1,44 @@
+{
+  "schema": 1,
+  "provider": {
+    "name": "cctt",
+    "repository": "https://github.com/AndrasKovacs/cctt.git",
+    "revision": "ba16f3758a322e9be77ada1da2b93f45d500192e",
+    "source_archive_sha256": "8d83adcb45ea827583f02fb6fb5c7d023ae97fdf6dd7816e9069ee45c67b6b5d",
+    "license": "MIT",
+    "license_file": "LICENSE.txt",
+    "license_sha256": "6d1af462b683165c1b10ed36a0d3c1e1b09f50924b30f16d85918402523210f9",
+    "package_file": "package.yaml",
+    "package_sha256": "a0f7e213b2e76b29994174b983187bd86ba8446b906ebd414cee45cd4e87208d",
+    "stack_file": "stack.yaml",
+    "stack_sha256": "c53b5f756f9491b5e1b419bbd7508cfc65293b28aeeea84c1899f960c1b9dd09"
+  },
+  "toolchain": {
+    "resolver": "nightly-2024-04-08",
+    "declared_ghc": "9.8.2"
+  },
+  "source_dependencies": [
+    {
+      "name": "strict-impl-params",
+      "repository": "https://github.com/AndrasKovacs/ghc-strict-implicit-params.git",
+      "revision": "fdef75e73c3354bd39b641e6b452b7087839e09b",
+      "source_archive_sha256": "8c2890366785a69a294f45885172282f5a4fb887274b78f20dd913cffbb62255",
+      "license": "MIT",
+      "license_file": "LICENSE.txt",
+      "license_sha256": "6d1af462b683165c1b10ed36a0d3c1e1b09f50924b30f16d85918402523210f9",
+      "package_sha256": "ca7246aff82aa64044c5be8b21f6fd757b4a8b84af31bbae630916c4257fc6f0",
+      "license_evidence": "licenses/strict-impl-params-LICENSE.txt"
+    },
+    {
+      "name": "primdata",
+      "repository": "https://github.com/AndrasKovacs/primdata.git",
+      "revision": "f7bd45a77fec79c29f4b7d506588d3cb4b0891f6",
+      "source_archive_sha256": "14206b7cb873a1eff106827bc7898015834d9a0e85e175b609c22305bcb41a7c",
+      "license": "MIT",
+      "license_file": "LICENSE.txt",
+      "license_sha256": "4d4d88b62671f4d6d3a23654fb373bd555556e3b66f65abaa7582871ae1635c2",
+      "package_sha256": "ec3c21be396ea261e547042dcdba1fd473bf82ce01752c6e1a347a35feaf4c8c",
+      "license_evidence": "licenses/primdata-LICENSE.txt"
+    }
+  ]
+}

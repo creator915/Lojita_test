@@ -1,0 +1,142 @@
+name: runtime-nbe-matrix
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "runtime-nbe/**"
+      - "ACCEPTANCE.md"
+      - ".github/workflows/runtime-nbe-matrix.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  declared-capability-matrix:
+    name: ${{ matrix.os }} / GHC 9.10.3
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 180
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: haskell-actions/setup@v2
+        with:
+          ghc-version: "9.10.3"
+          cabal-version: "3.14.2.0"
+          stack-version: "latest"
+
+      - name: Ensure Stack is available
+        shell: bash
+        run: |
+          if ! command -v stack >/dev/null 2>&1; then
+            if command -v ghcup >/dev/null 2>&1; then
+              ghcup install stack latest
+              ghcup set stack latest
+            elif command -v brew >/dev/null 2>&1; then
+              brew install haskell-stack
+            else
+              echo "no supported Stack installer is available" >&2
+              exit 1
+            fi
+          fi
+          stack --version
+
+      - name: Record clean commit identity
+        shell: bash
+        run: |
+          git status --porcelain --untracked-files=all
+          test -z "$(git status --porcelain --untracked-files=all)"
+          git rev-parse HEAD
+          ghc --version
+          cabal --version
+          stack --version
+
+      - name: Fetch locked Agda source
+        shell: bash
+        run: |
+          cabal user-config update \
+            --augment="repository hackage.haskell.org" \
+            --augment="  url: https://hackage.haskell.org/"
+          cabal update
+          git clone --filter=blob:none https://github.com/agda/agda.git build/agda-source
+          git -C build/agda-source checkout 3d04bacca842729f9c0869b9287256321b5f450f
+          mkdir -p build/runtime-nbe-deps
+          git clone --filter=blob:none \
+            https://github.com/AndrasKovacs/ghc-strict-implicit-params.git \
+            build/runtime-nbe-deps/strict-impl-params
+          git -C build/runtime-nbe-deps/strict-impl-params checkout \
+            fdef75e73c3354bd39b641e6b452b7087839e09b
+          git clone --filter=blob:none \
+            https://github.com/AndrasKovacs/primdata.git \
+            build/runtime-nbe-deps/primdata
+          git -C build/runtime-nbe-deps/primdata checkout \
+            f7bd45a77fec79c29f4b7d506588d3cb4b0891f6
+          agda_data_dir="$GITHUB_WORKSPACE/build/agda-source/src/data"
+          test -f "$agda_data_dir/lib/prim/Agda/Primitive.agda"
+          echo "Agda_datadir=$agda_data_dir" >> "$GITHUB_ENV"
+
+      - name: Verify portable audits and fresh provider slice
+        shell: bash
+        run: |
+          python3 -B runtime-nbe/verify-build-support.py
+          python3 -B runtime-nbe/verify-symbol-audit.py
+          python3 -B runtime-nbe/verify-agda-cctt-slice.py \
+            --agda-source build/agda-source \
+            --output build/runtime-nbe-fresh-slice \
+            --ghc "$(command -v ghc)"
+
+      - name: Build and verify formal provider
+        shell: bash
+        run: |
+          python3 -B runtime-nbe/verify-provider.py \
+            --provider-source build/runtime-nbe-fresh-slice/provider/provider-source \
+            --output build/runtime-nbe-provider
+
+      - name: Build integrated runtime and producer
+        shell: bash
+        run: |
+          python3 -B runtime-nbe/verify-integrated.py \
+            --agda-source build/agda-source \
+            --provider-source build/runtime-nbe-fresh-slice/provider/provider-source \
+            --strict-impl-params-source build/runtime-nbe-deps/strict-impl-params \
+            --primdata-source build/runtime-nbe-deps/primdata \
+            --output build/runtime-nbe-integrated \
+            --ghc "$(command -v ghc)"
+          python3 -B runtime-nbe/build-agda-adapter.py \
+            --agda-source build/agda-source \
+            --output build/runtime-nbe-agda-adapter \
+            --ghc "$(command -v ghc)" \
+            --offline
+
+      - name: Build and verify Stock MAlonzo runtime
+        shell: bash
+        run: |
+          python3 -B runtime-nbe/build-malonzo-runtime.py \
+            --integrated-output build/runtime-nbe-integrated \
+            --agda-source build/agda-source \
+            --output build/runtime-nbe-malonzo \
+            --ghc "$(command -v ghc)"
+          python3 -B runtime-nbe/verify-malonzo-runtime.py \
+            --output build/runtime-nbe-malonzo \
+            --agda-source build/agda-source \
+            --producer-bin build/runtime-nbe-agda-adapter/bin/agda-runtime-nbe-producer \
+            --integrated-bin build/runtime-nbe-integrated/bin/agda-cctt-runtime
+
+      - name: Verify every declared semantic scenario
+        shell: bash
+        run: |
+          python3 -B runtime-nbe/verify-capability-matrix.py \
+            --agda-source build/agda-source \
+            --producer-bin build/runtime-nbe-agda-adapter/bin/agda-runtime-nbe-producer \
+            --runtime-bin build/runtime-nbe-integrated/bin/agda-cctt-runtime \
+            --oracle-bin build/runtime-nbe-integrated/bin/agda-runtime-nbe-oracle \
+            --malonzo-bin build/runtime-nbe-malonzo/bin/runtime-nbe-client \
+            --integrated-output build/runtime-nbe-integrated \
+            --malonzo-output build/runtime-nbe-malonzo

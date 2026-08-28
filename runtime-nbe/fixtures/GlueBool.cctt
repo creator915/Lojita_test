@@ -1,0 +1,7 @@
+inductive Bool := false | true;
+
+gluedTrue : Glue Bool [] := glue true [];
+gluedFalse : Glue Bool [] := glue false [];
+
+glueTrue : Bool := unglue gluedTrue;
+glueFalse : Bool := unglue gluedFalse;

@@ -1,0 +1,20 @@
+inductive Bool := false | true;
+inductive Evidence (b : Bool) :=
+    approved (b = true)
+  | rejected (b = false);
+inductive Sg (A : U) (B : A -> U) := pair (a : A) (b : B a);
+
+approvedResult : Sg Bool (λ b. Evidence b) := pair true (approved refl);
+rejectedResult : Sg Bool (λ b. Evidence b) := pair false (rejected refl);
+
+approvedNormal : Sg Bool (λ b. Evidence b) :=
+  hcom 0 1 (Sg Bool (λ b. Evidence b)) [] approvedResult;
+rejectedNormal : Sg Bool (λ b. Evidence b) :=
+  hcom 0 1 (Sg Bool (λ b. Evidence b)) [] rejectedResult;
+
+decide (b : Bool) (e : Evidence b) : Bool := case e (_. Bool) [
+  approved p. true;
+  rejected p. false];
+
+decideApproved : Bool := decide true (approved refl);
+decideRejected : Bool := decide false (rejected refl);

@@ -1,0 +1,9 @@
+inductive Bool := false | true;
+
+runtimeActiveTrue : Bool :=
+  let active (i : I) : Bool := hcom 0 1 Bool [i=0 _. true] true;
+  active 0;
+
+runtimeActiveFalse : Bool :=
+  let active (i : I) : Bool := hcom 0 1 Bool [i=0 _. false] false;
+  active 0;

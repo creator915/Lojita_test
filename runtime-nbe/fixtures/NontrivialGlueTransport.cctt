@@ -1,0 +1,65 @@
+inductive Bool := false | true;
+
+not (x : Bool) : Bool := case x (_. Bool) [false. true; true. false];
+
+notnot (x : Bool) : not (not x) = x :=
+  case x (x. not (not x) = x) [false. refl; true. refl];
+
+isEquiv (A B : U) (f : A -> B) : U :=
+    (g : B -> A)
+  × (linv : (x : A) -> g (f x) = x)
+  × (rinv : (x : B) -> f (g x) = x)
+  × (coh : (x : A) -> (rinv (f x)) ={i. f (linv x i) = f x} refl);
+
+equiv (A B : U) : U := (f : A -> B) × isEquiv A B f;
+
+isIso (A B : U) (f : A -> B) : U :=
+    (g : B -> A)
+  × (linv : (x : A) -> g (f x) = x)
+  × (rinv : (x : B) -> f (g x) = x);
+
+iso (A B : U) : U := (f : A -> B) × isIso A B f;
+
+idEquiv (A : U) : equiv A A :=
+  (λ x. x, λ x. x, λ x _. x, λ x _. x, λ x _ _. x);
+
+fiber (A B : U) (f : A -> B) (b : B) : U := (x : A) × f x = b;
+
+fiberRefl (A B : U) (f : A -> B) (a : A) : fiber A B f (f a) :=
+  (a, refl);
+
+contractIsoFiber (A B : U) (is : iso A B) (a : A)
+  (fib : fiber A B is.f (is.f a)) : fib = fiberRefl A B is.f a :=
+  let sq (j k : I) : A :=
+      hcom k j [k=0 j. is.g (fib.2 j); k=1 _. fib.1] (is.linv (fib.1) k);
+  let sq2 (i k : I) : A :=
+      hcom 0 k [i=0. sq 1; i=1. is.linv a] (is.g (is.f a));
+  λ i.
+  (sq2 i 1,
+   λ j.
+   let aux : A :=
+     hcom j 0
+       [i=0. sq j; i=1. is.linv a; j=1. sq2 i]
+       (is.linv (sq2 i 1) j);
+   hcom 0 1
+     [i=0. is.rinv (fib.2 j); i=1. is.rinv (is.f a);
+      j=0. is.rinv (is.f (sq2 i 1)); j=1. is.rinv (is.f a)]
+     (is.f aux));
+
+isoToEquiv (A B : U) (is : iso A B) : equiv A B :=
+    is.f
+  , is.g
+  , λ a i. (contractIsoFiber A B is a (is.g (is.f a), is.rinv (is.f a)) i).1
+  , is.rinv
+  , λ a i. (contractIsoFiber A B is a (is.g (is.f a), is.rinv (is.f a)) i).2;
+
+notIso : iso Bool Bool := (not, not, notnot, notnot);
+
+notEquiv : equiv Bool Bool :=
+  isoToEquiv Bool Bool notIso;
+
+runtimeFamily (i : I) : U :=
+  Glue Bool [i=0. Bool, notEquiv; i=1. Bool, idEquiv Bool];
+
+transportTrue : Bool := coe 0 1 runtimeFamily true;
+transportFalse : Bool := coe 0 1 runtimeFamily false;

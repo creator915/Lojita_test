@@ -1,0 +1,13 @@
+resolver: nightly-2024-04-08
+
+packages:
+  - .
+
+extra-deps:
+  - git: https://github.com/AndrasKovacs/ghc-strict-implicit-params.git
+    commit: fdef75e73c3354bd39b641e6b452b7087839e09b
+  - git: https://github.com/AndrasKovacs/primdata.git
+    commit: f7bd45a77fec79c29f4b7d506588d3cb4b0891f6
+
+ghc-options:
+  "$everything": -split-sections

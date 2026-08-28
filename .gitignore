@@ -1,0 +1,13 @@
+.DS_Store
+.env
+.idea/
+.vscode/
+*.agdai
+*.hi
+*.o
+*.py[cod]
+__pycache__/
+build/
+dist/
+dist-newstyle/
+tmp/

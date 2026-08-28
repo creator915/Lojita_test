@@ -1,0 +1,40 @@
+cabal-version: 2.4
+name: agda-runtime-nbe-producer
+version: 0.1.0.0
+build-type: Simple
+license: MIT
+
+library
+  hs-source-dirs: src
+  exposed-modules:
+      RuntimeNbe.AgdaOracle
+      RuntimeNbe.AgdaProducer
+      RuntimeNbe.CleanOutput
+  build-depends:
+      Agda == 2.8.0
+    , base
+    , deepseq
+    , directory
+    , text
+  default-language: Haskell2010
+  ghc-options: -Wall -Werror -threaded
+
+executable agda-runtime-nbe-producer
+  hs-source-dirs: app
+  main-is: Main.hs
+  build-depends:
+      Agda == 2.8.0
+    , agda-runtime-nbe-producer
+    , base
+  default-language: Haskell2010
+  ghc-options: -Wall -Werror -threaded
+
+executable agda-runtime-nbe-oracle
+  hs-source-dirs: oracle-app
+  main-is: Main.hs
+  build-depends:
+      Agda == 2.8.0
+    , agda-runtime-nbe-producer
+    , base
+  default-language: Haskell2010
+  ghc-options: -Wall -Werror -threaded

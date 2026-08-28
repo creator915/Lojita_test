@@ -1,0 +1,20 @@
+inductive Bool := false | true;
+
+isEquiv (A B : U) (f : A -> B) : U :=
+    (g : B -> A)
+  × (linv : (x : A) -> g (f x) = x)
+  × (rinv : (x : B) -> f (g x) = x)
+  × (coh : (x : A) -> (rinv (f x)) ={i. f (linv x i) = f x} refl);
+
+equiv (A B : U) : U := (f : A -> B) × isEquiv A B f;
+
+idEquiv (A : U) : equiv A A :=
+  (λ x. x, λ x. x, λ x _. x, λ x _. x, λ x _ _. x);
+
+runtimeFamily (i : I) : U := Glue Bool [i=1. Bool, idEquiv Bool];
+
+gluedTrue : runtimeFamily 0 := glue true [];
+gluedFalse : runtimeFamily 0 := glue false [];
+
+transportTrue : Bool := coe 0 1 runtimeFamily gluedTrue;
+transportFalse : Bool := coe 0 1 runtimeFamily gluedFalse;

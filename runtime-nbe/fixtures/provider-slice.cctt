@@ -1,0 +1,4 @@
+import bool;
+
+transportFalse : Bool := coe 0 1 negEq false;
+transportTrue  : Bool := coe 0 1 negEq true;

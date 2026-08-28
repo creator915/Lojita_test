@@ -1,0 +1,20 @@
+cabal-version: 2.4
+name: agda-term-bridge
+version: 0.1.0.0
+build-type: Simple
+license: MIT
+
+executable agda-term-bridge
+  hs-source-dirs: src
+  main-is: Main.hs
+  other-modules: TermTransport.Bridge
+  build-depends:
+      Agda == 2.8.0
+    , base
+    , binary
+    , bytestring
+    , containers
+    , deepseq
+    , directory
+  default-language: Haskell2010
+  ghc-options: -Wall -Werror -threaded

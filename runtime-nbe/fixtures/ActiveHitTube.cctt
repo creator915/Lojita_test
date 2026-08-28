@@ -1,0 +1,14 @@
+higher inductive RuntimeHit :=
+    runtimeLeft
+  | runtimeRight
+  | runtimeSegment (i : I) [i=0. runtimeLeft; i=1. runtimeRight];
+
+forwardAt (i : I) : RuntimeHit :=
+  hcom 0 1 RuntimeHit [i=0 j. runtimeSegment j] runtimeLeft;
+
+forward : RuntimeHit := forwardAt 0;
+
+backwardAt (i : I) : RuntimeHit :=
+  hcom 1 0 RuntimeHit [i=0 j. runtimeSegment j] runtimeRight;
+
+backward : RuntimeHit := backwardAt 0;

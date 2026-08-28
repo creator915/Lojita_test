@@ -1,0 +1,9 @@
+{
+  "agda_cabal_sha256": "f85f3b10eb034687b07d073686ab97c947082eecc5ad268cbe20a4c774abcaae",
+  "license": "MIT",
+  "license_file": "LICENSE",
+  "license_sha256": "a07da943d7a2a735b2c9ad6cd3a7bdb8d4908e4160d43787c7365f871e30b7d9",
+  "repository": "https://github.com/agda/agda.git",
+  "revision": "3d04bacca842729f9c0869b9287256321b5f450f",
+  "tag": "v2.8.0"
+}

@@ -1,0 +1,17 @@
+{
+  "flatparse": {
+    "version": "0.5.3.1",
+    "source_sha256": "108a587dcdc249db3318ff3e2ce8ad509dcbba4dc311f3e6f76516c500ce95fa",
+    "cabal_sha256": "6bd4743829c42dcd241fc643e4761c94084983814344e3857a5f8e82018999d4"
+  },
+  "microlens": {
+    "version": "0.5.0.0",
+    "source_sha256": "04608e891112af94eb218b602e5edd5efa58bee9016764df914fa0bdb814bf65",
+    "cabal_sha256": "af10ae1d922c543b2ec7cbad0f92ce74572621146404bb341fa0cc016ebb59dc"
+  },
+  "microlens-th": {
+    "version": "0.4.3.18",
+    "source_sha256": "417ef41008ceab2a67bb008f364376b96224594e6e999499c083cab081b0ed8b",
+    "cabal_sha256": "c801ba99088b413be3e9eab7b5167ec7d0349bf1a69d663bb6a28ca611ecae0c"
+  }
+}
